@@ -1,0 +1,19 @@
+{
+  "name": "sbe-lims",
+  "version": "0.1.0",
+  "description": "ЛИМС как SBE-плагин: заявки лаборатории, результаты испытаний по сериям, расчёты (DSL), классификация, статистика, графики, протоколы (HTML/docx), дашборд.",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "node esbuild.config.mjs production"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "esbuild": "^0.28.1",
+    "obsidian": "^1.11.4",
+    "typescript": "^5.8.3"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true
+  }
+}

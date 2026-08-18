@@ -1,0 +1,93 @@
+/* Классы вьюхи ЛИМС (tn-lims-*) на семантических токенах дизайн-системы SBE. */
+
+.tn-lims-container {
+  padding: 12px;
+}
+
+.tn-lims-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.tn-lims-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.tn-lims-row {
+  cursor: pointer;
+}
+
+.tn-lims-method {
+  border: 1px solid var(--border-divider-default);
+  border-radius: 8px;
+  padding: 12px;
+  margin-top: 8px;
+}
+
+.tn-lims-method h4 {
+  margin: 0 0 8px 0;
+  font-size: 14px;
+}
+
+.tn-lims-series-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.tn-lims-chart {
+  max-width: 100%;
+  border: 1px solid var(--border-divider-default);
+  border-radius: 6px;
+  margin: 4px 0;
+}
+
+.tn-lims-modal {
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  padding: 12px;
+  margin-top: 12px;
+  background: var(--background-primary);
+}
+
+.tn-lims-modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.tn-lims-iframe {
+  width: 100%;
+  min-height: 400px;
+  border: 1px solid var(--border-divider-default);
+  border-radius: 6px;
+  background: #fff;
+}
+
+.tn-lims-stat {
+  padding: 8px 12px;
+  border: 1px solid var(--border-divider-default);
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.tn-lims-error {
+  color: var(--content-negative-default);
+  padding: 12px;
+}
+
+.tn-lims-input {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.tn-lims-meta {
+  color: var(--content-secondary-enabled);
+  font-size: var(--font-smaller);
+}
