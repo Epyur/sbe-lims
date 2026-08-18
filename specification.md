@@ -40,7 +40,7 @@ SBE-плагин «ЛИМС» для сотрудников лаборатори
 |---|---|---|---|
 | GET | `/requests/{id}/chart/{cfg_id}` | viewer | PNG (рендер по `methods.chart_configs`), используется в `<img src>` |
 | POST | `/requests/{id}/protocol` | editor+ | `{html, docx_base64, generated_at}` |
-| GET | `/dashboard?period=week\|month\|quarter\|year` | viewer | `{by_status, by_method:[{method_id,count}], total, completed_in_period, period}` |
+| GET | `/dashboard?period=week\|month\|quarter\|year` | viewer | `{by_status, by_method:[{method_id,count}], total, completed_in_period, period}` — ⚠️ **HЕ используется плагином** (дашборд вынесен, 2026-08-18), эндпоинт оставлен на сервере |
 
 ### Общие (все плагины lab-service)
 
@@ -73,7 +73,7 @@ Equipment{ id, code, name, location, responsible, last_calibration, next_calibra
 LabMember{ lab_id, email, role: 'lab_operator' | 'lab_admin' }
 MethodConfig{ formulas, classification, chart_configs, input_parameters }   // массивы JSON
 ProtocolResponse{ html, docx_base64, generated_at }
-DashboardData{ by_status, by_method, total, completed_in_period, period }
+// DashboardData удалён из клиента (2026-08-18) — см. серверный ответ /dashboard
 ```
 
 ## Расчёт на сервере (DSL)
@@ -94,21 +94,33 @@ DashboardData{ by_status, by_method, total, completed_in_period, period }
 
 ## Роли
 
-`viewer`(1) < `editor`(2) < `admin`(3) + лабораторный скоуп: `lab_members(lab_id, email, role)` —
-сотрудник лаборатории видит заявки своих методов. Ввод результатов — lab_operator+.
-Справочники испытателей/оборудования — editor+; методы-конфиги и `lab-members` — admin.
+`viewer`(1) < `editor`(2) < `admin`(3) [+ `superadmin`(4) — проектируется] + лабораторный
+скоуп: `lab_members(lab_id, email, role)` — `lab_operator`/`lab_admin` [+ `lab_auditor` —
+проектируется]. Сотрудник лаборатории видит заявки своих методов. Ввод результатов —
+lab_operator+. Справочники испытателей/оборудования — editor+; методы-конфиги и
+`lab-members` — admin. Будущая модель прав (согласована 2026-08-18): superadmin создаёт
+лаборатории и админов лабораторий; lab_admin управляет своей лабой (участники, методы,
+админы); lab_operator — испытания/ввод данных/движение заявки; lab_auditor — чтение всех
+разделов своей лабы.
 
 ## UI
 
-- Вьюха «ЛИМС» (тип `sbe-lims-view`, иконка flask-conical), вкладки:
-  - **Заявки** — таблица (Номер=customer_number первого метода, Объект, Статус, Методы);
-    карточка: статус (select для editor+), по каждому методу форма «параметр=значение» +
-    «Добавить серию» + «Рассчитать», таблица серий, графики (img PNG), «Сгенерировать
-    протокол» (HTML в iframe + «Скачать DOCX»).
-  - **Справочники** — методы (конфиги JSON-редактором, PATCH admin), испытатели, оборудование,
-    сотрудники лабораторий (lab-members).
-  - **Дашборд** — статусы/методы/период (week/month/quarter/year).
+- Вьюха «Лабораторная информационная менеджмент система СБЕ ПМиПИР» (тип `sbe-lims-view`,
+  иконка flask-conical), **фасад** (v0.1.1):
+  - **Шапка** 54px: титул модуля, crumb `{лаба} · {раздел}`, справа «＋ Создать».
+  - **Сайдбар-карточка** (320px, сворачивается в 64px): переключатель лабораторий
+    (из `GET /api/lab/labs`; скрыт, если лаборатория одна) + дерево навигации:
+    - «Заявки»: Все заявки, Очередь лаборатории;
+    - «Лаборатория»: Методы, Объекты, Результаты и протоколы, Испытатели, Оборудование,
+      Сотрудники.
+  - **Контент-карточка**: заголовок раздела + подзаголовок + **заглушка** (наполнение
+    подключается поэтапно; рабочие методы заявок/справочников сохранены в классе).
+- **Дашборд из плагина удалён** (2026-08-18): таб и метод отсутствуют; отдельный плагин-дашборд
+  будет использовать серверный `GET /dashboard`. Серверный эндпоинт не удалять.
 - Настройки: `apiUrl` + раздел «Права доступа» (роли + общий доступ, admin).
+- **Запланировано (наполнение)**: подключить к узлам дерева заявки (список+карточка),
+  очередь, методы, объекты, результаты/протоколы, справочники; затем бэкенд прав
+  (superadmin/lab_auditor/фильтрация `/labs`).
 
 ## Локальные данные
 

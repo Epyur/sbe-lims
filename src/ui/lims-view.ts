@@ -1,6 +1,6 @@
 import { ItemView, Notice, WorkspaceLeaf } from 'obsidian';
 import type SbeLimsPlugin from '../main';
-import type { LimsRequest, MeasurementResult, MethodConfig } from '../types/lims';
+import type { LimsRequest, MeasurementResult, MethodConfig, Lab } from '../types/lims';
 import { errorMessage } from '../../../sbe-core/src/utils/errors';
 
 export const SBE_LIMS_VIEW_TYPE = 'sbe-lims-view';
@@ -12,13 +12,86 @@ const STATUS_LABELS: Record<string, string> = {
   completed: '✅ Завершена',
 };
 
-type LimsTab = 'requests' | 'refs' | 'dashboard';
+/** Ключи разделов дерева навигации (фасад; наполнение подключается позже). */
+type NavKey =
+  | 'requests'
+  | 'queue'
+  | 'methods'
+  | 'objects'
+  | 'results'
+  | 'inventors'
+  | 'equipment'
+  | 'lab-members';
+
+interface NavItem {
+  key: NavKey;
+  label: string;
+  sub: string;
+}
+
+interface NavGroup {
+  id: string;
+  icon: string;
+  label: string;
+  items: NavItem[];
+}
+
+/** Группы дерева навигации (по мокапу tn-center, адаптировано под данные lab-service). */
+const NAV_GROUPS: NavGroup[] = [
+  {
+    id: 'req',
+    icon: '📋',
+    label: 'Заявки',
+    items: [
+      { key: 'requests', label: 'Все заявки', sub: 'Доступные вам заявки' },
+      { key: 'queue', label: 'Очередь лаборатории', sub: 'Заявки, ещё не взятые в работу' },
+    ],
+  },
+  {
+    id: 'lab',
+    icon: '🧪',
+    label: 'Лаборатория',
+    items: [
+      { key: 'methods', label: 'Методы', sub: 'Каталог методов испытаний' },
+      { key: 'objects', label: 'Объекты', sub: 'Объекты исследования' },
+      { key: 'results', label: 'Результаты и протоколы', sub: 'Завершённые заявки' },
+      { key: 'inventors', label: 'Испытатели', sub: 'Справочник' },
+      { key: 'equipment', label: 'Оборудование', sub: 'Справочник' },
+      { key: 'lab-members', label: 'Сотрудники', sub: 'Состав и права лаборатории' },
+    ],
+  },
+];
+
+const PAGE_META: Record<NavKey, { title: string; sub: string }> = {
+  requests: { title: 'Все заявки', sub: 'Доступные вам заявки' },
+  queue: { title: 'Очередь лаборатории', sub: 'Заявки, ещё не взятые в работу' },
+  methods: { title: 'Методы', sub: 'Каталог методов испытаний' },
+  objects: { title: 'Объекты', sub: 'Объекты исследования' },
+  results: { title: 'Результаты и протоколы', sub: 'Завершённые заявки' },
+  inventors: { title: 'Испытатели', sub: 'Справочник' },
+  equipment: { title: 'Оборудование', sub: 'Справочник' },
+  'lab-members': { title: 'Сотрудники', sub: 'Состав и права лаборатории' },
+};
 
 export class LimsView extends ItemView {
   plugin: SbeLimsPlugin;
-  private containerElContent!: HTMLElement;
-  private tab: LimsTab = 'requests';
+
+  private rootEl!: HTMLElement;
+  private navEl!: HTMLElement;
+  private contentBoxEl!: HTMLElement;
+  private pageTitleEl!: HTMLElement;
+  private pageSubEl!: HTMLElement;
+  private crumbEl!: HTMLElement;
+  private labBarEl!: HTMLElement;
+  private labSwitchEl!: HTMLSelectElement;
+
+  private key: NavKey = 'requests';
+  private labId: number | null = null;
+  private collapsed = false;
+  private labs: Lab[] = [];
   private myRole = '';
+
+  private bodyEl!: HTMLElement;
 
   constructor(leaf: WorkspaceLeaf, plugin: SbeLimsPlugin) {
     super(leaf);
@@ -30,7 +103,7 @@ export class LimsView extends ItemView {
   }
 
   getDisplayText(): string {
-    return 'ЛИМС';
+    return 'Лабораторная информационная менеджмент система СБЕ ПМиПИР';
   }
 
   getIcon(): string {
@@ -40,50 +113,166 @@ export class LimsView extends ItemView {
   async onOpen(): Promise<void> {
     const container = this.contentEl;
     container.addClass('tn-lims-container');
-    this.containerElContent = container.createDiv();
-    this.render();
+    this.rootEl = container.createDiv({ cls: 'tn-lims-app' });
+
+    this.buildShell();
+    await this.initShell();
   }
 
   refresh(): void {
-    this.render();
+    void this.renderPage();
   }
 
-  private render(): void {
-    const container = this.containerElContent;
-    container.empty();
+  // ---- Каркас ----
 
-    // вкладки
-    const tabs = container.createDiv({ cls: 'tn-lims-tabs' });
-    const tabBtn = (id: LimsTab, label: string): void => {
-      const b = tabs.createEl('button', { cls: 'tn-nav-item', text: label });
-      if (id === this.tab) b.addClass('active');
-      b.addEventListener('click', () => {
-        this.tab = id;
-        this.render();
+  private buildShell(): void {
+    // шапка
+    const topbar = this.rootEl.createDiv({ cls: 'tn-lims-topbar' });
+    topbar.createDiv({ cls: 'tn-lims-module-title', text: 'Лабораторная информационная менеджмент система СБЕ ПМиПИР' });
+    this.crumbEl = topbar.createDiv({ cls: 'tn-lims-crumb' });
+    const spacer = topbar.createDiv({ cls: 'tn-lims-spacer' });
+    spacer.empty();
+    const createBtn = topbar.createEl('button', { text: '＋ Создать', cls: 'tn-nav-item tn-lims-create' });
+    createBtn.addEventListener('click', () => {
+      new Notice('Фасад: создание будет подключено на этапе наполнения');
+    });
+
+    // главная область: сайдбар + контент
+    const main = this.rootEl.createDiv({ cls: 'tn-lims-main' });
+
+    const sidebar = main.createDiv({ cls: 'tn-lims-sidebar' });
+
+    // сворачивание
+    const collapseBtn = sidebar.createDiv({ cls: 'tn-lims-collapse' });
+    collapseBtn.createSpan({ text: '▧' });
+    this.collapseLabel = collapseBtn.createSpan({ cls: 'tn-lims-collapse-lbl', text: 'Свернуть' });
+    collapseBtn.addEventListener('click', () => this.toggleCollapse());
+
+    // переключатель лабораторий
+    this.labBarEl = sidebar.createDiv({ cls: 'tn-lims-labbar' });
+    this.labBarEl.createDiv({ cls: 'tn-lims-nav-label', text: 'ЛАБОРАТОРИЯ' });
+    this.labSwitchEl = this.labBarEl.createEl('select', { cls: 'tn-lims-lab-select' });
+    this.labSwitchEl.addEventListener('change', () => {
+      this.labId = Number(this.labSwitchEl.value) || null;
+      void this.renderPage();
+    });
+
+    // дерево навигации
+    this.navEl = sidebar.createDiv({ cls: 'tn-lims-nav' });
+    this.buildNav();
+
+    const content = main.createDiv({ cls: 'tn-lims-content' });
+    this.pageTitleEl = content.createEl('h1', { cls: 'tn-lims-page-title' });
+    this.pageSubEl = content.createDiv({ cls: 'tn-lims-page-sub' });
+    this.contentBoxEl = content.createDiv({ cls: 'tn-lims-view' });
+    this.bodyEl = this.contentBoxEl.createDiv();
+  }
+
+  private collapseLabel!: HTMLElement;
+
+  private buildNav(): void {
+    this.navEl.empty();
+    for (const group of NAV_GROUPS) {
+      const grpBtn = this.navEl.createEl('button', { cls: 'tn-lims-grp' });
+      grpBtn.createSpan({ cls: 'tn-lims-grp-ico', text: group.icon });
+      grpBtn.createSpan({ cls: 'tn-lims-grp-lbl', text: group.label });
+      grpBtn.createSpan({ cls: 'tn-lims-grp-chev', text: '▶' });
+      grpBtn.addEventListener('click', () => {
+        grpBtn.classList.toggle('open');
+        grpBtn.classList.toggle('active');
+        this.syncOpenGroups();
       });
-    };
-    tabBtn('requests', '📋 Заявки');
-    tabBtn('refs', '📚 Справочники');
-    tabBtn('dashboard', '📊 Дашборд');
 
-    this.bodyEl = container.createDiv({ cls: 'tn-lims-body' });
-    switch (this.tab) {
-      case 'requests':
-        void this.renderRequests();
-        break;
-      case 'refs':
-        void this.renderRefs();
-        break;
-      case 'dashboard':
-        void this.renderDashboard();
-        break;
+      const submenu = this.navEl.createDiv({ cls: 'tn-lims-submenu' });
+      for (const item of group.items) {
+        const a = submenu.createEl('a', { cls: 'tn-lims-nav-item', attr: { href: '#' } });
+        a.createSpan({ cls: 'tn-lims-nav-lbl', text: item.label });
+        a.dataset.key = item.key;
+        a.addEventListener('click', (ev) => {
+          ev.preventDefault();
+          this.key = item.key;
+          this.syncNavActive();
+          void this.renderPage();
+        });
+      }
+    }
+
+    const firstGroup = this.navEl.querySelector('.tn-lims-grp');
+    if (firstGroup) {
+      firstGroup.classList.add('open', 'active');
+    }
+    this.syncNavActive();
+  }
+
+  private syncOpenGroups(): void {
+    // актуальное состояние расставала классов ведёт buildNav по кликам; здесь оставляем
+    // группы открытыми, чтобы подменю было видно (фасад).
+  }
+
+  private toggleCollapse(): void {
+    this.collapsed = !this.collapsed;
+    this.rootEl.classList.toggle('collapsed', this.collapsed);
+    if (this.collapseLabel) {
+      this.collapseLabel.setText(this.collapsed ? 'Развернуть' : 'Свернуть');
     }
   }
 
-  private bodyEl!: HTMLElement;
+  private syncNavActive(): void {
+    this.navEl.querySelectorAll('.tn-lims-nav-item').forEach((el) => {
+      const navEl = el as HTMLElement;
+      navEl.classList.toggle('active', navEl.dataset.key === this.key);
+    });
+  }
 
-  // ---- Заявки ----
+  // ---- Инициализация ----
 
+  private async initShell(): Promise<void> {
+    try {
+      const perm = await this.plugin.syncService.getMyPermission();
+      this.myRole = perm.role;
+      const data = await this.plugin.syncService.listLabs();
+      this.labs = data;
+    } catch (e: unknown) {
+      this.myRole = '';
+      this.labs = [];
+    }
+
+    this.labBarEl.style.display = this.labs.length <= 1 ? 'none' : '';
+    this.labSwitchEl.empty();
+    for (const lab of this.labs) {
+      this.labSwitchEl.createEl('option', { value: String(lab.id), text: lab.name || lab.code });
+    }
+    if (this.labSwitchEl.options.length > 0) {
+      this.labId = this.labs[0].id;
+      this.labSwitchEl.value = String(this.labId);
+    }
+
+    this.syncNavActive();
+    await this.renderPage();
+  }
+
+  // ---- Контент (фасад: заглушки) ----
+
+  private currentLabName(): string {
+    const lab = this.labs.find(l => l.id === this.labId);
+    return lab ? lab.name || lab.code : '—';
+  }
+
+  private async renderPage(): Promise<void> {
+    const meta = PAGE_META[this.key];
+    this.crumbEl.setText(`${this.currentLabName()} · ${meta.title}`);
+    this.pageTitleEl.setText(meta.title);
+    this.pageSubEl.setText(meta.sub);
+
+    this.bodyEl.empty();
+    this.bodyEl.createDiv({ cls: 'tn-lims-stub' }).setText(
+      `Раздел «${meta.title}» — фасад готов, наполнение будет подключено следующим этапом.`
+    );
+  }
+
+  // ---- (наполнение: методы прошлой вьюхи, будут подключены к узлам дерева) ----
+
+  /** Список заявок (возврат из карточки). */
   private async renderRequests(): Promise<void> {
     this.bodyEl.empty();
     this.bodyEl.createDiv({ cls: 'tn-req-meta', text: 'Загрузка…' });
@@ -312,155 +501,5 @@ export class LimsView extends ItemView {
 
   private get canEditStatus(): boolean {
     return this.myRole !== '';
-  }
-
-  // ---- Справочники ----
-
-  private async renderRefs(): Promise<void> {
-    this.bodyEl.empty();
-    this.bodyEl.createDiv({ cls: 'tn-req-meta', text: 'Загрузка…' });
-    try {
-      const [inventors, equipment, methods] = await Promise.all([
-        this.plugin.syncService.listInventors(),
-        this.plugin.syncService.listEquipment(),
-        Promise.resolve(this.plugin.methods),
-      ]);
-      this.bodyEl.empty();
-
-      // Испытатели
-      const invSection = this.bodyEl.createDiv({ cls: 'tn-lims-method' });
-      invSection.createEl('h4', { text: 'Испытатели' });
-      const invAdd = invSection.createDiv({ cls: 'tn-req-flex' });
-      const invName = invAdd.createEl('input', { attr: { type: 'text', placeholder: 'ФИО' }, cls: 'tn-req-input' });
-      const invEmail = invAdd.createEl('input', { attr: { type: 'text', placeholder: 'email' }, cls: 'tn-req-input' });
-      const invBtn = invAdd.createEl('button', { text: '➕', cls: 'tn-btn tn-btn-primary' });
-      invBtn.addEventListener('click', async () => {
-        if (!invName.value.trim()) { new Notice('Введите ФИО'); return; }
-        try {
-          await this.plugin.syncService.createInventor({ name: invName.value.trim(), email: invEmail.value.trim() });
-          new Notice('Испытатель добавлен');
-          void this.renderRefs();
-        } catch (e: unknown) {
-          new Notice(`Ошибка: ${errorMessage(e)}`);
-        }
-      });
-      const invTable = invSection.createEl('table', { cls: 'tn-table' });
-      const h = invTable.createEl('thead').createEl('tr');
-      h.createEl('th').setText('ФИО');
-      h.createEl('th').setText('Email');
-      for (const i of inventors) {
-        const tr = invTable.createEl('tbody').createEl('tr');
-        tr.createEl('td').setText(i.name);
-        tr.createEl('td').setText(i.email || '—');
-      }
-
-      // Оборудование
-      const eqSection = this.bodyEl.createDiv({ cls: 'tn-lims-method' });
-      eqSection.createEl('h4', { text: 'Оборудование' });
-      const eqAdd = eqSection.createDiv({ cls: 'tn-req-flex' });
-      const eqCode = eqAdd.createEl('input', { attr: { type: 'text', placeholder: 'Код' }, cls: 'tn-req-input' });
-      const eqName = eqAdd.createEl('input', { attr: { type: 'text', placeholder: 'Название' }, cls: 'tn-req-input' });
-      const eqBtn = eqAdd.createEl('button', { text: '➕', cls: 'tn-btn tn-btn-primary' });
-      eqBtn.addEventListener('click', async () => {
-        if (!eqCode.value.trim()) { new Notice('Введите код'); return; }
-        try {
-          await this.plugin.syncService.createEquipment({ code: eqCode.value.trim(), name: eqName.value.trim() });
-          new Notice('Оборудование добавлено');
-          void this.renderRefs();
-        } catch (e: unknown) {
-          new Notice(`Ошибка: ${errorMessage(e)}`);
-        }
-      });
-      const eqTable = eqSection.createEl('table', { cls: 'tn-table' });
-      const eh = eqTable.createEl('thead').createEl('tr');
-      eh.createEl('th').setText('Код');
-      eh.createEl('th').setText('Название');
-      for (const e of equipment) {
-        const tr = eqTable.createEl('tbody').createEl('tr');
-        tr.createEl('td').setText(e.code);
-        tr.createEl('td').setText(e.name || '—');
-      }
-
-      // Методы (конфиги)
-      const mSection = this.bodyEl.createDiv({ cls: 'tn-lims-method' });
-      mSection.createEl('h4', { text: 'Методы (формулы/классификация/графики)' });
-      for (const m of methods) {
-        const mRow = mSection.createDiv({ cls: 'tn-lims-method' });
-        mRow.createEl('b', { text: `${m.code}${m.name ? ' — ' + m.name : ''}` });
-        const editBtn = mRow.createEl('button', { text: '⚙ Редактировать', cls: 'tn-btn tn-btn-ghost' });
-        editBtn.addEventListener('click', () => this.renderMethodConfig(m.id, mRow));
-      }
-    } catch (e: unknown) {
-      this.bodyEl.empty();
-      this.bodyEl.createDiv({ cls: 'tn-lims-error' }).setText(`Ошибка: ${errorMessage(e)}`);
-    }
-  }
-
-  /** Форма конфигурации метода (formulas/classification/chart_configs — JSON). */
-  private renderMethodConfig(methodId: number, container: HTMLElement): void {
-    const cfg = this.methodConfigOf(methodId);
-    const wrap = container.createDiv({ cls: 'tn-lims-method' });
-
-    const formulasLabel = wrap.createEl('label', { text: 'Формулы (JSON-массив)', cls: 'tn-req-label' });
-    const formulasInput = wrap.createEl('textarea', { cls: 'tn-req-textarea' });
-    formulasInput.value = JSON.stringify(cfg.formulas, null, 2);
-
-    const classLabel = wrap.createEl('label', { text: 'Классификация (JSON-массив)', cls: 'tn-req-label' });
-    const classInput = wrap.createEl('textarea', { cls: 'tn-req-textarea' });
-    classInput.value = JSON.stringify(cfg.classification, null, 2);
-
-    const chartLabel = wrap.createEl('label', { text: 'Графики (JSON-массив)', cls: 'tn-req-label' });
-    const chartInput = wrap.createEl('textarea', { cls: 'tn-req-textarea' });
-    chartInput.value = JSON.stringify(cfg.chart_configs, null, 2);
-
-    const saveBtn = wrap.createEl('button', { text: '💾 Сохранить конфиг', cls: 'tn-btn tn-btn-primary' });
-    saveBtn.addEventListener('click', async () => {
-      try {
-        await this.plugin.syncService.updateMethodConfig(methodId, {
-          formulas: JSON.parse(formulasInput.value || '[]'),
-          classification: JSON.parse(classInput.value || '[]'),
-          chart_configs: JSON.parse(chartInput.value || '[]'),
-        });
-        new Notice('Конфиг метода сохранён');
-        await this.plugin.refreshMethods();
-        this.render();
-      } catch (e: unknown) {
-        new Notice(`Ошибка: ${errorMessage(e)}`);
-      }
-    });
-  }
-
-  // ---- Дашборд ----
-
-  private async renderDashboard(): Promise<void> {
-    this.bodyEl.empty();
-    this.bodyEl.createDiv({ cls: 'tn-req-meta', text: 'Загрузка…' });
-    try {
-      const data = await this.plugin.syncService.getDashboard('month');
-      this.bodyEl.empty();
-      this.bodyEl.createEl('h4', { text: `Дашборд (${data.period})` });
-      const statDiv = this.bodyEl.createDiv({ cls: 'tn-req-flex' });
-      for (const [k, v] of Object.entries(data.by_status)) {
-        statDiv.createDiv({ cls: 'tn-lims-stat' }).setText(`${STATUS_LABELS[k] || k}: ${v}`);
-      }
-      statDiv.createDiv({ cls: 'tn-lims-stat' }).setText(`Всего: ${data.total}`);
-      statDiv.createDiv({ cls: 'tn-lims-stat' }).setText(`Завершено за период: ${data.completed_in_period}`);
-
-      if (data.by_method.length > 0) {
-        this.bodyEl.createEl('h4', { text: 'По методам' });
-        const table = this.bodyEl.createEl('table', { cls: 'tn-table' });
-        const h = table.createEl('thead').createEl('tr');
-        h.createEl('th').setText('Метод');
-        h.createEl('th').setText('Заявок');
-        for (const mc of data.by_method) {
-          const tr = table.createEl('tbody').createEl('tr');
-          tr.createEl('td').setText(this.methodName(mc.method_id));
-          tr.createEl('td').setText(String(mc.count));
-        }
-      }
-    } catch (e: unknown) {
-      this.bodyEl.empty();
-      this.bodyEl.createDiv({ cls: 'tn-lims-error' }).setText(`Ошибка: ${errorMessage(e)}`);
-    }
   }
 }

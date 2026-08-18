@@ -1,5 +1,16 @@
 /** Типы плагина «ЛИМС» (sbe-lims). Модель совместима с lab-service. */
 
+/** Лаборатория. */
+export interface Lab {
+  id: number;
+  code: string;
+  name: string;
+  description: string;
+  type: string;
+  created_at: string;
+  updated_at: string;
+}
+
 /** Заявка (видимая лаборатории). */export interface LimsRequest {
   id: number;
   number_seq: number;
@@ -116,13 +127,4 @@ export interface ProtocolResponse {
   html: string;
   docx_base64: string;
   generated_at: string;
-}
-
-/** Дашборд. */
-export interface DashboardData {
-  by_status: Record<string, number>;
-  by_method: Array<{ method_id: number; count: number }>;
-  total: number;
-  completed_in_period: number;
-  period: string;
 }

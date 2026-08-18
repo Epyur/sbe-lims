@@ -441,8 +441,267 @@
 /* Классы вьюхи ЛИМС (tn-lims-*) на семантических токенах дизайн-системы SBE. */
 
 .tn-lims-container {
-  padding: 12px;
+  padding: 0;
+  height: 100%;
 }
+
+/* ================= Фасад (каркас: шапка + сайдбар + контент) ================= */
+
+.tn-lims-app {
+  --accent: #E11B17;
+  --accent-soft: #FDECEB;
+  --bg: #F3F5F7;
+  --surface: #FFFFFF;
+  --border: #E7EAEF;
+  --muted: #667387;
+  --active-nav: #F9F9FA;
+  --radius: 16px;
+  --radius-sm: 10px;
+
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 24px;
+  background: var(--bg);
+  color: #171725;
+  box-sizing: border-box;
+  font-size: 14px;
+}
+
+/* шапка 54px */
+.tn-lims-topbar {
+  height: 54px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+}
+
+.tn-lims-module-title {
+  font-size: 17px;
+  font-weight: 700;
+  color: #171725;
+  white-space: nowrap;
+}
+
+.tn-lims-crumb {
+  color: var(--muted);
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tn-lims-spacer {
+  flex: 1;
+}
+
+.tn-lims-create {
+  color: var(--accent);
+  font-weight: 700;
+  font-size: 15px;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+
+.tn-lims-create:hover {
+  background: var(--accent-soft);
+}
+
+/* тело: сайдбар и контент — белые карточки */
+.tn-lims-main {
+  flex: 1;
+  display: flex;
+  gap: 16px;
+  min-height: 0;
+}
+
+.tn-lims-sidebar {
+  width: 320px;
+  min-width: 320px;
+  background: var(--surface);
+  border-radius: var(--radius);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  transition: width .2s, min-width .2s;
+}
+
+.tn-lims-app.collapsed .tn-lims-sidebar {
+  width: 64px;
+  min-width: 64px;
+}
+
+.tn-lims-collapse {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 18px;
+  color: var(--muted);
+  font-size: 13px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+}
+
+.tn-lims-collapse:hover {
+  color: #171725;
+}
+
+.tn-lims-app.collapsed .tn-lims-collapse .tn-lims-collapse-lbl {
+  display: none;
+}
+
+/* переключатель лабораторий */
+.tn-lims-labbar {
+  padding: 6px 10px 2px;
+  border-bottom: 1px solid var(--border);
+}
+
+.tn-lims-nav-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  color: var(--muted);
+  padding: 10px 8px 4px;
+}
+
+.tn-lims-lab-select {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 7px 10px;
+  font-size: 13px;
+  font-family: inherit;
+  background: var(--surface);
+  color: #171725;
+}
+
+.tn-lims-app.collapsed .tn-lims-labbar {
+  display: none;
+}
+
+/* дерево навигации */
+.tn-lims-nav {
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px 10px 16px;
+}
+
+.tn-lims-grp {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 10px;
+  border-radius: var(--radius-sm);
+  color: #171725;
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 2px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-family: inherit;
+  text-align: left;
+}
+
+.tn-lims-grp:hover {
+  background: var(--bg);
+}
+
+.tn-lims-grp .tn-lims-grp-chev {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 10px;
+  transition: transform .15s;
+}
+
+.tn-lims-grp.open .tn-lims-grp-chev {
+  transform: rotate(90deg);
+}
+
+.tn-lims-grp.open {
+  color: var(--accent);
+}
+
+.tn-lims-submenu {
+  display: block;
+  padding-left: 14px;
+}
+
+.tn-lims-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  border-radius: var(--radius-sm);
+  color: #171725;
+  text-decoration: none;
+  margin-bottom: 2px;
+  white-space: nowrap;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.tn-lims-nav-item:hover {
+  background: var(--bg);
+}
+
+.tn-lims-nav-item.active {
+  background: var(--active-nav);
+  color: #171725;
+  font-weight: 600;
+}
+
+.tn-lims-app.collapsed .tn-lims-nav-label,
+.tn-lims-app.collapsed .tn-lims-grp .tn-lims-grp-lbl,
+.tn-lims-app.collapsed .tn-lims-nav-item .tn-lims-nav-lbl,
+.tn-lims-app.collapsed .tn-lims-submenu,
+.tn-lims-app.collapsed .tn-lims-grp .tn-lims-grp-chev {
+  display: none;
+}
+
+.tn-lims-app.collapsed .tn-lims-grp,
+.tn-lims-app.collapsed .tn-lims-nav-item {
+  padding: 9px;
+  justify-content: center;
+}
+
+/* контент */
+.tn-lims-content {
+  flex: 1;
+  background: var(--surface);
+  border-radius: var(--radius);
+  padding: 24px;
+  overflow-y: auto;
+  min-width: 0;
+}
+
+.tn-lims-page-title {
+  font-size: 18px;
+  margin: 0 0 4px 0;
+}
+
+.tn-lims-page-sub {
+  color: var(--muted);
+  font-size: 13px;
+  margin-bottom: 20px;
+}
+
+.tn-lims-stub {
+  padding: 48px 20px;
+  text-align: center;
+  color: var(--muted);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  font-size: 14px;
+}
+
+/* ================= Старые классы вьюхи (заявки/справочники) ================= */
 
 .tn-lims-tabs {
   display: flex;

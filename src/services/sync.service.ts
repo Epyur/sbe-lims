@@ -3,9 +3,9 @@ import { getService } from '../../../sbe-core/src/bridge';
 import { errorMessage } from '../../../sbe-core/src/utils/errors';
 import type {
   AggregatedResult,
-  DashboardData,
   Equipment,
   Inventor,
+  Lab,
   LabMember,
   LimsRequest,
   MeasurementResult,
@@ -165,6 +165,24 @@ export class LimsSyncService {
 
   // ---- Справочники ----
 
+  /** Лаборатории (для переключателя в шапке фасада). */
+  async listLabs(): Promise<Lab[]> {
+    const token = await this.getToken();
+    const res = await this.request({
+      url: `${this.baseUrl}/api/lab/labs`,
+      method: 'GET',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    this.assertOk(res);
+    try {
+      const data = JSON.parse(res.text) as { labs?: Lab[] };
+      return Array.isArray(data.labs) ? data.labs : [];
+    } catch (e: unknown) {
+      console.warn('ЛИМС: не JSON в ответе labs:', errorMessage(e));
+      return [];
+    }
+  }
+
   async listInventors(): Promise<Inventor[]> {
     const token = await this.getToken();
     const res = await this.request({
@@ -277,22 +295,6 @@ export class LimsSyncService {
     } catch (e: unknown) {
       console.warn('ЛИМС: не JSON в ответе protocol:', errorMessage(e));
       throw new Error('Сервер вернул не JSON при генерации протокола');
-    }
-  }
-
-  async getDashboard(period: string): Promise<DashboardData> {
-    const token = await this.getToken();
-    const res = await this.request({
-      url: `${this.baseUrl}/api/lab/dashboard?period=${encodeURIComponent(period)}`,
-      method: 'GET',
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    this.assertOk(res);
-    try {
-      return JSON.parse(res.text) as DashboardData;
-    } catch (e: unknown) {
-      console.warn('ЛИМС: не JSON в ответе dashboard:', errorMessage(e));
-      return { by_status: {}, by_method: [], total: 0, completed_in_period: 0, period };
     }
   }
 
