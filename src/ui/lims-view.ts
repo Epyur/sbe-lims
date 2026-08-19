@@ -292,7 +292,7 @@ export class LimsView extends ItemView {
       for (const r of requests) {
         const row = tbody.createEl('tr', { cls: 'tn-lims-row' });
         row.addEventListener('click', () => this.renderRequestDetail(r));
-        row.createEl('td').setText(r.customer_number || '—');
+        row.createEl('td').setText(r.lab_number || '—');
         row.createEl('td').setText(r.title || `#${r.id}`);
         row.createEl('td').setText(STATUS_LABELS[r.status] || r.status);
         row.createEl('td').setText(this.methodName(r.method_id));
@@ -318,7 +318,7 @@ export class LimsView extends ItemView {
     const back = this.bodyEl.createEl('button', { text: '← Назад', cls: 'tn-btn tn-btn-ghost' });
     back.addEventListener('click', () => void this.renderRequests());
 
-    this.bodyEl.createEl('h3', { text: `№ ${req.number_seq}/${req.number_year} — ${req.title || 'без названия'}` });
+    this.bodyEl.createEl('h3', { text: `№ ${req.lab_number || `${req.number_seq}/${req.number_year}`} — ${req.title || 'без названия'}` });
 
     const meta = this.bodyEl.createDiv({ cls: 'tn-lims-meta tn-lims-mb8' });
     meta.setText(`Статус: ${STATUS_LABELS[req.status] || req.status} · Заказчик: ${req.owner_email || '—'}`);
@@ -451,7 +451,7 @@ export class LimsView extends ItemView {
   private showHtmlModal(req: LimsRequest, html: string): HTMLElement {
     const modal = this.bodyEl.createDiv({ cls: 'tn-lims-modal' });
     const head = modal.createDiv({ cls: 'tn-lims-modal-head' });
-    head.createEl('b', { text: `Протокол № ${req.number_seq}/${req.number_year}` });
+    head.createEl('b', { text: `Протокол № ${req.lab_number || `${req.number_seq}/${req.number_year}`}` });
     const close = head.createEl('button', { text: '✖', cls: 'tn-btn tn-btn-ghost' });
     close.addEventListener('click', () => modal.remove());
     const iframe = modal.createEl('iframe', { attr: { sandbox: '' }, cls: 'tn-lims-iframe' });
