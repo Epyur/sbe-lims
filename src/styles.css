@@ -350,3 +350,23 @@
   color: var(--content-secondary-enabled);
   font-size: var(--font-smaller);
 }
+
+.tn-lims-p24 {
+  padding: 24px;
+}
+
+.tn-lims-mb8 {
+  margin-bottom: 8px;
+}
+
+.tn-lims-select {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.tn-lims-flex {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}

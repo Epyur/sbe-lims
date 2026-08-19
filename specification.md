@@ -50,9 +50,12 @@ SBE-плагин «ЛИМС» для сотрудников лаборатори
 ## Модели (JSON, соответствуют Go-структурам lab-service)
 
 ```ts
+// 1 заявка = 1 метод (декомпозиция 2026-08-18, см. lab-service/AGENTS.md) — method_id/
+// customer_number/lab_number прямо на заявке, без массива methods[].
 LimsRequest{ id, number_seq, number_year, title, description, object_id, project_id, group_id,
              owner_email, status, priority, test_purpose, external_lab_id, ekn,
-             methods: RequestMethod[], files: RequestFile[], created_at, updated_at }
+             method_id, customer_number, lab_number,
+             files: RequestFile[], created_at, updated_at }
 
 LabMethod{ id, code, name, lab_id, description, determinable_indicators: string[],
            formulas: any[], classification: any[], chart_configs: any[], input_parameters: any[],
@@ -113,8 +116,10 @@ lab_operator+. Справочники испытателей/оборудова�
     - «Заявки»: Все заявки, Очередь лаборатории;
     - «Лаборатория»: Методы, Объекты, Результаты и протоколы, Испытатели, Оборудование,
       Сотрудники.
-  - **Контент-карточка**: заголовок раздела + подзаголовок + **заглушка** (наполнение
-    подключается поэтапно; рабочие методы заявок/справочников сохранены в классе).
+  - **Контент-карточка**: заголовок раздела + подзаголовок. Пункт «Все заявки» наполнен
+    (2026-08-19): таблица заявок → карточка (статус, ввод серии результатов, расчёт, таблица
+    серий, графики, генерация протокола+DOCX). Остальные пункты — **заглушка** (наполняются
+    следующими этапами).
 - **Дашборд из плагина удалён** (2026-08-18): таб и метод отсутствуют; отдельный плагин-дашборд
   будет использовать серверный `GET /dashboard`. Серверный эндпоинт не удалять.
 - Настройки: `apiUrl` + раздел «Права доступа» (роли + общий доступ, admin).

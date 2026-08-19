@@ -265,6 +265,12 @@ export class LimsView extends ItemView {
     this.pageSubEl.setText(meta.sub);
 
     this.bodyEl.empty();
+
+    if (this.key === 'requests') {
+      await this.renderRequests();
+      return;
+    }
+
     this.bodyEl.createDiv({ cls: 'tn-lims-stub' }).setText(
       `Раздел «${meta.title}» — фасад готов, наполнение будет подключено следующим этапом.`
     );
@@ -275,25 +281,24 @@ export class LimsView extends ItemView {
   /** Список заявок (возврат из карточки). */
   private async renderRequests(): Promise<void> {
     this.bodyEl.empty();
-    this.bodyEl.createDiv({ cls: 'tn-req-meta', text: 'Загрузка…' });
+    this.bodyEl.createDiv({ cls: 'tn-lims-meta', text: 'Загрузка…' });
     try {
       const requests = await this.plugin.syncService.listRequests();
       this.bodyEl.empty();
       const table = this.bodyEl.createEl('table', { cls: 'tn-table' });
       const thead = table.createEl('thead').createEl('tr');
-      for (const h of ['Номер', 'Объект', 'Статус', 'Методы']) thead.createEl('th').setText(h);
+      for (const h of ['Номер', 'Объект', 'Статус', 'Метод']) thead.createEl('th').setText(h);
       const tbody = table.createEl('tbody');
       for (const r of requests) {
         const row = tbody.createEl('tr', { cls: 'tn-lims-row' });
         row.addEventListener('click', () => this.renderRequestDetail(r));
-        const first = r.methods && r.methods.length > 0 ? r.methods[0].customer_number : '—';
-        row.createEl('td').setText(first);
+        row.createEl('td').setText(r.customer_number || '—');
         row.createEl('td').setText(r.title || `#${r.id}`);
         row.createEl('td').setText(STATUS_LABELS[r.status] || r.status);
-        row.createEl('td').setText(r.methods.map(m => this.methodName(m.method_id)).join(', '));
+        row.createEl('td').setText(this.methodName(r.method_id));
       }
       if (requests.length === 0) {
-        this.bodyEl.createDiv({ cls: 'tn-req-meta tn-req-p24' }).setText('Нет заявок.');
+        this.bodyEl.createDiv({ cls: 'tn-lims-meta tn-lims-p24' }).setText('Нет заявок.');
       }
     } catch (e: unknown) {
       this.bodyEl.empty();
@@ -315,12 +320,12 @@ export class LimsView extends ItemView {
 
     this.bodyEl.createEl('h3', { text: `№ ${req.number_seq}/${req.number_year} — ${req.title || 'без названия'}` });
 
-    const meta = this.bodyEl.createDiv({ cls: 'tn-req-meta tn-req-mb8' });
+    const meta = this.bodyEl.createDiv({ cls: 'tn-lims-meta tn-lims-mb8' });
     meta.setText(`Статус: ${STATUS_LABELS[req.status] || req.status} · Заказчик: ${req.owner_email || '—'}`);
 
     // статус
     if (this.canEditStatus) {
-      const statusSelect = this.bodyEl.createEl('select', { cls: 'tn-req-select tn-req-mb8' });
+      const statusSelect = this.bodyEl.createEl('select', { cls: 'tn-lims-select tn-lims-mb8' });
       for (const [v, l] of Object.entries(STATUS_LABELS)) statusSelect.createEl('option', { value: v, text: l });
       statusSelect.value = req.status;
       statusSelect.addEventListener('change', async () => {
@@ -335,75 +340,70 @@ export class LimsView extends ItemView {
       });
     }
 
-    // результаты по методам
-    for (const rm of req.methods) {
-      const method = this.plugin.methods.find(md => md.id === rm.method_id);
-      const methodDiv = this.bodyEl.createDiv({ cls: 'tn-lims-method' });
-      methodDiv.createEl('h4', { text: `Метод: ${this.methodName(rm.method_id)}` });
+    // результаты по методу заявки (1 заявка = 1 метод)
+    const methodDiv = this.bodyEl.createDiv({ cls: 'tn-lims-method' });
+    methodDiv.createEl('h4', { text: `Метод: ${this.methodName(req.method_id)}` });
 
-      // форма ввода новой серии
-      if (this.canEdit) {
-        const form = methodDiv.createDiv({ cls: 'tn-lims-series-form' });
-        const valuesRow = form.createDiv({ cls: 'tn-req-flex' });
-        const input = valuesRow.createEl('input', {
-          attr: { type: 'text', placeholder: 'параметр=значение; параметр2=значение2' },
-          cls: 'tn-req-input',
-        });
-        const addBtn = valuesRow.createEl('button', { text: '➕ Добавить серию', cls: 'tn-btn tn-btn-primary' });
-        addBtn.addEventListener('click', async () => {
-          const values = this.parseValues(input.value);
-          if (Object.keys(values).length === 0) { new Notice('Введите параметры (параметр=значение)'); return; }
-          try {
-            await this.plugin.syncService.saveResult(req.id, {
-              method_id: rm.method_id,
-              inventor_id: 0,
-              series_num: 0,
-              values,
-            });
-            new Notice('Серия добавлена, расчёт выполнен');
-            void this.renderRequestDetail(req);
-          } catch (e: unknown) {
-            new Notice(`Ошибка: ${errorMessage(e)}`);
-          }
-        });
-        const calcBtn = form.createEl('button', { text: '🔄 Рассчитать', cls: 'tn-btn tn-btn-ghost' });
-        calcBtn.addEventListener('click', async () => {
-          try {
-            const results = await this.plugin.syncService.listResults(req.id);
-            const series = results.filter(r => !r.is_statistical_row);
-            if (series.length === 0) { new Notice('Нет серий'); return; }
-            await this.plugin.syncService.calculateSeries(req.id, series[0].series_num);
-            new Notice('Расчёт выполнен');
-            void this.renderRequestDetail(req);
-          } catch (e: unknown) {
-            new Notice(`Ошибка: ${errorMessage(e)}`);
-          }
-        });
-      }
+    // форма ввода новой серии
+    if (this.canEdit) {
+      const form = methodDiv.createDiv({ cls: 'tn-lims-series-form' });
+      const valuesRow = form.createDiv({ cls: 'tn-lims-flex' });
+      const input = valuesRow.createEl('input', {
+        attr: { type: 'text', placeholder: 'параметр=значение; параметр2=значение2' },
+        cls: 'tn-lims-input',
+      });
+      const addBtn = valuesRow.createEl('button', { text: '➕ Добавить серию', cls: 'tn-btn tn-btn-primary' });
+      addBtn.addEventListener('click', async () => {
+        const values = this.parseValues(input.value);
+        if (Object.keys(values).length === 0) { new Notice('Введите параметры (параметр=значение)'); return; }
+        try {
+          await this.plugin.syncService.saveResult(req.id, {
+            method_id: req.method_id,
+            inventor_id: 0,
+            series_num: 0,
+            values,
+          });
+          new Notice('Серия добавлена, расчёт выполнен');
+          void this.renderRequestDetail(req);
+        } catch (e: unknown) {
+          new Notice(`Ошибка: ${errorMessage(e)}`);
+        }
+      });
+      const calcBtn = form.createEl('button', { text: '🔄 Рассчитать', cls: 'tn-btn tn-btn-ghost' });
+      calcBtn.addEventListener('click', async () => {
+        try {
+          const results = await this.plugin.syncService.listResults(req.id);
+          const series = results.filter(r => !r.is_statistical_row);
+          if (series.length === 0) { new Notice('Нет серий'); return; }
+          await this.plugin.syncService.calculateSeries(req.id, series[0].series_num);
+          new Notice('Расчёт выполнен');
+          void this.renderRequestDetail(req);
+        } catch (e: unknown) {
+          new Notice(`Ошибка: ${errorMessage(e)}`);
+        }
+      });
+    }
 
-      // таблица серий
-      const results = await this.plugin.syncService.listResults(req.id);
-      const seriesRows = results.filter(r => r.method_id === rm.method_id && !r.is_statistical_row);
-      if (seriesRows.length > 0) {
-        this.renderResultsTable(methodDiv, seriesRows);
-      } else {
-        methodDiv.createDiv({ cls: 'tn-req-meta' }).setText('Результатов пока нет');
-      }
+    // таблица серий
+    const results = await this.plugin.syncService.listResults(req.id);
+    const seriesRows = results.filter(r => r.method_id === req.method_id && !r.is_statistical_row);
+    if (seriesRows.length > 0) {
+      this.renderResultsTable(methodDiv, seriesRows);
+    } else {
+      methodDiv.createDiv({ cls: 'tn-lims-meta' }).setText('Результатов пока нет');
     }
 
     // графики
     const chartDiv = this.bodyEl.createDiv({ cls: 'tn-lims-method' });
     chartDiv.createEl('h4', { text: '📈 Графики' });
-    for (const rm of req.methods) {
-      const cfg = this.methodConfigOf(rm.method_id);
-      for (const c of cfg.chart_configs) {
-        const id = String(c.id || '');
-        const title = String(c.title || id);
-        chartDiv.createEl('img', {
-          attr: { src: this.plugin.syncService.chartUrl(req.id, id), alt: title },
-          cls: 'tn-lims-chart',
-        });
-      }
+    const cfg = this.methodConfigOf(req.method_id);
+    for (const c of cfg.chart_configs) {
+      const id = String(c.id || '');
+      const title = String(c.title || id);
+      chartDiv.createEl('img', {
+        attr: { src: this.plugin.syncService.chartUrl(req.id, id), alt: title },
+        cls: 'tn-lims-chart',
+      });
     }
 
     // протокол

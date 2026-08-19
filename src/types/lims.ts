@@ -11,7 +11,9 @@ export interface Lab {
   updated_at: string;
 }
 
-/** Заявка (видимая лаборатории). */export interface LimsRequest {
+/** Заявка (видимая лаборатории). 1 заявка = 1 метод (метод и номера прямо в
+ * строке, как в lab-service/sbe-requests после декомпозиции 2026-08-18). */
+export interface LimsRequest {
   id: number;
   number_seq: number;
   number_year: number;
@@ -26,11 +28,15 @@ export interface Lab {
   test_purpose: string;
   external_lab_id: number;
   ekn: string;
-  methods: Array<{ method_id: number; customer_number: string; lab_number: string }>;
+  /** Метод испытаний (1 заявка = 1 метод). */
+  method_id: number;
+  /** Номер заказчику: {projectCode}-{NNN}/{yyyy}-{labCode}-{methodCode}. */
+  customer_number: string;
+  /** Номер лаборатории: {NNN}/{yyyy}-{methodCode}. */
+  lab_number: string;
   files: Array<{ file_key: string; file_name: string; file_size: number; file_url: string }>;
   created_at: string;
   updated_at: string;
-  sync_status: 'local' | 'synced';
 }
 
 /** Метод испытаний (справочник lab-service). */
