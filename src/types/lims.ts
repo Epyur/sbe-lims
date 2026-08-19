@@ -42,6 +42,16 @@ export interface LimsRequest {
   updated_at: string;
 }
 
+/** Объект исследования (справочник lab-service; создание — в sbe-requests). */
+export interface LabObject {
+  id: number;
+  name: string;
+  description: string;
+  characteristics: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
 /** Метод испытаний (справочник lab-service). */
 export interface LabMethod {
   id: number;

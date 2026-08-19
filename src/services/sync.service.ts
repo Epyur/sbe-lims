@@ -7,6 +7,7 @@ import type {
   Inventor,
   Lab,
   LabMember,
+  LabObject,
   LimsRequest,
   MeasurementResult,
   MethodConfig,
@@ -179,6 +180,24 @@ export class LimsSyncService {
       return Array.isArray(data.labs) ? data.labs : [];
     } catch (e: unknown) {
       console.warn('ЛИМС: не JSON в ответе labs:', errorMessage(e));
+      return [];
+    }
+  }
+
+  /** Объекты исследования (только чтение — создание в sbe-requests). */
+  async listObjects(): Promise<LabObject[]> {
+    const token = await this.getToken();
+    const res = await this.request({
+      url: `${this.baseUrl}/api/lab/objects`,
+      method: 'GET',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    this.assertOk(res);
+    try {
+      const data = JSON.parse(res.text) as { objects?: LabObject[] };
+      return Array.isArray(data.objects) ? data.objects : [];
+    } catch (e: unknown) {
+      console.warn('ЛИМС: не JSON в ответе objects:', errorMessage(e));
       return [];
     }
   }

@@ -34,9 +34,9 @@ SBE-плагин «ЛИМС» для сотрудников лаборатори
 |---|---|
 | `src/main.ts` | `SbeLimsPlugin`: настройки, syncService, refreshMethods (pull методов при onload), view, publishService |
 | `src/services/sync.service.ts` | `LimsSyncService`: JWT из ЦУП, заявки/результаты/расчёт/справочники/графики/протокол, permissions/me, таймауты 30с, понятные 401/403 (дашборд-метода нет — вынесен) |
-| `src/ui/lims-view.ts` | `LimsView` (тип `sbe-lims-view`): **фасад** — шапка (титул «Лабораторная информационная менеджмент система СБЕ ПМиПИР», crumb `{лаба} · {раздел}`, «＋ Создать») + сайдбар-карточка (сворачиваемый: переключатель лабораторий, дерево навигации Заявки/Лаборатория) + контент-карточка (раздел + заглушка). Рабочие методы заявок/справочников сохранены, подключаются к узлам дерева на этапе наполнения |
+| `src/ui/lims-view.ts` | `LimsView` (тип `sbe-lims-view`): фасад (шапка + сайдбар-дерево + контент) полностью наполнен (2026-08-19): «Все заявки»/«Очередь лаборатории»/«Результаты и протоколы» (один рендер `renderRequests(filter?)` с разными фильтрами по статусу), карточка заявки (серии/расчёт/статус/графики/протокол), «Методы» (список + JSON-редактор конфигов, admin), «Объекты» (только чтение), «Испытатели»/«Оборудование» (список + создание, editor+), «Сотрудники» (список + добавление/удаление, admin — раздел скрыт для не-admin, т.к. `GET /lab-members` сам admin-only на сервере) |
 | `src/ui/settings-tab.ts` | Настройки: apiUrl + «Права доступа» (роли + общий доступ) |
-| `src/types/lims.ts` | `LimsRequest`, `Lab`, `LabMethod`, `MeasurementResult`, `AggregatedResult`, `Inventor`, `Equipment`, `LabMember`, `MethodConfig`, `ProtocolResponse` (без `DashboardData`) |
+| `src/types/lims.ts` | `LimsRequest`, `Lab`, `LabMethod`, `LabObject`, `MeasurementResult`, `AggregatedResult`, `Inventor`, `Equipment`, `LabMember`, `MethodConfig`, `ProtocolResponse` (без `DashboardData`) |
 | `src/styles.css` | Классы `tn-lims-*` на семантических токенах |
 
 ## Настройки (data.json)
@@ -72,6 +72,39 @@ SBE-плагин «ЛИМС» для сотрудников лаборатори
   документацию, подготовить сообщение для коммита и СПРОСИТЬ подтверждение commit/push.**
 
 ## История работ
+
+### 2026-08-19 — v0.1.5 (наполнение оставшихся пунктов дерева)
+- **Сервер (lab-service, отдельно от этого коммита, задеплоено и E2E)**: перед наполнением
+  найден и исправлен пробел видимости — сотрудник лаборатории (по `lab_members`) не видел
+  заявки своих методов ни в `GET /requests`, ни в `GET /requests/{id}` (только owner/группа/
+  admin); `requireLabAccess` проверял lab-скоуп только для результатов/графиков/протокола
+  конкретной заявки, не для списка/детали. См. `server_back/lab-service/AGENTS.md`
+  (запись 2026-08-19, «видимость заявок по lab-скоупу») — правки в `requests.go`.
+- **Наполнение** (`src/ui/lims-view.ts`, `renderPage()` теперь диспетчер по всем 8 разделам
+  дерева вместо заглушки):
+  - «Очередь лаборатории» / «Результаты и протоколы» — тот же `renderRequests()`, что и
+    «Все заявки», с фильтром по статусу (`new`/`received` и `completed` соответственно);
+    метод обобщён до `renderRequests(filter?)`, фильтр запоминается в `currentRequestsFilter`,
+    чтобы «← Назад» из карточки возвращал в тот же (отфильтрованный) список, а не в общий.
+  - «Методы» — список из кэша `plugin.methods`; для admin — кнопка «✎ Конфиг» открывает
+    JSON-редактор (4 textarea: formulas/classification/chart_configs/input_parameters),
+    сохранение через уже существовавший `updateMethodConfig()` + `plugin.refreshMethods()`.
+  - «Объекты» — **новое**: добавлен тип `LabObject` (`src/types/lims.ts`, зеркало
+    `sbe-requests/src/types/requests.ts`) и `listObjects()` (`GET /api/lab/objects`, viewer)
+    в `sync.service.ts`; список только на чтение (создание — прерогатива sbe-requests).
+  - «Испытатели»/«Оборудование» — список (viewer) + форма создания (editor+), на уже
+    существовавших `listInventors/createInventor`/`listEquipment/createEquipment`.
+  - «Сотрудники» — список (отфильтрован по выбранной лабе) + добавление/удаление
+    (`setLabMember`/`removeLabMember`, уже существовали); раздел целиком скрыт для
+    не-admin, т.к. сам `GET /lab-members` на сервере admin-only.
+  - Новые геттеры `canAdmin` (`myRole === 'admin'`) и `canEditRefs` (`editor+`) — точечная
+    ролевая проверка для новых разделов. `canEdit`/`canEditStatus` (результаты/статус
+    заявки) **не трогались** — точная проверка `lab_operator` для конкретной лабы клиенту
+    недоступна без нового «моя роль в этой лабе» эндпоинта (`GET /lab-members` сам
+    admin-only) — сервер всё равно валидирует по `requireLabAccess`, риска нет, только
+    UX-огрубление (кнопка может быть видна тому, кому сервер её использовать не даст).
+- Версия 0.1.4 → **0.1.5** (manifest + package.json). `npx tsc --noEmit` EXIT=0;
+  `npm run build` OK.
 
 ### 2026-08-19 — v0.1.4 (номер заявки — сокращённый, лабораторный)
 - **Найдено при проверке документации**: список «Все заявки» и заголовок карточки/протокола

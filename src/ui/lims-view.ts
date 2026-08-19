@@ -1,6 +1,6 @@
 import { ItemView, Notice, WorkspaceLeaf } from 'obsidian';
 import type SbeLimsPlugin from '../main';
-import type { LimsRequest, MeasurementResult, MethodConfig, Lab } from '../types/lims';
+import type { Lab, LimsRequest, MeasurementResult, MethodConfig } from '../types/lims';
 import { errorMessage } from '../../../sbe-core/src/utils/errors';
 
 export const SBE_LIMS_VIEW_TYPE = 'sbe-lims-view';
@@ -90,6 +90,7 @@ export class LimsView extends ItemView {
   private collapsed = false;
   private labs: Lab[] = [];
   private myRole = '';
+  private currentRequestsFilter?: (r: LimsRequest) => boolean;
 
   private bodyEl!: HTMLElement;
 
@@ -266,24 +267,44 @@ export class LimsView extends ItemView {
 
     this.bodyEl.empty();
 
-    if (this.key === 'requests') {
-      await this.renderRequests();
-      return;
+    switch (this.key) {
+      case 'requests':
+        await this.renderRequests();
+        return;
+      case 'queue':
+        await this.renderRequests(r => r.status === 'new' || r.status === 'received');
+        return;
+      case 'results':
+        await this.renderRequests(r => r.status === 'completed');
+        return;
+      case 'methods':
+        await this.renderMethods();
+        return;
+      case 'objects':
+        await this.renderObjects();
+        return;
+      case 'inventors':
+        await this.renderInventors();
+        return;
+      case 'equipment':
+        await this.renderEquipment();
+        return;
+      case 'lab-members':
+        await this.renderLabMembers();
+        return;
     }
-
-    this.bodyEl.createDiv({ cls: 'tn-lims-stub' }).setText(
-      `Раздел «${meta.title}» — фасад готов, наполнение будет подключено следующим этапом.`
-    );
   }
 
   // ---- (наполнение: методы прошлой вьюхи, будут подключены к узлам дерева) ----
 
-  /** Список заявок (возврат из карточки). */
-  private async renderRequests(): Promise<void> {
+  /** Список заявок (возврат из карточки). Опциональный фильтр — для «Очереди»/«Результатов». */
+  private async renderRequests(filter?: (r: LimsRequest) => boolean): Promise<void> {
+    this.currentRequestsFilter = filter;
     this.bodyEl.empty();
     this.bodyEl.createDiv({ cls: 'tn-lims-meta', text: 'Загрузка…' });
     try {
-      const requests = await this.plugin.syncService.listRequests();
+      let requests = await this.plugin.syncService.listRequests();
+      if (filter) requests = requests.filter(filter);
       this.bodyEl.empty();
       const table = this.bodyEl.createEl('table', { cls: 'tn-table' });
       const thead = table.createEl('thead').createEl('tr');
@@ -316,7 +337,7 @@ export class LimsView extends ItemView {
     this.bodyEl.empty();
 
     const back = this.bodyEl.createEl('button', { text: '← Назад', cls: 'tn-btn tn-btn-ghost' });
-    back.addEventListener('click', () => void this.renderRequests());
+    back.addEventListener('click', () => void this.renderRequests(this.currentRequestsFilter));
 
     this.bodyEl.createEl('h3', { text: `№ ${req.lab_number || `${req.number_seq}/${req.number_year}`} — ${req.title || 'без названия'}` });
 
@@ -438,6 +459,273 @@ export class LimsView extends ItemView {
     }
   }
 
+  // ---- Справочники ----
+
+  /** Методы: список из кэша (pull); JSON-редактор конфигов — admin. */
+  private async renderMethods(): Promise<void> {
+    const methods = this.labId ? this.plugin.methods.filter(m => m.lab_id === this.labId) : this.plugin.methods;
+    if (methods.length === 0) {
+      this.bodyEl.createDiv({ cls: 'tn-lims-meta tn-lims-p24' }).setText('Методов пока нет.');
+      return;
+    }
+    for (const m of methods) {
+      const card = this.bodyEl.createDiv({ cls: 'tn-lims-method' });
+      const head = card.createDiv({ cls: 'tn-lims-flex' });
+      head.createEl('h4', { text: `${m.code} — ${m.name || 'без названия'}` });
+      if (m.determinable_indicators.length > 0) {
+        card.createDiv({ cls: 'tn-lims-meta' }).setText(`Показатели: ${m.determinable_indicators.join(', ')}`);
+      }
+      if (this.canAdmin) {
+        const editBtn = head.createEl('button', { text: '✎ Конфиг', cls: 'tn-btn tn-btn-ghost' });
+        editBtn.addEventListener('click', () => this.renderMethodConfigForm(card, m.id));
+      }
+    }
+  }
+
+  /** JSON-редактор formulas/classification/chart_configs/input_parameters метода (admin). */
+  private renderMethodConfigForm(container: HTMLElement, methodId: number): void {
+    const existing = container.querySelector('.tn-lims-series-form');
+    if (existing) { existing.remove(); return; }
+    const cfg = this.methodConfigOf(methodId);
+    const form = container.createDiv({ cls: 'tn-lims-series-form' });
+    const fields: Array<{ key: keyof MethodConfig; label: string }> = [
+      { key: 'formulas', label: 'formulas (JSON)' },
+      { key: 'classification', label: 'classification (JSON)' },
+      { key: 'chart_configs', label: 'chart_configs (JSON)' },
+      { key: 'input_parameters', label: 'input_parameters (JSON)' },
+    ];
+    const areas: Partial<Record<keyof MethodConfig, HTMLTextAreaElement>> = {};
+    for (const f of fields) {
+      form.createDiv({ cls: 'tn-lims-meta' }).setText(f.label);
+      const ta = form.createEl('textarea', { cls: 'tn-lims-input' });
+      ta.rows = 4;
+      ta.value = JSON.stringify(cfg[f.key], null, 2);
+      areas[f.key] = ta;
+    }
+    const saveBtn = form.createEl('button', { text: '💾 Сохранить', cls: 'tn-btn tn-btn-primary' });
+    saveBtn.addEventListener('click', async () => {
+      const patch: Partial<MethodConfig> = {};
+      try {
+        for (const f of fields) {
+          patch[f.key] = JSON.parse(areas[f.key]!.value) as never;
+        }
+      } catch (e: unknown) {
+        new Notice(`Неверный JSON: ${errorMessage(e)}`);
+        return;
+      }
+      try {
+        await this.plugin.syncService.updateMethodConfig(methodId, patch);
+        await this.plugin.refreshMethods();
+        new Notice('Конфиг метода обновлён');
+        await this.renderMethods();
+      } catch (e: unknown) {
+        new Notice(`Ошибка: ${errorMessage(e)}`);
+      }
+    });
+  }
+
+  /** Объекты исследования — только чтение (создание в sbe-requests). */
+  private async renderObjects(): Promise<void> {
+    this.bodyEl.createDiv({ cls: 'tn-lims-meta', text: 'Загрузка…' });
+    try {
+      const objects = await this.plugin.syncService.listObjects();
+      this.bodyEl.empty();
+      if (objects.length === 0) {
+        this.bodyEl.createDiv({ cls: 'tn-lims-meta tn-lims-p24' }).setText('Объектов пока нет.');
+        return;
+      }
+      const table = this.bodyEl.createEl('table', { cls: 'tn-table' });
+      const thead = table.createEl('thead').createEl('tr');
+      for (const h of ['Название', 'Описание', 'Характеристики']) thead.createEl('th').setText(h);
+      const tbody = table.createEl('tbody');
+      for (const o of objects) {
+        const tr = tbody.createEl('tr');
+        tr.createEl('td').setText(o.name || `#${o.id}`);
+        tr.createEl('td').setText(o.description || '—');
+        tr.createEl('td').setText(Object.keys(o.characteristics || {}).length > 0 ? JSON.stringify(o.characteristics) : '—');
+      }
+    } catch (e: unknown) {
+      this.bodyEl.empty();
+      this.bodyEl.createDiv({ cls: 'tn-lims-error' }).setText(`Ошибка: ${errorMessage(e)}`);
+    }
+  }
+
+  /** Испытатели — список (viewer) + создание (editor+). */
+  private async renderInventors(): Promise<void> {
+    this.bodyEl.createDiv({ cls: 'tn-lims-meta', text: 'Загрузка…' });
+    try {
+      const inventors = await this.plugin.syncService.listInventors();
+      this.bodyEl.empty();
+      if (this.canEditRefs) {
+        this.renderInventorForm();
+      }
+      if (inventors.length === 0) {
+        this.bodyEl.createDiv({ cls: 'tn-lims-meta tn-lims-p24' }).setText('Испытателей пока нет.');
+        return;
+      }
+      const table = this.bodyEl.createEl('table', { cls: 'tn-table' });
+      const thead = table.createEl('thead').createEl('tr');
+      for (const h of ['ФИО', 'E-mail', 'Телефон', 'Отдел', 'Должность']) thead.createEl('th').setText(h);
+      const tbody = table.createEl('tbody');
+      for (const inv of inventors) {
+        const tr = tbody.createEl('tr');
+        tr.createEl('td').setText(inv.name);
+        tr.createEl('td').setText(inv.email || '—');
+        tr.createEl('td').setText(inv.phone || '—');
+        tr.createEl('td').setText(inv.department || '—');
+        tr.createEl('td').setText(inv.position || '—');
+      }
+    } catch (e: unknown) {
+      this.bodyEl.empty();
+      this.bodyEl.createDiv({ cls: 'tn-lims-error' }).setText(`Ошибка: ${errorMessage(e)}`);
+    }
+  }
+
+  private renderInventorForm(): void {
+    const form = this.bodyEl.createDiv({ cls: 'tn-lims-series-form' });
+    const row = form.createDiv({ cls: 'tn-lims-flex' });
+    const name = row.createEl('input', { attr: { type: 'text', placeholder: 'ФИО' }, cls: 'tn-lims-input' });
+    const email = row.createEl('input', { attr: { type: 'text', placeholder: 'E-mail' }, cls: 'tn-lims-input' });
+    const phone = row.createEl('input', { attr: { type: 'text', placeholder: 'Телефон' }, cls: 'tn-lims-input' });
+    const department = row.createEl('input', { attr: { type: 'text', placeholder: 'Отдел' }, cls: 'tn-lims-input' });
+    const position = row.createEl('input', { attr: { type: 'text', placeholder: 'Должность' }, cls: 'tn-lims-input' });
+    const addBtn = row.createEl('button', { text: '➕ Добавить', cls: 'tn-btn tn-btn-primary' });
+    addBtn.addEventListener('click', async () => {
+      if (!name.value.trim() || !email.value.trim()) { new Notice('Укажите ФИО и e-mail'); return; }
+      try {
+        await this.plugin.syncService.createInventor({
+          name: name.value.trim(), email: email.value.trim(),
+          phone: phone.value.trim() || undefined,
+          department: department.value.trim() || undefined,
+          position: position.value.trim() || undefined,
+        });
+        new Notice('Испытатель добавлен');
+        await this.renderInventors();
+      } catch (e: unknown) {
+        new Notice(`Ошибка: ${errorMessage(e)}`);
+      }
+    });
+  }
+
+  /** Оборудование — список (viewer) + создание (editor+). */
+  private async renderEquipment(): Promise<void> {
+    this.bodyEl.createDiv({ cls: 'tn-lims-meta', text: 'Загрузка…' });
+    try {
+      const equipment = await this.plugin.syncService.listEquipment();
+      this.bodyEl.empty();
+      if (this.canEditRefs) {
+        this.renderEquipmentForm();
+      }
+      if (equipment.length === 0) {
+        this.bodyEl.createDiv({ cls: 'tn-lims-meta tn-lims-p24' }).setText('Оборудования пока нет.');
+        return;
+      }
+      const table = this.bodyEl.createEl('table', { cls: 'tn-table' });
+      const thead = table.createEl('thead').createEl('tr');
+      for (const h of ['Код', 'Название', 'Расположение', 'Ответственный', 'Статус']) thead.createEl('th').setText(h);
+      const tbody = table.createEl('tbody');
+      for (const eq of equipment) {
+        const tr = tbody.createEl('tr');
+        tr.createEl('td').setText(eq.code);
+        tr.createEl('td').setText(eq.name);
+        tr.createEl('td').setText(eq.location || '—');
+        tr.createEl('td').setText(eq.responsible || '—');
+        tr.createEl('td').setText(eq.status || '—');
+      }
+    } catch (e: unknown) {
+      this.bodyEl.empty();
+      this.bodyEl.createDiv({ cls: 'tn-lims-error' }).setText(`Ошибка: ${errorMessage(e)}`);
+    }
+  }
+
+  private renderEquipmentForm(): void {
+    const form = this.bodyEl.createDiv({ cls: 'tn-lims-series-form' });
+    const row = form.createDiv({ cls: 'tn-lims-flex' });
+    const code = row.createEl('input', { attr: { type: 'text', placeholder: 'Код' }, cls: 'tn-lims-input' });
+    const name = row.createEl('input', { attr: { type: 'text', placeholder: 'Название' }, cls: 'tn-lims-input' });
+    const location = row.createEl('input', { attr: { type: 'text', placeholder: 'Расположение' }, cls: 'tn-lims-input' });
+    const responsible = row.createEl('input', { attr: { type: 'text', placeholder: 'Ответственный' }, cls: 'tn-lims-input' });
+    const addBtn = row.createEl('button', { text: '➕ Добавить', cls: 'tn-btn tn-btn-primary' });
+    addBtn.addEventListener('click', async () => {
+      if (!code.value.trim() || !name.value.trim()) { new Notice('Укажите код и название'); return; }
+      try {
+        await this.plugin.syncService.createEquipment({
+          code: code.value.trim(), name: name.value.trim(),
+          location: location.value.trim() || undefined,
+          responsible: responsible.value.trim() || undefined,
+        });
+        new Notice('Оборудование добавлено');
+        await this.renderEquipment();
+      } catch (e: unknown) {
+        new Notice(`Ошибка: ${errorMessage(e)}`);
+      }
+    });
+  }
+
+  /** Сотрудники лаборатории — только admin (GET /lab-members сам требует admin на сервере). */
+  private async renderLabMembers(): Promise<void> {
+    if (!this.canAdmin) {
+      this.bodyEl.createDiv({ cls: 'tn-lims-meta tn-lims-p24' }).setText(
+        'Раздел доступен только администратору (управление сотрудниками лаборатории).'
+      );
+      return;
+    }
+    this.bodyEl.createDiv({ cls: 'tn-lims-meta', text: 'Загрузка…' });
+    try {
+      const all = await this.plugin.syncService.listLabMembers();
+      const members = this.labId ? all.filter(m => m.lab_id === this.labId) : all;
+      this.bodyEl.empty();
+      this.renderLabMemberForm();
+      if (members.length === 0) {
+        this.bodyEl.createDiv({ cls: 'tn-lims-meta tn-lims-p24' }).setText('Сотрудников пока нет.');
+        return;
+      }
+      const table = this.bodyEl.createEl('table', { cls: 'tn-table' });
+      const thead = table.createEl('thead').createEl('tr');
+      for (const h of ['E-mail', 'Роль', '']) thead.createEl('th').setText(h);
+      const tbody = table.createEl('tbody');
+      for (const m of members) {
+        const tr = tbody.createEl('tr');
+        tr.createEl('td').setText(m.email);
+        tr.createEl('td').setText(m.role);
+        const removeBtn = tr.createEl('td').createEl('button', { text: '✖ Убрать', cls: 'tn-btn tn-btn-ghost' });
+        removeBtn.addEventListener('click', async () => {
+          if (!window.confirm(`Убрать «${m.email}» из лаборатории?`)) return;
+          try {
+            await this.plugin.syncService.removeLabMember(m.lab_id, m.email);
+            new Notice('Сотрудник удалён');
+            await this.renderLabMembers();
+          } catch (e: unknown) {
+            new Notice(`Ошибка: ${errorMessage(e)}`);
+          }
+        });
+      }
+    } catch (e: unknown) {
+      this.bodyEl.empty();
+      this.bodyEl.createDiv({ cls: 'tn-lims-error' }).setText(`Ошибка: ${errorMessage(e)}`);
+    }
+  }
+
+  private renderLabMemberForm(): void {
+    const form = this.bodyEl.createDiv({ cls: 'tn-lims-series-form' });
+    const row = form.createDiv({ cls: 'tn-lims-flex' });
+    const email = row.createEl('input', { attr: { type: 'text', placeholder: 'E-mail сотрудника' }, cls: 'tn-lims-input' });
+    const roleSelect = row.createEl('select', { cls: 'tn-lims-select' });
+    roleSelect.createEl('option', { value: 'lab_operator', text: 'Испытатель (lab_operator)' });
+    roleSelect.createEl('option', { value: 'lab_admin', text: 'Администратор лабы (lab_admin)' });
+    const addBtn = row.createEl('button', { text: '➕ Добавить', cls: 'tn-btn tn-btn-primary' });
+    addBtn.addEventListener('click', async () => {
+      if (!email.value.trim() || !this.labId) { new Notice('Укажите e-mail и выберите лабораторию'); return; }
+      try {
+        await this.plugin.syncService.setLabMember(this.labId, email.value.trim(), roleSelect.value);
+        new Notice('Сотрудник добавлен');
+        await this.renderLabMembers();
+      } catch (e: unknown) {
+        new Notice(`Ошибка: ${errorMessage(e)}`);
+      }
+    });
+  }
+
   private methodConfigOf(methodId: number): MethodConfig {
     const m = this.plugin.methods.find(md => md.id === methodId);
     return {
@@ -501,5 +789,17 @@ export class LimsView extends ItemView {
 
   private get canEditStatus(): boolean {
     return this.myRole !== '';
+  }
+
+  /** Admin (app-level) — методы-конфиги, сотрудники лаборатории. Точная проверка
+   * lab_admin (per-lab) недоступна клиенту без нового «моя роль в этой лабе»
+   * эндпоинта (GET /lab-members сам admin-only) — оставлено на будущее. */
+  private get canAdmin(): boolean {
+    return this.myRole === 'admin';
+  }
+
+  /** Editor+ (app-level) — испытатели/оборудование. */
+  private get canEditRefs(): boolean {
+    return this.myRole === 'editor' || this.myRole === 'admin';
   }
 }
