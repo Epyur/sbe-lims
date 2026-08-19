@@ -28,6 +28,9 @@ export interface LimsRequest {
   test_purpose: string;
   external_lab_id: number;
   ekn: string;
+  /** Номер из legacy-системы (email-трекер LPITrack, «LPIZAYAVKINAPRO-<N>») —
+   * для заявок переходного периода миграции; у новых заявок пусто. */
+  external_id: string;
   /** Метод испытаний (1 заявка = 1 метод). */
   method_id: number;
   /** Номер заказчику: {projectCode}-{NNN}/{yyyy}-{labCode}-{methodCode}. */

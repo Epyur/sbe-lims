@@ -54,6 +54,7 @@ SBE-плагин «ЛИМС» для сотрудников лаборатори
 // customer_number/lab_number прямо на заявке, без массива methods[].
 LimsRequest{ id, number_seq, number_year, title, description, object_id, project_id, group_id,
              owner_email, status, priority, test_purpose, external_lab_id, ekn,
+             external_id,  // номер legacy email-трекера («LPIZAYAVKINAPRO-<N>»); у новых заявок пусто
              method_id, customer_number, lab_number,
              files: RequestFile[], created_at, updated_at }
 
