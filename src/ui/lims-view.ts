@@ -791,15 +791,17 @@ export class LimsView extends ItemView {
     return this.myRole !== '';
   }
 
-  /** Admin (app-level) — методы-конфиги, сотрудники лаборатории. Точная проверка
-   * lab_admin (per-lab) недоступна клиенту без нового «моя роль в этой лабе»
-   * эндпоинта (GET /lab-members сам admin-only) — оставлено на будущее. */
+  /** Admin+ (app-level, включая superadmin) — методы-конфиги, сотрудники лаборатории.
+   * Точная проверка lab_admin/lab_auditor (per-lab) недоступна клиенту без нового
+   * «моя роль в этой лабе» эндпоинта (GET /lab-members сам admin-only) — оставлено
+   * на будущее; сервер всё равно валидирует через lab_members (requireLabAccess/
+   * requireLabRead), так что риска нет — только UX-огрубление. */
   private get canAdmin(): boolean {
-    return this.myRole === 'admin';
+    return this.myRole === 'admin' || this.myRole === 'superadmin';
   }
 
-  /** Editor+ (app-level) — испытатели/оборудование. */
+  /** Editor+ (app-level, включая admin/superadmin) — испытатели/оборудование. */
   private get canEditRefs(): boolean {
-    return this.myRole === 'editor' || this.myRole === 'admin';
+    return this.myRole === 'editor' || this.myRole === 'admin' || this.myRole === 'superadmin';
   }
 }

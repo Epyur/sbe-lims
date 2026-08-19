@@ -43,7 +43,7 @@ export class LimsSettingsTab extends PluginSettingTab {
         return;
       }
       container.setText(`Ваша роль: ${me.role || '—'}. Для доступа к ЛИМС нужна роль сотрудника лаборатории (lab_members).`);
-      if (me.role !== 'admin') return;
+      if (me.role !== 'admin' && me.role !== 'superadmin') return;
       container.empty();
       const members = await this.plugin.syncService.listLabMembers();
       const table = container.createEl('table', { cls: 'tn-table' });
@@ -67,6 +67,7 @@ export class LimsSettingsTab extends PluginSettingTab {
       const roleSelect = roleCell.createEl('select', { cls: 'tn-lims-input' });
       roleSelect.createEl('option', { value: 'lab_operator', text: 'Сотрудник' });
       roleSelect.createEl('option', { value: 'lab_admin', text: 'Админ лабы' });
+      roleSelect.createEl('option', { value: 'lab_auditor', text: 'Аудитор (только чтение)' });
       const addCell = addRow.createEl('td');
       const addBtn = addCell.createEl('button', { text: '➕', cls: 'tn-btn tn-btn-primary' });
       addBtn.addEventListener('click', async () => {

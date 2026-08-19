@@ -87,7 +87,10 @@ ProtocolResponse{ html, docx_base64, generated_at }
 
 - Формулы `methods.formulas` `[{id, expression, target_parameter, apply_level, order}]` —
   безопасный интерпретатор (арифметика, сравнения, if/else, агрегации avg/min/max/sum/count/
-  median/std), ссылки на параметры из `values`.
+  median/std), ссылки на параметры из `values`. `apply_level: "series"` — как обычно,
+  к текущей серии; `apply_level: "aggregated"` — считается один раз по всем сериям
+  заявки+метода и пишется в `aggregated_results` (`calculation_type: "formula_aggregated"`,
+  fixed 2026-08-19 — до этого игнорировался и применялся как `series`, см. lab-service/AGENTS.md).
 - Классификация `methods.classification` — threshold/boolean/compliance + ранги.
 - Авто-статистика: при сохранении серии создаётся стат-строка
   (`is_statistical_row=true`, `calculation_type='auto_statistics'`) с avg/count по параметрам.
@@ -101,16 +104,22 @@ ProtocolResponse{ html, docx_base64, generated_at }
 
 ## Роли
 
-`viewer`(1) < `editor`(2) < `admin`(3) [+ `superadmin`(4) — проектируется] + лабораторный
-скоуп: `lab_members(lab_id, email, role)` — `lab_operator`/`lab_admin` [+ `lab_auditor` —
-проектируется]. Сотрудник лаборатории видит заявки своих методов (реализовано на сервере
-2026-08-19 — `requestVisible`/`visibleRequestsQuery` дополнены условием по `lab_members`;
-до этого было только в документации, реально не фильтровало). Ввод результатов —
-lab_operator+. Справочники испытателей/оборудования — editor+; методы-конфиги и
-`lab-members` — admin. Будущая модель прав (согласована 2026-08-18): superadmin создаёт
-лаборатории и админов лабораторий; lab_admin управляет своей лабой (участники, методы,
-админы); lab_operator — испытания/ввод данных/движение заявки; lab_auditor — чтение всех
-разделов своей лабы.
+`viewer`(1) < `editor`(2) < `admin`(3) < `superadmin`(4) + лабораторный скоуп:
+`lab_members(lab_id, email, role)` — `lab_operator`/`lab_admin`/`lab_auditor`.
+Сотрудник лаборатории видит заявки своих методов (`requestVisible`/`visibleRequestsQuery`,
+условие по `lab_members`, реализовано 2026-08-19). Чтение результатов/графиков/протокола —
+lab_operator/lab_admin/**lab_auditor**/app-admin+ (`requireLabRead`); запись (ввод серии,
+расчёт) — lab_operator/lab_admin/app-admin+ (`requireLabAccess`, auditor не допускается).
+Справочники испытателей/оборудования — editor+; методы-конфиги и `lab-members` — admin+.
+`GET /labs` — admin/superadmin видят все, остальные — только лабы, где есть строка
+в `lab_members`. `POST /labs` (создание лабораторий) — только superadmin. Назначать/
+снимать роль `superadmin` может только действующий superadmin (`handleSetPermission`).
+Владелец (`LAB_OWNER_EMAIL`) при каждом старте сервиса гарантированно становится
+superadmin (`seedOwner`, `DO UPDATE`).
+⚠️ **Не реализовано**: делегированные полномочия `lab_admin` внутри своей лабы без
+app-level admin (добавление участников, правка методов своей лабы) — `lab_admin`
+сегодня равен `lab_operator` по факту прав. ⚠️ **Известный пробел**: смена статуса
+заявки (`POST /requests/{id}/status`) проверяет только видимость, не write-право.
 
 ## UI
 
@@ -138,10 +147,13 @@ lab_operator+. Справочники испытателей/оборудова�
 - **Дашборд из плагина удалён** (2026-08-18): таб и метод отсутствуют; отдельный плагин-дашборд
   будет использовать серверный `GET /dashboard`. Серверный эндпоинт не удалять.
 - Настройки: `apiUrl` + раздел «Права доступа» (роли + общий доступ, admin).
-- **Запланировано**: бэкенд прав (superadmin/lab_auditor/фильтрация `/labs`); точная
-  клиентская проверка `lab_operator`/`lab_admin` per-лаба (нужен новый «моя роль в этой
-  лабе» эндпоинт — сейчас `canEdit`/`canEditStatus` для результатов/статуса заявки
-  разрешают всё любой app-роли, сервер всё равно валидирует по `requireLabAccess`).
+- **Реализовано 2026-08-19**: бэкенд ролей (superadmin/lab_auditor/фильтрация `/labs`) —
+  см. раздел «Роли» выше.
+- **Запланировано**: делегированные полномочия `lab_admin` внутри своей лабы (не
+  реализовано — см. «Роли»); точная клиентская проверка `lab_operator`/`lab_admin`/
+  `lab_auditor` per-лаба (нужен новый «моя роль в этой лабе» эндпоинт — сейчас
+  `canEdit`/`canEditStatus` для результатов/статуса заявки разрешают всё любой
+  app-роли, сервер всё равно валидирует по `requireLabAccess`/`requireLabRead`).
 
 ## Локальные данные
 
