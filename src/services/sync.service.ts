@@ -339,8 +339,11 @@ export class LimsSyncService {
 
   /** Обновляет конфигурацию метода (admin): formulas/classification/chart_configs/
    * input_parameters + опционально lab_ids (если передан — полностью заменяет набор
-   * лабораторий метода, минимум одна). */
-  async updateMethodConfig(methodId: number, cfg: Partial<MethodConfig> & { lab_ids?: number[] }): Promise<void> {
+   * лабораторий метода, минимум одна) + опционально description. */
+  async updateMethodConfig(
+    methodId: number,
+    cfg: Partial<MethodConfig> & { lab_ids?: number[]; description?: string },
+  ): Promise<void> {
     const token = await this.getToken();
     const res = await this.request({
       url: `${this.baseUrl}/api/lab/methods/${methodId}`,

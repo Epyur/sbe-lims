@@ -136,10 +136,6 @@ export class LimsView extends ItemView {
     this.crumbEl = topbar.createDiv({ cls: 'tn-lims-crumb' });
     const spacer = topbar.createDiv({ cls: 'tn-lims-spacer' });
     spacer.empty();
-    const createBtn = topbar.createEl('button', { text: '＋ Создать', cls: 'tn-nav-item tn-lims-create' });
-    createBtn.addEventListener('click', () => {
-      new Notice('Фасад: создание будет подключено на этапе наполнения');
-    });
 
     // главная область: сайдбар + контент
     const main = this.rootEl.createDiv({ cls: 'tn-lims-main' });
@@ -652,7 +648,10 @@ export class LimsView extends ItemView {
     if (this.canAdmin) {
       this.renderMethodCreateForm();
     }
-    const methods = this.labId ? this.plugin.methods.filter(m => m.lab_ids.includes(this.labId as number)) : this.plugin.methods;
+    // Все методы, не только текущей выбранной лабы — метод может принадлежать
+    // нескольким (включая внешние), фильтр по this.labId скрывал бы только что
+    // созданный метод, если он не привязан к лабе, открытой в переключателе сейчас.
+    const methods = this.plugin.methods;
     if (methods.length === 0) {
       this.bodyEl.createDiv({ cls: 'tn-lims-meta tn-lims-p24' }).setText('Методов пока нет.');
       return;
@@ -661,6 +660,14 @@ export class LimsView extends ItemView {
       const card = this.bodyEl.createDiv({ cls: 'tn-lims-method' });
       const head = card.createDiv({ cls: 'tn-lims-flex' });
       head.createEl('h4', { text: `${m.code} — ${m.name || 'без названия'}` });
+      const labNames = m.lab_ids
+        .map(id => this.labs.find(l => l.id === id))
+        .filter((l): l is Lab => !!l)
+        .map(l => l.name || l.code);
+      card.createDiv({ cls: 'tn-lims-meta' }).setText(`Лаборатории: ${labNames.join(', ') || '—'}`);
+      if (m.description) {
+        card.createDiv({ cls: 'tn-lims-meta' }).setText(m.description);
+      }
       if (m.determinable_indicators.length > 0) {
         card.createDiv({ cls: 'tn-lims-meta' }).setText(`Показатели: ${m.determinable_indicators.join(', ')}`);
       }
@@ -704,6 +711,7 @@ export class LimsView extends ItemView {
     const row = form.createDiv({ cls: 'tn-lims-flex' });
     const code = row.createEl('input', { attr: { type: 'text', placeholder: 'Код метода' }, cls: 'tn-lims-input' });
     const name = row.createEl('input', { attr: { type: 'text', placeholder: 'Название' }, cls: 'tn-lims-input' });
+    const description = row.createEl('input', { attr: { type: 'text', placeholder: 'Описание' }, cls: 'tn-lims-input' });
     const indicators = row.createEl('input', {
       attr: { type: 'text', placeholder: 'Показатели (через запятую)' },
       cls: 'tn-lims-input',
@@ -719,6 +727,7 @@ export class LimsView extends ItemView {
           code: code.value.trim(),
           name: name.value.trim(),
           lab_ids: labIDs,
+          description: description.value.trim() || undefined,
           determinable_indicators: indicators.value.split(',').map(s => s.trim()).filter(Boolean),
         });
         await this.plugin.refreshMethods();
@@ -738,6 +747,9 @@ export class LimsView extends ItemView {
     const cfg = this.methodConfigOf(methodId);
     const method = this.plugin.methods.find(m => m.id === methodId);
     const form = container.createDiv({ cls: 'tn-lims-series-form' });
+    form.createDiv({ cls: 'tn-lims-meta' }).setText('Описание:');
+    const description = form.createEl('input', { attr: { type: 'text', placeholder: 'Описание' }, cls: 'tn-lims-input' });
+    description.value = method?.description || '';
     form.createDiv({ cls: 'tn-lims-meta' }).setText('Лаборатории (метод может принадлежать нескольким):');
     const getLabIDs = this.renderLabCheckboxes(form, method?.lab_ids || []);
     const fields: Array<{ key: keyof MethodConfig; label: string }> = [
@@ -758,7 +770,10 @@ export class LimsView extends ItemView {
     saveBtn.addEventListener('click', async () => {
       const labIDs = getLabIDs();
       if (labIDs.length === 0) { new Notice('Укажите хотя бы одну лабораторию'); return; }
-      const patch: Partial<MethodConfig> & { lab_ids?: number[] } = { lab_ids: labIDs };
+      const patch: Partial<MethodConfig> & { lab_ids?: number[]; description?: string } = {
+        lab_ids: labIDs,
+        description: description.value.trim(),
+      };
       try {
         for (const f of fields) {
           patch[f.key] = JSON.parse(areas[f.key]!.value) as never;
