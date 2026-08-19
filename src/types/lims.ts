@@ -1,12 +1,14 @@
 /** Типы плагина «ЛИМС» (sbe-lims). Модель совместима с lab-service. */
 
-/** Лаборатория. */
+/** Лаборатория. Внешняя (type='external') не существует самостоятельно —
+ * parent_lab_id указывает на внутреннюю, обязателен при создании внешней. */
 export interface Lab {
   id: number;
   code: string;
   name: string;
   description: string;
   type: string;
+  parent_lab_id: number;
   created_at: string;
   updated_at: string;
 }
@@ -26,13 +28,16 @@ export interface LimsRequest {
   status: string;
   priority: string;
   test_purpose: string;
-  external_lab_id: number;
   ekn: string;
   /** Номер из legacy-системы (email-трекер LPITrack, «LPIZAYAVKINAPRO-<N>») —
    * для заявок переходного периода миграции; у новых заявок пусто. */
   external_id: string;
   /** Метод испытаний (1 заявка = 1 метод). */
   method_id: number;
+  /** Конкретная лаборатория из lab_ids метода, выбранная при создании заявки
+   * (2026-08-19, заменяет старую external_lab_id — методы теперь могут принадлежать
+   * нескольким лабам, поэтому заявка обязана явно фиксировать одну). */
+  lab_id: number;
   /** Номер заказчику: {projectCode}-{NNN}/{yyyy}-{labCode}-{methodCode}. */
   customer_number: string;
   /** Номер лаборатории: {NNN}/{yyyy}-{methodCode}. */
@@ -52,12 +57,14 @@ export interface LabObject {
   updated_at: string;
 }
 
-/** Метод испытаний (справочник lab-service). */
+/** Метод испытаний (справочник lab-service). Может принадлежать нескольким
+ * лабораториям (2026-08-19, method_labs many-to-many) — lab_ids заменяет старую
+ * единичную lab_id. */
 export interface LabMethod {
   id: number;
   code: string;
   name: string;
-  lab_id: number;
+  lab_ids: number[];
   description: string;
   determinable_indicators: string[];
   formulas: Array<Record<string, unknown>>;

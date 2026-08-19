@@ -184,6 +184,27 @@ export class LimsSyncService {
     }
   }
 
+  /** Создаёт лабораторию (superadmin). Внешняя (type='external') обязана указать
+   * parent_lab_id существующей внутренней лабы — сервер иначе откажет (400). */
+  async createLab(data: {
+    code: string;
+    name: string;
+    description?: string;
+    type?: string;
+    parent_lab_id?: number;
+  }): Promise<number> {
+    return this.createEntity('/api/lab/labs', data);
+  }
+
+  /** Правит лабораторию (superadmin), частичный PATCH. Та же валидация type/parent_lab_id,
+   * что при создании — сервер откажет несогласованной комбинацией (400). */
+  async updateLab(
+    id: number,
+    data: Partial<{ code: string; name: string; description: string; type: string; parent_lab_id: number }>,
+  ): Promise<void> {
+    await this.patchEntity(`/api/lab/labs/${id}`, data);
+  }
+
   /** Объекты исследования (только чтение — создание в sbe-requests). */
   async listObjects(): Promise<LabObject[]> {
     const token = await this.getToken();
@@ -223,6 +244,17 @@ export class LimsSyncService {
     return this.createEntity('/api/lab/inventors', data);
   }
 
+  async updateInventor(
+    id: number,
+    data: Partial<{ name: string; email: string; phone: string; department: string; position: string }>,
+  ): Promise<void> {
+    await this.patchEntity(`/api/lab/inventors/${id}`, data);
+  }
+
+  async deleteInventor(id: number): Promise<void> {
+    await this.deleteEntity(`/api/lab/inventors/${id}`);
+  }
+
   async listEquipment(): Promise<Equipment[]> {
     const token = await this.getToken();
     const res = await this.request({
@@ -242,6 +274,17 @@ export class LimsSyncService {
 
   async createEquipment(data: { code: string; name: string; location?: string; responsible?: string }): Promise<number> {
     return this.createEntity('/api/lab/equipment', data);
+  }
+
+  async updateEquipment(
+    id: number,
+    data: Partial<{ code: string; name: string; location: string; responsible: string }>,
+  ): Promise<void> {
+    await this.patchEntity(`/api/lab/equipment/${id}`, data);
+  }
+
+  async deleteEquipment(id: number): Promise<void> {
+    await this.deleteEntity(`/api/lab/equipment/${id}`);
   }
 
   async listLabMembers(): Promise<LabMember[]> {
@@ -282,8 +325,22 @@ export class LimsSyncService {
     this.assertOk(res);
   }
 
-  /** Обновляет конфигурацию метода (admin). */
-  async updateMethodConfig(methodId: number, cfg: Partial<MethodConfig>): Promise<void> {
+  /** Создаёт метод (admin). lab_ids — метод теперь может принадлежать нескольким
+   * лабораториям (2026-08-19, method_labs); сервер требует минимум одну. */
+  async createMethod(data: {
+    code: string;
+    name: string;
+    lab_ids: number[];
+    description?: string;
+    determinable_indicators?: string[];
+  }): Promise<number> {
+    return this.createEntity('/api/lab/methods', data);
+  }
+
+  /** Обновляет конфигурацию метода (admin): formulas/classification/chart_configs/
+   * input_parameters + опционально lab_ids (если передан — полностью заменяет набор
+   * лабораторий метода, минимум одна). */
+  async updateMethodConfig(methodId: number, cfg: Partial<MethodConfig> & { lab_ids?: number[] }): Promise<void> {
     const token = await this.getToken();
     const res = await this.request({
       url: `${this.baseUrl}/api/lab/methods/${methodId}`,
@@ -292,6 +349,11 @@ export class LimsSyncService {
       body: JSON.stringify(cfg),
     });
     this.assertOk(res);
+  }
+
+  /** Удаляет метод (admin). 409, если метод уже используется в заявках/справочниках. */
+  async deleteMethod(methodId: number): Promise<void> {
+    await this.deleteEntity(`/api/lab/methods/${methodId}`);
   }
 
   // ---- Графики / протокол / дашборд ----
@@ -335,6 +397,27 @@ export class LimsSyncService {
       console.warn('ЛИМС: не JSON в ответе entity:', errorMessage(e));
       throw new Error('Сервер вернул не JSON при создании');
     }
+  }
+
+  private async patchEntity(path: string, body: Record<string, unknown>): Promise<void> {
+    const token = await this.getToken();
+    const res = await this.request({
+      url: `${this.baseUrl}${path}`,
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify(body),
+    });
+    this.assertOk(res);
+  }
+
+  private async deleteEntity(path: string): Promise<void> {
+    const token = await this.getToken();
+    const res = await this.request({
+      url: `${this.baseUrl}${path}`,
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    this.assertOk(res);
   }
 
   private assertOk(res: { status: number; text: string }): void {

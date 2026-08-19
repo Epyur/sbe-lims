@@ -1,6 +1,6 @@
 import { ItemView, Notice, WorkspaceLeaf } from 'obsidian';
 import type SbeLimsPlugin from '../main';
-import type { Lab, LimsRequest, MeasurementResult, MethodConfig } from '../types/lims';
+import type { Equipment, Inventor, Lab, LabMember, LimsRequest, MeasurementResult, MethodConfig } from '../types/lims';
 import { errorMessage } from '../../../sbe-core/src/utils/errors';
 
 export const SBE_LIMS_VIEW_TYPE = 'sbe-lims-view';
@@ -21,7 +21,8 @@ type NavKey =
   | 'results'
   | 'inventors'
   | 'equipment'
-  | 'lab-members';
+  | 'lab-members'
+  | 'settings';
 
 interface NavItem {
   key: NavKey;
@@ -71,6 +72,7 @@ const PAGE_META: Record<NavKey, { title: string; sub: string }> = {
   inventors: { title: 'Испытатели', sub: 'Справочник' },
   equipment: { title: 'Оборудование', sub: 'Справочник' },
   'lab-members': { title: 'Сотрудники', sub: 'Состав и права лаборатории' },
+  settings: { title: 'Настройки', sub: 'Лаборатории и их администраторы' },
 };
 
 export class LimsView extends ItemView {
@@ -84,6 +86,7 @@ export class LimsView extends ItemView {
   private crumbEl!: HTMLElement;
   private labBarEl!: HTMLElement;
   private labSwitchEl!: HTMLSelectElement;
+  private settingsBtnEl!: HTMLElement;
 
   private key: NavKey = 'requests';
   private labId: number | null = null;
@@ -162,6 +165,19 @@ export class LimsView extends ItemView {
     this.navEl = sidebar.createDiv({ cls: 'tn-lims-nav' });
     this.buildNav();
 
+    // «Настройки» — внизу сайдбара (flex:1 у navEl прижимает этот блок к низу),
+    // отдельно от дерева: лаборатории/администраторы — не раздел работы с заявками.
+    // Видна admin+ (лабы — только superadmin, назначение админов — admin+, обе
+    // ветки гейтятся внутри renderSettings/renderSettingsLabRow).
+    this.settingsBtnEl = sidebar.createDiv({ cls: 'tn-lims-collapse' });
+    this.settingsBtnEl.createSpan({ text: '⚙' });
+    this.settingsBtnEl.createSpan({ cls: 'tn-lims-collapse-lbl', text: 'Настройки' });
+    this.settingsBtnEl.addEventListener('click', () => {
+      this.key = 'settings';
+      this.syncNavActive();
+      void this.renderPage();
+    });
+
     const content = main.createDiv({ cls: 'tn-lims-content' });
     this.pageTitleEl = content.createEl('h1', { cls: 'tn-lims-page-title' });
     this.pageSubEl = content.createDiv({ cls: 'tn-lims-page-sub' });
@@ -238,18 +254,179 @@ export class LimsView extends ItemView {
       this.labs = [];
     }
 
+    this.refreshLabSwitcher();
+    if (this.labSwitchEl.options.length > 0) {
+      this.labId = this.labs[0].id;
+      this.labSwitchEl.value = String(this.labId);
+    }
+    this.settingsBtnEl.style.display = (this.myRole === 'admin' || this.myRole === 'superadmin') ? '' : 'none';
+
+    this.syncNavActive();
+    await this.renderPage();
+  }
+
+  /** Пересобирает select лабораторий; скрыт при 0/1 (нечего переключать). */
+  private refreshLabSwitcher(): void {
     this.labBarEl.style.display = this.labs.length <= 1 ? 'none' : '';
     this.labSwitchEl.empty();
     for (const lab of this.labs) {
       this.labSwitchEl.createEl('option', { value: String(lab.id), text: lab.name || lab.code });
     }
-    if (this.labSwitchEl.options.length > 0) {
-      this.labId = this.labs[0].id;
-      this.labSwitchEl.value = String(this.labId);
+  }
+
+  /** «Настройки»: лаборатории (создание/правка — только superadmin) + назначение
+   * администраторов лабораторий (lab_members role=lab_admin — admin+, только для
+   * внутренних лаб, у внешних lab_members не бывает по определению). */
+  private async renderSettings(): Promise<void> {
+    if (this.myRole !== 'admin' && this.myRole !== 'superadmin') {
+      this.bodyEl.createDiv({ cls: 'tn-lims-meta tn-lims-p24' }).setText('Раздел доступен администраторам.');
+      return;
+    }
+    this.bodyEl.createDiv({ cls: 'tn-lims-meta', text: 'Загрузка…' });
+    try {
+      const members = await this.plugin.syncService.listLabMembers();
+      this.bodyEl.empty();
+      this.bodyEl.createEl('h3', { text: 'Лаборатории' });
+      for (const lab of this.labs) {
+        this.renderSettingsLabRow(lab, members.filter(m => m.lab_id === lab.id));
+      }
+      if (this.myRole === 'superadmin') {
+        const addBtn = this.bodyEl.createEl('button', { text: '➕ Новая лаборатория', cls: 'tn-btn tn-btn-ghost' });
+        addBtn.addEventListener('click', () => {
+          const existing = this.bodyEl.querySelector('.tn-lims-lab-form');
+          if (existing) { existing.remove(); return; }
+          this.renderLabForm(null, this.bodyEl);
+        });
+      }
+    } catch (e: unknown) {
+      this.bodyEl.empty();
+      this.bodyEl.createDiv({ cls: 'tn-lims-error' }).setText(`Ошибка: ${errorMessage(e)}`);
+    }
+  }
+
+  /** Карточка одной лаборатории в «Настройках»: правка (superadmin) + список/
+   * назначение администраторов (admin+, только для внутренних лаб). */
+  private renderSettingsLabRow(lab: Lab, members: LabMember[]): void {
+    const card = this.bodyEl.createDiv({ cls: 'tn-lims-method' });
+    const head = card.createDiv({ cls: 'tn-lims-flex' });
+    const parent = lab.parent_lab_id ? this.labs.find(l => l.id === lab.parent_lab_id) : undefined;
+    let title = lab.name || lab.code;
+    if (lab.type === 'external') {
+      title += parent ? ` (внешняя → ${parent.name || parent.code})` : ' (внешняя, без родителя!)';
+    }
+    head.createEl('h4', { text: title });
+    if (this.myRole === 'superadmin') {
+      const editBtn = head.createEl('button', { text: '✎ Изменить', cls: 'tn-btn tn-btn-ghost' });
+      editBtn.addEventListener('click', () => {
+        const existing = card.querySelector('.tn-lims-lab-form');
+        if (existing) { existing.remove(); return; }
+        this.renderLabForm(lab, card);
+      });
     }
 
-    this.syncNavActive();
-    await this.renderPage();
+    if (lab.type !== 'internal') return; // у внешней лабы lab_members не бывает
+    const admins = members.filter(m => m.role === 'lab_admin');
+    card.createDiv({ cls: 'tn-lims-meta' }).setText(
+      admins.length > 0 ? `Администраторы: ${admins.map(a => a.email).join(', ')}` : 'Администраторов пока нет',
+    );
+    for (const a of admins) {
+      const row = card.createDiv({ cls: 'tn-lims-flex' });
+      row.createSpan({ text: a.email });
+      const rmBtn = row.createEl('button', { text: '✖', cls: 'tn-btn tn-btn-ghost' });
+      rmBtn.addEventListener('click', async () => {
+        if (!window.confirm(`Убрать «${a.email}» из администраторов «${lab.name || lab.code}»?`)) return;
+        try {
+          await this.plugin.syncService.removeLabMember(lab.id, a.email);
+          new Notice('Администратор убран');
+          await this.renderSettings();
+        } catch (e: unknown) {
+          new Notice(`Ошибка: ${errorMessage(e)}`);
+        }
+      });
+    }
+    const addRow = card.createDiv({ cls: 'tn-lims-flex' });
+    const emailInp = addRow.createEl('input', {
+      attr: { type: 'text', placeholder: 'E-mail нового администратора' },
+      cls: 'tn-lims-input',
+    });
+    const addBtn = addRow.createEl('button', { text: '➕ Назначить администратором', cls: 'tn-btn tn-btn-primary' });
+    addBtn.addEventListener('click', async () => {
+      if (!emailInp.value.trim()) { new Notice('Укажите e-mail'); return; }
+      try {
+        await this.plugin.syncService.setLabMember(lab.id, emailInp.value.trim(), 'lab_admin');
+        new Notice('Администратор назначен');
+        await this.renderSettings();
+      } catch (e: unknown) {
+        new Notice(`Ошибка: ${errorMessage(e)}`);
+      }
+    });
+  }
+
+  /** Форма создания/правки лаборатории (lab=null — создание), рендерится в
+   * переданный container (карточка лабы или общий bodyEl для «новой»). Внешняя не
+   * существует самостоятельно — обязана указать родительскую внутреннюю
+   * (parentSelect появляется только при выборе «внешняя»). */
+  private renderLabForm(lab: Lab | null, container: HTMLElement): void {
+    const form = container.createDiv({ cls: 'tn-lims-series-form tn-lims-lab-form' });
+    const code = form.createEl('input', { attr: { type: 'text', placeholder: 'Код (уникальный)' }, cls: 'tn-lims-input' });
+    code.value = lab?.code || '';
+    const name = form.createEl('input', { attr: { type: 'text', placeholder: 'Название' }, cls: 'tn-lims-input' });
+    name.value = lab?.name || '';
+    const description = form.createEl('input', { attr: { type: 'text', placeholder: 'Описание' }, cls: 'tn-lims-input' });
+    description.value = lab?.description || '';
+    const typeSelect = form.createEl('select', { cls: 'tn-lims-select' });
+    typeSelect.createEl('option', { value: 'internal', text: 'Внутренняя' });
+    typeSelect.createEl('option', { value: 'external', text: 'Внешняя (привязывается к внутренней)' });
+    typeSelect.value = lab?.type === 'external' ? 'external' : 'internal';
+    const internalLabs = this.labs.filter(l => l.type === 'internal' && l.id !== lab?.id);
+    const parentSelect = form.createEl('select', { cls: 'tn-lims-select' });
+    parentSelect.createEl('option', { value: '', text: '— Родительская внутренняя лаба —' });
+    for (const l of internalLabs) parentSelect.createEl('option', { value: String(l.id), text: l.name || l.code });
+    if (lab?.parent_lab_id) parentSelect.value = String(lab.parent_lab_id);
+    parentSelect.style.display = typeSelect.value === 'external' ? '' : 'none';
+    typeSelect.addEventListener('change', () => {
+      parentSelect.style.display = typeSelect.value === 'external' ? '' : 'none';
+    });
+    const saveBtn = form.createEl('button', { text: lab ? '💾 Сохранить' : '➕ Создать', cls: 'tn-btn tn-btn-primary' });
+    const cancelBtn = form.createEl('button', { text: '✖ Отмена', cls: 'tn-btn tn-btn-ghost' });
+    cancelBtn.addEventListener('click', () => form.remove());
+    saveBtn.addEventListener('click', async () => {
+      if (!code.value.trim() || !name.value.trim()) { new Notice('Укажите код и название'); return; }
+      if (typeSelect.value === 'external' && !parentSelect.value) {
+        new Notice('Внешняя лаборатория обязана быть привязана к внутренней');
+        return;
+      }
+      try {
+        if (lab) {
+          await this.plugin.syncService.updateLab(lab.id, {
+            code: code.value.trim(),
+            name: name.value.trim(),
+            description: description.value.trim(),
+            type: typeSelect.value,
+            parent_lab_id: typeSelect.value === 'external' ? Number(parentSelect.value) : 0,
+          });
+          new Notice('Лаборатория обновлена');
+        } else {
+          const id = await this.plugin.syncService.createLab({
+            code: code.value.trim(),
+            name: name.value.trim(),
+            description: description.value.trim() || undefined,
+            type: typeSelect.value,
+            parent_lab_id: typeSelect.value === 'external' ? Number(parentSelect.value) : undefined,
+          });
+          this.labId = id;
+          new Notice('Лаборатория создана');
+        }
+        this.labs = await this.plugin.syncService.listLabs();
+        this.refreshLabSwitcher();
+        if (this.labId !== null && this.labSwitchEl.querySelector(`option[value="${this.labId}"]`)) {
+          this.labSwitchEl.value = String(this.labId);
+        }
+        await this.renderSettings();
+      } catch (e: unknown) {
+        new Notice(`Ошибка: ${errorMessage(e)}`);
+      }
+    });
   }
 
   // ---- Контент (фасад: заглушки) ----
@@ -291,6 +468,9 @@ export class LimsView extends ItemView {
         return;
       case 'lab-members':
         await this.renderLabMembers();
+        return;
+      case 'settings':
+        await this.renderSettings();
         return;
     }
   }
@@ -361,9 +541,14 @@ export class LimsView extends ItemView {
       });
     }
 
-    // результаты по методу заявки (1 заявка = 1 метод)
+    // результаты по методу заявки (1 заявка = 1 метод, выполняется конкретной лабой
+    // из lab_ids метода — зафиксирована на заявке как lab_id, метод мог принадлежать
+    // нескольким)
     const methodDiv = this.bodyEl.createDiv({ cls: 'tn-lims-method' });
-    methodDiv.createEl('h4', { text: `Метод: ${this.methodName(req.method_id)}` });
+    const labLabel = this.labs.find(l => l.id === req.lab_id);
+    methodDiv.createEl('h4', {
+      text: `Метод: ${this.methodName(req.method_id)}${labLabel ? ` · Лаборатория: ${labLabel.name || labLabel.code}` : ''}`,
+    });
 
     // форма ввода новой серии
     if (this.canEdit) {
@@ -461,9 +646,13 @@ export class LimsView extends ItemView {
 
   // ---- Справочники ----
 
-  /** Методы: список из кэша (pull); JSON-редактор конфигов — admin. */
+  /** Методы: список из кэша (pull); создание + JSON-редактор конфигов + удаление — admin. */
   private async renderMethods(): Promise<void> {
-    const methods = this.labId ? this.plugin.methods.filter(m => m.lab_id === this.labId) : this.plugin.methods;
+    this.bodyEl.empty();
+    if (this.canAdmin) {
+      this.renderMethodCreateForm();
+    }
+    const methods = this.labId ? this.plugin.methods.filter(m => m.lab_ids.includes(this.labId as number)) : this.plugin.methods;
     if (methods.length === 0) {
       this.bodyEl.createDiv({ cls: 'tn-lims-meta tn-lims-p24' }).setText('Методов пока нет.');
       return;
@@ -478,16 +667,79 @@ export class LimsView extends ItemView {
       if (this.canAdmin) {
         const editBtn = head.createEl('button', { text: '✎ Конфиг', cls: 'tn-btn tn-btn-ghost' });
         editBtn.addEventListener('click', () => this.renderMethodConfigForm(card, m.id));
+        const delBtn = head.createEl('button', { text: '✖ Удалить', cls: 'tn-btn tn-btn-ghost' });
+        delBtn.addEventListener('click', async () => {
+          if (!window.confirm(`Удалить метод «${m.code}»? Если по нему уже есть заявки, сервер откажет.`)) return;
+          try {
+            await this.plugin.syncService.deleteMethod(m.id);
+            await this.plugin.refreshMethods();
+            new Notice('Метод удалён');
+            await this.renderMethods();
+          } catch (e: unknown) {
+            new Notice(`Ошибка: ${errorMessage(e)}`);
+          }
+        });
       }
     }
   }
 
-  /** JSON-редактор formulas/classification/chart_configs/input_parameters метода (admin). */
+  /** Чекбоксы выбора лабораторий метода (принадлежит нескольким — 2026-08-19).
+   * Возвращает функцию, читающую текущий выбор в момент сохранения. */
+  private renderLabCheckboxes(container: HTMLElement, selected: number[]): () => number[] {
+    const boxes: Array<{ id: number; el: HTMLInputElement }> = [];
+    for (const lab of this.labs) {
+      const row = container.createDiv({ cls: 'tn-lims-flex' });
+      const cb = row.createEl('input', { attr: { type: 'checkbox' } });
+      cb.checked = selected.includes(lab.id);
+      row.createSpan({ text: lab.name || lab.code });
+      boxes.push({ id: lab.id, el: cb });
+    }
+    return () => boxes.filter(b => b.el.checked).map(b => b.id);
+  }
+
+  /** Форма создания метода (admin). Лаборатории — чекбоксы (метод может принадлежать
+   * нескольким), из уже загруженного списка лабораторий. */
+  private renderMethodCreateForm(): void {
+    const form = this.bodyEl.createDiv({ cls: 'tn-lims-series-form' });
+    const row = form.createDiv({ cls: 'tn-lims-flex' });
+    const code = row.createEl('input', { attr: { type: 'text', placeholder: 'Код метода' }, cls: 'tn-lims-input' });
+    const name = row.createEl('input', { attr: { type: 'text', placeholder: 'Название' }, cls: 'tn-lims-input' });
+    const indicators = row.createEl('input', {
+      attr: { type: 'text', placeholder: 'Показатели (через запятую)' },
+      cls: 'tn-lims-input',
+    });
+    form.createDiv({ cls: 'tn-lims-meta' }).setText('Лаборатории (метод может принадлежать нескольким):');
+    const getLabIDs = this.renderLabCheckboxes(form, []);
+    const addBtn = form.createEl('button', { text: '➕ Добавить метод', cls: 'tn-btn tn-btn-primary' });
+    addBtn.addEventListener('click', async () => {
+      const labIDs = getLabIDs();
+      if (!code.value.trim() || labIDs.length === 0) { new Notice('Укажите код метода и хотя бы одну лабораторию'); return; }
+      try {
+        await this.plugin.syncService.createMethod({
+          code: code.value.trim(),
+          name: name.value.trim(),
+          lab_ids: labIDs,
+          determinable_indicators: indicators.value.split(',').map(s => s.trim()).filter(Boolean),
+        });
+        await this.plugin.refreshMethods();
+        new Notice('Метод создан');
+        await this.renderMethods();
+      } catch (e: unknown) {
+        new Notice(`Ошибка: ${errorMessage(e)}`);
+      }
+    });
+  }
+
+  /** JSON-редактор formulas/classification/chart_configs/input_parameters метода
+   * (admin) + чекбоксы лабораторий (lab_ids, метод может принадлежать нескольким). */
   private renderMethodConfigForm(container: HTMLElement, methodId: number): void {
     const existing = container.querySelector('.tn-lims-series-form');
     if (existing) { existing.remove(); return; }
     const cfg = this.methodConfigOf(methodId);
+    const method = this.plugin.methods.find(m => m.id === methodId);
     const form = container.createDiv({ cls: 'tn-lims-series-form' });
+    form.createDiv({ cls: 'tn-lims-meta' }).setText('Лаборатории (метод может принадлежать нескольким):');
+    const getLabIDs = this.renderLabCheckboxes(form, method?.lab_ids || []);
     const fields: Array<{ key: keyof MethodConfig; label: string }> = [
       { key: 'formulas', label: 'formulas (JSON)' },
       { key: 'classification', label: 'classification (JSON)' },
@@ -504,7 +756,9 @@ export class LimsView extends ItemView {
     }
     const saveBtn = form.createEl('button', { text: '💾 Сохранить', cls: 'tn-btn tn-btn-primary' });
     saveBtn.addEventListener('click', async () => {
-      const patch: Partial<MethodConfig> = {};
+      const labIDs = getLabIDs();
+      if (labIDs.length === 0) { new Notice('Укажите хотя бы одну лабораторию'); return; }
+      const patch: Partial<MethodConfig> & { lab_ids?: number[] } = { lab_ids: labIDs };
       try {
         for (const f of fields) {
           patch[f.key] = JSON.parse(areas[f.key]!.value) as never;
@@ -550,7 +804,7 @@ export class LimsView extends ItemView {
     }
   }
 
-  /** Испытатели — список (viewer) + создание (editor+). */
+  /** Испытатели — список (viewer) + создание/правка/удаление (editor+). */
   private async renderInventors(): Promise<void> {
     this.bodyEl.createDiv({ cls: 'tn-lims-meta', text: 'Загрузка…' });
     try {
@@ -565,20 +819,74 @@ export class LimsView extends ItemView {
       }
       const table = this.bodyEl.createEl('table', { cls: 'tn-table' });
       const thead = table.createEl('thead').createEl('tr');
-      for (const h of ['ФИО', 'E-mail', 'Телефон', 'Отдел', 'Должность']) thead.createEl('th').setText(h);
+      for (const h of ['ФИО', 'E-mail', 'Телефон', 'Отдел', 'Должность', '']) thead.createEl('th').setText(h);
       const tbody = table.createEl('tbody');
       for (const inv of inventors) {
-        const tr = tbody.createEl('tr');
-        tr.createEl('td').setText(inv.name);
-        tr.createEl('td').setText(inv.email || '—');
-        tr.createEl('td').setText(inv.phone || '—');
-        tr.createEl('td').setText(inv.department || '—');
-        tr.createEl('td').setText(inv.position || '—');
+        this.renderInventorRow(tbody, inv);
       }
     } catch (e: unknown) {
       this.bodyEl.empty();
       this.bodyEl.createDiv({ cls: 'tn-lims-error' }).setText(`Ошибка: ${errorMessage(e)}`);
     }
+  }
+
+  private renderInventorRow(tbody: HTMLElement, inv: Inventor): void {
+    const tr = tbody.createEl('tr');
+    tr.createEl('td').setText(inv.name);
+    tr.createEl('td').setText(inv.email || '—');
+    tr.createEl('td').setText(inv.phone || '—');
+    tr.createEl('td').setText(inv.department || '—');
+    tr.createEl('td').setText(inv.position || '—');
+    const actions = tr.createEl('td');
+    if (!this.canEditRefs) return;
+    const editBtn = actions.createEl('button', { text: '✎', cls: 'tn-btn tn-btn-ghost' });
+    const delBtn = actions.createEl('button', { text: '✖', cls: 'tn-btn tn-btn-ghost' });
+    editBtn.addEventListener('click', () => this.renderInventorEditRow(tbody, tr, inv));
+    delBtn.addEventListener('click', async () => {
+      if (!window.confirm(`Удалить испытателя «${inv.name}»?`)) return;
+      try {
+        await this.plugin.syncService.deleteInventor(inv.id);
+        new Notice('Испытатель удалён');
+        await this.renderInventors();
+      } catch (e: unknown) {
+        new Notice(`Ошибка: ${errorMessage(e)}`);
+      }
+    });
+  }
+
+  /** Заменяет строку таблицы на форму правки испытателя (по месту, без перехода). */
+  private renderInventorEditRow(tbody: HTMLElement, tr: HTMLElement, inv: Inventor): void {
+    tr.empty();
+    const nameInp = tr.createEl('td').createEl('input', { attr: { type: 'text' }, cls: 'tn-lims-input' });
+    nameInp.value = inv.name;
+    const emailInp = tr.createEl('td').createEl('input', { attr: { type: 'text' }, cls: 'tn-lims-input' });
+    emailInp.value = inv.email;
+    const phoneInp = tr.createEl('td').createEl('input', { attr: { type: 'text' }, cls: 'tn-lims-input' });
+    phoneInp.value = inv.phone;
+    const deptInp = tr.createEl('td').createEl('input', { attr: { type: 'text' }, cls: 'tn-lims-input' });
+    deptInp.value = inv.department;
+    const posInp = tr.createEl('td').createEl('input', { attr: { type: 'text' }, cls: 'tn-lims-input' });
+    posInp.value = inv.position;
+    const actions = tr.createEl('td');
+    const saveBtn = actions.createEl('button', { text: '💾', cls: 'tn-btn tn-btn-primary' });
+    const cancelBtn = actions.createEl('button', { text: '✖', cls: 'tn-btn tn-btn-ghost' });
+    saveBtn.addEventListener('click', async () => {
+      if (!nameInp.value.trim() || !emailInp.value.trim()) { new Notice('Укажите ФИО и e-mail'); return; }
+      try {
+        await this.plugin.syncService.updateInventor(inv.id, {
+          name: nameInp.value.trim(),
+          email: emailInp.value.trim(),
+          phone: phoneInp.value.trim(),
+          department: deptInp.value.trim(),
+          position: posInp.value.trim(),
+        });
+        new Notice('Испытатель обновлён');
+        await this.renderInventors();
+      } catch (e: unknown) {
+        new Notice(`Ошибка: ${errorMessage(e)}`);
+      }
+    });
+    cancelBtn.addEventListener('click', () => void this.renderInventors());
   }
 
   private renderInventorForm(): void {
@@ -607,7 +915,7 @@ export class LimsView extends ItemView {
     });
   }
 
-  /** Оборудование — список (viewer) + создание (editor+). */
+  /** Оборудование — список (viewer) + создание/правка/удаление (editor+). */
   private async renderEquipment(): Promise<void> {
     this.bodyEl.createDiv({ cls: 'tn-lims-meta', text: 'Загрузка…' });
     try {
@@ -622,20 +930,72 @@ export class LimsView extends ItemView {
       }
       const table = this.bodyEl.createEl('table', { cls: 'tn-table' });
       const thead = table.createEl('thead').createEl('tr');
-      for (const h of ['Код', 'Название', 'Расположение', 'Ответственный', 'Статус']) thead.createEl('th').setText(h);
+      for (const h of ['Код', 'Название', 'Расположение', 'Ответственный', 'Статус', '']) thead.createEl('th').setText(h);
       const tbody = table.createEl('tbody');
       for (const eq of equipment) {
-        const tr = tbody.createEl('tr');
-        tr.createEl('td').setText(eq.code);
-        tr.createEl('td').setText(eq.name);
-        tr.createEl('td').setText(eq.location || '—');
-        tr.createEl('td').setText(eq.responsible || '—');
-        tr.createEl('td').setText(eq.status || '—');
+        this.renderEquipmentRow(tbody, eq);
       }
     } catch (e: unknown) {
       this.bodyEl.empty();
       this.bodyEl.createDiv({ cls: 'tn-lims-error' }).setText(`Ошибка: ${errorMessage(e)}`);
     }
+  }
+
+  private renderEquipmentRow(tbody: HTMLElement, eq: Equipment): void {
+    const tr = tbody.createEl('tr');
+    tr.createEl('td').setText(eq.code);
+    tr.createEl('td').setText(eq.name);
+    tr.createEl('td').setText(eq.location || '—');
+    tr.createEl('td').setText(eq.responsible || '—');
+    tr.createEl('td').setText(eq.status || '—');
+    const actions = tr.createEl('td');
+    if (!this.canEditRefs) return;
+    const editBtn = actions.createEl('button', { text: '✎', cls: 'tn-btn tn-btn-ghost' });
+    const delBtn = actions.createEl('button', { text: '✖', cls: 'tn-btn tn-btn-ghost' });
+    editBtn.addEventListener('click', () => this.renderEquipmentEditRow(tbody, tr, eq));
+    delBtn.addEventListener('click', async () => {
+      if (!window.confirm(`Удалить оборудование «${eq.name}»?`)) return;
+      try {
+        await this.plugin.syncService.deleteEquipment(eq.id);
+        new Notice('Оборудование удалено');
+        await this.renderEquipment();
+      } catch (e: unknown) {
+        new Notice(`Ошибка: ${errorMessage(e)}`);
+      }
+    });
+  }
+
+  /** Заменяет строку таблицы на форму правки оборудования (по месту, без перехода). */
+  private renderEquipmentEditRow(tbody: HTMLElement, tr: HTMLElement, eq: Equipment): void {
+    tr.empty();
+    const codeInp = tr.createEl('td').createEl('input', { attr: { type: 'text' }, cls: 'tn-lims-input' });
+    codeInp.value = eq.code;
+    const nameInp = tr.createEl('td').createEl('input', { attr: { type: 'text' }, cls: 'tn-lims-input' });
+    nameInp.value = eq.name;
+    const locInp = tr.createEl('td').createEl('input', { attr: { type: 'text' }, cls: 'tn-lims-input' });
+    locInp.value = eq.location;
+    const respInp = tr.createEl('td').createEl('input', { attr: { type: 'text' }, cls: 'tn-lims-input' });
+    respInp.value = eq.responsible;
+    tr.createEl('td').setText(eq.status || '—');
+    const actions = tr.createEl('td');
+    const saveBtn = actions.createEl('button', { text: '💾', cls: 'tn-btn tn-btn-primary' });
+    const cancelBtn = actions.createEl('button', { text: '✖', cls: 'tn-btn tn-btn-ghost' });
+    saveBtn.addEventListener('click', async () => {
+      if (!codeInp.value.trim() || !nameInp.value.trim()) { new Notice('Укажите код и название'); return; }
+      try {
+        await this.plugin.syncService.updateEquipment(eq.id, {
+          code: codeInp.value.trim(),
+          name: nameInp.value.trim(),
+          location: locInp.value.trim(),
+          responsible: respInp.value.trim(),
+        });
+        new Notice('Оборудование обновлено');
+        await this.renderEquipment();
+      } catch (e: unknown) {
+        new Notice(`Ошибка: ${errorMessage(e)}`);
+      }
+    });
+    cancelBtn.addEventListener('click', () => void this.renderEquipment());
   }
 
   private renderEquipmentForm(): void {

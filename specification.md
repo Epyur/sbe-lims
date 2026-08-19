@@ -28,10 +28,14 @@ SBE-плагин «ЛИМС» для сотрудников лаборатори
 | Метод | Путь | Роль | Тело / ответ |
 |---|---|---|---|
 | GET/POST | `/inventors` | viewer / editor+ | `{"inventors":[...]}` / `{name,email,phone?,department?,position?}` → `{id}` |
+| PATCH/DELETE | `/inventors/{id}` | editor+ | частичный `{name?,email?,phone?,department?,position?}` → `{ok}` / → `{ok}`; DELETE 409, если испытатель уже есть в результатах |
 | GET/POST | `/equipment` | viewer / editor+ | `{"equipment":[...]}` / `{code,name,location?,responsible?}` → `{id}` |
+| PATCH/DELETE | `/equipment/{id}` | editor+ | частичный `{code?,name?,location?,responsible?}` → `{ok}` / → `{ok}`; DELETE 409, если используется методом |
 | GET/POST | `/lab-members` | admin | `{"members":[{lab_id,email,role}]}` / `{lab_id,email,role}` |
 | DELETE | `/lab-members/{lab_id}/{email}` | admin | → `{ok}` |
-| PATCH | `/methods/{id}` | admin | `{formulas, classification, chart_configs, input_parameters}` (JSONB, любой поднабор) → `{ok}` |
+| POST | `/methods` | admin | `{code,name,lab_ids: number[],description?,determinable_indicators?}` → `{id}` (минимум одна лаба; метод может принадлежать нескольким, 2026-08-19) |
+| PATCH | `/methods/{id}` | admin | `{formulas, classification, chart_configs, input_parameters, lab_ids?}` (JSONB, любой поднабор; `lab_ids`, если передан, полностью заменяет набор лабораторий) → `{ok}` |
+| DELETE | `/methods/{id}` | admin | → `{ok}`; 409, если метод используется в заявках/справочниках |
 | GET | `/methods` | viewer | `{"methods":[...]}` (включая конфиги) |
 | GET | `/objects` | viewer | `{"objects":[...]}` — только чтение в sbe-lims, создание в sbe-requests |
 
@@ -54,12 +58,17 @@ SBE-плагин «ЛИМС» для сотрудников лаборатори
 // 1 заявка = 1 метод (декомпозиция 2026-08-18, см. lab-service/AGENTS.md) — method_id/
 // customer_number/lab_number прямо на заявке, без массива methods[].
 LimsRequest{ id, number_seq, number_year, title, description, object_id, project_id, group_id,
-             owner_email, status, priority, test_purpose, external_lab_id, ekn,
+             owner_email, status, priority, test_purpose, ekn,
              external_id,  // номер legacy email-трекера («LPIZAYAVKINAPRO-<N>»); у новых заявок пусто
-             method_id, customer_number, lab_number,
+             method_id,
+             lab_id,  // конкретная лаба из method.lab_ids, зафиксирована при создании заявки
+                       // (заменяет старую external_lab_id — упразднена 2026-08-19)
+             customer_number, lab_number,
              files: RequestFile[], created_at, updated_at }
 
-LabMethod{ id, code, name, lab_id, description, determinable_indicators: string[],
+LabMethod{ id, code, name,
+           lab_ids: number[],  // может принадлежать нескольким лабам (method_labs, 2026-08-19)
+           description, determinable_indicators: string[],
            formulas: any[], classification: any[], chart_configs: any[], input_parameters: any[],
            created_at, updated_at }
 
@@ -111,11 +120,21 @@ ProtocolResponse{ html, docx_base64, generated_at }
 lab_operator/lab_admin/**lab_auditor**/app-admin+ (`requireLabRead`); запись (ввод серии,
 расчёт) — lab_operator/lab_admin/app-admin+ (`requireLabAccess`, auditor не допускается).
 Справочники испытателей/оборудования — editor+; методы-конфиги и `lab-members` — admin+.
-`GET /labs` — admin/superadmin видят все, остальные — только лабы, где есть строка
-в `lab_members`. `POST /labs` (создание лабораторий) — только superadmin. Назначать/
-снимать роль `superadmin` может только действующий superadmin (`handleSetPermission`).
-Владелец (`LAB_OWNER_EMAIL`) при каждом старте сервиса гарантированно становится
-superadmin (`seedOwner`, `DO UPDATE`).
+`GET /labs` — admin/superadmin видят все; остальные — лабы со своей строкой в
+`lab_members`, плюс внешние лабы, у которых `parent_lab_id` — одна из своих (внешняя
+лаба своих `lab_members` не имеет по определению). `POST /labs` / `PATCH /labs/{id}`
+(создание/правка лабораторий) — только superadmin; внешняя (`type=external`)
+**обязана** указать `parent_lab_id` существующей внутренней лабы (400 без него,
+и той же валидацией на PATCH) — внешняя лаба не существует самостоятельно. Она может
+иметь свои методы, отсутствующих у внутренней (расширяет её
+возможности); видимость таких заявок и доступ к результатам/графикам/протоколу
+резолвятся через `parent_lab_id` (`requestVisible`/`visibleRequestsQuery`/
+`requestLabID` берут `COALESCE(l.parent_lab_id, l.id)`), т.е. фактически «попадают» к
+сотрудникам родительской внутренней лабы. `lab_members` можно завести только для
+внутренней лабы (400 на попытке для внешней). Назначать/снимать роль `superadmin`
+может только действующий superadmin (`handleSetPermission`). Владелец
+(`LAB_OWNER_EMAIL`) при каждом старте сервиса гарантированно становится superadmin
+(`seedOwner`, `DO UPDATE`).
 ⚠️ **Не реализовано**: делегированные полномочия `lab_admin` внутри своей лабы без
 app-level admin (добавление участников, правка методов своей лабы) — `lab_admin`
 сегодня равен `lab_operator` по факту прав. ⚠️ **Известный пробел**: смена статуса
@@ -131,6 +150,16 @@ app-level admin (добавление участников, правка мет�
     - «Заявки»: Все заявки, Очередь лаборатории;
     - «Лаборатория»: Методы, Объекты, Результаты и протоколы, Испытатели, Оборудование,
       Сотрудники.
+    Внизу сайдбара (после дерева, `flex:1` у дерева прижимает блок к низу) — кнопка
+    **«⚙ Настройки»** (admin+; видна независимо от роли, но контент внутри гейтится
+    по разделам), открывает страницу **«Настройки»** в контенте (не в сайдбаре —
+    2026-08-19, было там до переноса):
+    - Список лабораторий с правкой («✎ Изменить», только superadmin) + «➕ Новая
+      лаборатория» (только superadmin, `POST`/`PATCH /api/lab/labs`).
+    - Под каждой **внутренней** лабой — список её администраторов (`lab_members`
+      `role=lab_admin`) + назначение нового по e-mail / снятие (admin+, те же
+      `setLabMember`/`removeLabMember`, что использует «Сотрудники»). У внешних
+      лаб этого блока нет — `lab_members` не заводится (нет пользователей системы).
   - **Контент-карточка**: заголовок раздела + подзаголовок; **все 8 пунктов дерева
     наполнены** (2026-08-19):
     - «Все заявки» / «Очередь лаборатории» (`new`/`received`) / «Результаты и протоколы»
@@ -138,10 +167,15 @@ app-level admin (добавление участников, правка мет�
       заявки (статус, ввод серии результатов, расчёт, таблица серий, графики, генерация
       протокола+DOCX). Номер заявки — **сокращённый, лабораторный** — `lab_number`
       (`{NNN}/{yyyy}-{methodCode}`), не полный номер заказчику.
-    - «Методы» — список из кэша; JSON-редактор конфигов (formulas/classification/
-      chart_configs/input_parameters) — admin.
+    - «Методы» — список из кэша; форма создания (код/название/чекбоксы лабораторий —
+      метод может принадлежать нескольким, 2026-08-19/показатели, admin), JSON-редактор
+      конфигов (formulas/classification/chart_configs/input_parameters + те же чекбоксы
+      лабораторий, admin), удаление (admin, 409 при использовании).
     - «Объекты» — список, только чтение (создание — в sbe-requests).
-    - «Испытатели» / «Оборудование» — список + создание, editor+.
+    - «Испытатели» / «Оборудование» — список + создание/правка/удаление, editor+.
+      Правка — инлайн-форма по месту строки таблицы (кнопка «✎»), без перехода;
+      удаление — кнопка «✖» с подтверждением, 409 от сервера (используется в
+      результатах/методе) показывается как обычная ошибка.
     - «Сотрудники» — список (по текущей лабе) + добавление/удаление, admin (раздел
       скрыт для не-admin — `GET /lab-members` сам admin-only на сервере).
 - **Дашборд из плагина удалён** (2026-08-18): таб и метод отсутствуют; отдельный плагин-дашборд
