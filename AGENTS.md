@@ -84,6 +84,10 @@ lab_operator/lab_admin/владелец. Не трогали: эндпоинт �
 
 ## История работ
 
+### 2026-08-20 — v0.1.10 (пересборка за sbe-core: SbeContactsApi)
+- `sbe-core`: добавлены `SbeContactsApi` и `'sbe-contacts'` в `SbeServiceMap` — пересборка `main.js`, исходники плагина не менялись. Версия 0.1.9 → **0.1.10** (manifest + package.json).
+- `npx tsc --noEmit` EXIT=0; `npm run build` OK.
+
 ### 2026-08-19 — v0.1.9 (фиксы по обратной связи: кнопка «Создать», список методов, описание метода)
 - **Найдено пользователем**, 3 пункта (см.
   `docs/superpowers/plans/2026-08-19-sbe-lims-requests-followup-plan.md`, п.2-4):
