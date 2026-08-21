@@ -657,10 +657,14 @@ export class LimsView extends ItemView {
     if (req.ekn) meta.createDiv({ text: `🔢 ЕКН: ${req.ekn}` });
     if (req.external_id) meta.createDiv({ text: `📧 Внешний идентификатор: ${EXTERNAL_ID_PREFIX}${req.external_id}` });
     const obj = this.objects.find(o => o.id === req.object_id);
-    const chars = obj?.characteristics as { batch_number?: unknown; sample_id?: unknown } | undefined;
+    const chars = obj?.characteristics as
+      { batch_number?: unknown; sample_id?: unknown; target_indicators?: Record<string, string> }
+      | undefined;
     if (chars) {
       if (chars.batch_number !== undefined) meta.createDiv({ text: `📦 Номер партии: ${chars.batch_number}` });
       if (chars.sample_id) meta.createDiv({ text: `🏷 Идентификатор образца: ${chars.sample_id}` });
+      const chosenTarget = chars.target_indicators?.[String(req.method_id)];
+      if (chosenTarget) meta.createDiv({ text: `🎯 Целевой показатель: ${chosenTarget}` });
     }
     meta.createDiv({ text: `⚡ Приоритет: ${this.priorityLabel(req.priority)}` });
     if (req.test_purpose) meta.createDiv({ text: `🎯 Цель испытания: ${this.purposeLabel(req.test_purpose)}` });
