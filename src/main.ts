@@ -1,5 +1,6 @@
 import { Plugin, WorkspaceLeaf } from 'obsidian';
 import { LimsSyncService } from './services/sync.service';
+import { LimsLlmAssist } from './services/llm-assist.service';
 import { LimsView, SBE_LIMS_VIEW_TYPE } from './ui/lims-view';
 import { LimsSettingsTab } from './ui/settings-tab';
 import { publishService, unpublishService } from '../../sbe-core/src/bridge';
@@ -8,21 +9,28 @@ import type { LabMethod } from './types/lims';
 
 export interface SbeLimsSettings {
   apiUrl: string;
+  /** Модель для sbe-llm (сам sbe-llm модель не хранит — её выбирает каждый
+   * потребитель, см. llmModel в sbe-mailer/sbe-presentations). Без модели
+   * шлюз chadgpt.ru может отвечать не тем форматом, который ждёт клиент. */
+  llmModel: string;
 }
 
 const DEFAULT_SETTINGS: SbeLimsSettings = {
   apiUrl: 'https://epyur.fvds.ru',
+  llmModel: 'gpt-5.6-luna',
 };
 
 export default class SbeLimsPlugin extends Plugin {
   settings!: SbeLimsSettings;
   syncService!: LimsSyncService;
+  llmAssist!: LimsLlmAssist;
   /** Кэш методов (из pull) для отображения. */
   methods: LabMethod[] = [];
 
   async onload(): Promise<void> {
     await this.loadSettings();
     this.syncService = new LimsSyncService(() => this.settings.apiUrl);
+    this.llmAssist = new LimsLlmAssist(() => this.settings.llmModel);
 
     this.registerView(SBE_LIMS_VIEW_TYPE, (leaf: WorkspaceLeaf) => new LimsView(leaf, this));
     this.addSettingTab(new LimsSettingsTab(this.app, this));

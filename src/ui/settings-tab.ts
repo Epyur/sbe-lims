@@ -27,6 +27,17 @@ export class LimsSettingsTab extends PluginSettingTab {
         }));
 
     new Setting(containerEl)
+      .setName('Модель LLM')
+      .setDesc('Модель для ИИ-помощника формул и черновика конфигурации из стандарта (используется sbe-llm). Пусто — модель по умолчанию.')
+      .addText(text => text
+        .setPlaceholder('gpt-5.6-luna')
+        .setValue(this.plugin.settings.llmModel)
+        .onChange(async (value) => {
+          this.plugin.settings.llmModel = value.trim();
+          await this.plugin.saveSettings();
+        }));
+
+    new Setting(containerEl)
       .setHeading()
       .setName('Права доступа');
 

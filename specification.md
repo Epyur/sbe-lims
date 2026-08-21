@@ -34,7 +34,7 @@ SBE-плагин «ЛИМС» для сотрудников лаборатори
 | GET/POST | `/lab-members` | admin | `{"members":[{lab_id,email,role}]}` / `{lab_id,email,role}` |
 | DELETE | `/lab-members/{lab_id}/{email}` | admin | → `{ok}` |
 | POST | `/methods` | admin | `{code,name,lab_ids: number[],description?,determinable_indicators?}` → `{id}` (минимум одна лаба; метод может принадлежать нескольким, 2026-08-19) |
-| PATCH | `/methods/{id}` | admin | `{formulas, classification, chart_configs, input_parameters, lab_ids?, description?}` (JSONB-поля — любой поднабор; `lab_ids`, если передан, полностью заменяет набор лабораторий; `description` — COALESCE, не перетирает при отсутствии) → `{ok}` |
+| PATCH | `/methods/{id}` | admin | `{formulas, classification, chart_configs, input_parameters, presentation, lab_ids?, description?}` (JSONB-поля — любой поднабор; `lab_ids`, если передан, полностью заменяет набор лабораторий; `description` — COALESCE, не перетирает при отсутствии; **`formulas` игнорируется, если передан `input_parameters`** — сервер перестраивает `formulas[]` целиком из атрибутов, см. модели ниже) → `{ok}` |
 | DELETE | `/methods/{id}` | admin | → `{ok}`; 409, если метод используется в заявках/справочниках |
 | GET | `/methods` | viewer | `{"methods":[...]}` (включая конфиги) |
 | GET | `/objects` | viewer | `{"objects":[...]}` — только чтение в sbe-lims, создание в sbe-requests |
@@ -71,8 +71,46 @@ LimsRequest{ id, number_seq, number_year, title, description, object_id, project
 LabMethod{ id, code, name,
            lab_ids: number[],  // может принадлежать нескольким лабам (method_labs, 2026-08-19)
            description, determinable_indicators: string[],
-           formulas: any[], classification: any[], chart_configs: any[], input_parameters: any[],
+           formulas: any[],  // строится сервером из input_parameters — не редактируется напрямую (2026-08-21)
+           classification: ClassificationRule[], chart_configs: ChartConfig[],
+           input_parameters: MethodAttribute[], presentation: MethodPresentation,  // 2026-08-21, блок 3
            created_at, updated_at }
+
+// Конфигуратор методов (2026-08-21) — структурированные формы вместо raw JSON:
+
+// Атрибут метода (input_parameters) — единственный источник formulas, привязанных к
+// атрибуту (сервер перестраивает formulas[] из этого списка при каждом сохранении).
+MethodAttribute{ id: string,  // ^[A-Za-z_][A-Za-z0-9_]*$, уникален в пределах метода
+                  name: string,
+                  data_type: 'text'|'int'|'float'|'date'|'time'|'photo',
+                  fill_method: 'manual'|'instrument'|'calculated',
+                  level: 'experiment'|'aggregated',
+                  formula?: string,  // DSL-выражение — для fill_method="calculated"
+                  aggregation?: { source: string, method: 'avg'|'min'|'max' },  // level="aggregated" без своей формулы
+                  synonyms?: string[] }  // альтернативные raw-имена для email-импорта (resolveResultKey, lab-service)
+
+// Правило классификации — один из трёх типов (rule_type — дискриминатор).
+ThresholdClassificationRule{ rule_type: 'threshold', parameter_name: string, output_name?: string,
+                             thresholds: Array<{value: number, grade: string}>,  // сервер сортирует по value ↑, первый где значение<=value
+                             aggregation_rule?: 'best'|'worst' }  // при нескольких сериях; иначе среднее
+BooleanClassificationRule{ rule_type: 'boolean', parameter_name: string, output_name?: string,
+                           operator: '=='|'!='|'<'|'<='|'>'|'>=', value: string|number,
+                           true_grade: string, false_grade: string }
+ComplianceClassificationRule{ rule_type: 'compliance', parameter_name: string, output_name?: string,
+                              comply_text?: string, not_comply_text?: string, not_assessed_text?: string }
+                              // цель — objects.characteristics.target_indicators[methodId] заявки, не задаётся здесь
+
+// Представление данных (presentation, блок 3) — порядок/подписи/видимость столбцов в
+// UI-таблице результатов и в протоколе; порядок элементов fields = порядок столбцов.
+PresentationField{ attribute_id: string, label?: string, show_in_ui: boolean, show_in_protocol: boolean }
+MethodPresentation{ fields: PresentationField[] }
+// Атрибуты, не упомянутые в fields, — показываются как раньше (все ключи без явного
+// порядка) — обратная совместимость для не сконфигурированных в блоке 3 методов.
+
+// График (chart_configs) — рендерится сервером в PNG (charts.go), без внешних зависимостей.
+ChartConfig{ id: string, title?: string, chart_type: 'line'|'scatter'|'bar',
+             x_column?: string, x_label?: string, y_label?: string,
+             series_config: Array<{source_param: string, label?: string}> }
 
 LabObject{ id, name, description, characteristics: Record<string, unknown>, created_at, updated_at }
 
@@ -89,23 +127,46 @@ Inventor{ id, name, email, phone, department, position, created_at, updated_at }
 Equipment{ id, code, name, location, responsible, last_calibration, next_calibration,
            status, created_at, updated_at }
 LabMember{ lab_id, email, role: 'lab_operator' | 'lab_admin' }
-MethodConfig{ formulas, classification, chart_configs, input_parameters }   // массивы JSON
+MethodConfig{ formulas: any[], classification: ClassificationRule[], chart_configs: ChartConfig[],
+              input_parameters: MethodAttribute[], presentation: MethodPresentation }
 ProtocolResponse{ html, docx_base64, generated_at }
 // DashboardData удалён из клиента (2026-08-18) — см. серверный ответ /dashboard
 ```
 
 ## Расчёт на сервере (DSL)
 
-- Формулы `methods.formulas` `[{id, expression, target_parameter, apply_level, order}]` —
-  безопасный интерпретатор (арифметика, сравнения, if/else, агрегации avg/min/max/sum/count/
-  median/std), ссылки на параметры из `values`. `apply_level: "series"` — как обычно,
-  к текущей серии; `apply_level: "aggregated"` — считается один раз по всем сериям
-  заявки+метода и пишется в `aggregated_results` (`calculation_type: "formula_aggregated"`,
-  fixed 2026-08-19 — до этого игнорировался и применялся как `series`, см. lab-service/AGENTS.md).
-- Классификация `methods.classification` — threshold/boolean/compliance + ранги.
+- Формулы `methods.formulas` `[{expression, target_parameter, apply_level}]` —
+  безопасный интерпретатор (арифметика, сравнения, if/else; ссылки на параметры из
+  `values`). **Формируется сервером из `input_parameters` при каждом сохранении
+  конфига** (2026-08-21, `deriveFormulasFromAttributes`) — клиент не редактирует
+  `formulas` напрямую. `apply_level: "series"` — к текущей серии; `apply_level:
+  "aggregated"` — один раз по всем сериям заявки+метода, пишется в
+  `aggregated_results` (`calculation_type: "formula_aggregated"`).
+  Агрегации: `avg`/`min`/`max`/`sum`/`count`/`median`/`std` — один аргумент-идентификатор
+  агрегирует по сериям; несколько аргументов (`avg(a,b,c)`) — среднее нескольких
+  атрибутов ОДНОЙ серии (2026-08-21). Плюс (2026-08-21): `worst_grade`/`best_grade`
+  (сравнение показателей по порядку `determinable_indicators` метода),
+  `interpolate(x, xs, ys)` (линейная интерполяция по параллельным атрибутам-массивам),
+  `agg_where('avg'|'min'|'max'|'sum', value_attr, cond_attr, 'значение')` (агрегат по
+  сериям, где условие выполняется).
+- Классификация `methods.classification` — три типа (`rule_type`):
+  - `threshold` — пороги сортируются на сервере по `value` ↑, берётся первый, где
+    значение ≤ порог, иначе последний (самый худший).
+  - `boolean` — одно условие над значением параметра.
+  - `compliance` (2026-08-21) — сравнение вычисленного показателя с целевым из
+    `objects.characteristics.target_indicators[methodId]` заявки по позиции в
+    `determinable_indicators` метода (индекс ≤ цели → «Соответствует»).
 - Авто-статистика: при сохранении серии создаётся стат-строка
   (`is_statistical_row=true`, `calculation_type='auto_statistics'`) с avg/count по параметрам.
-- План `chart_configs` `[{id, chart_type: line|scatter|bar, x_column, series_config, title, x_label, y_label}]`.
+- `chart_configs` `[{id, chart_type: line|scatter|bar, x_column, series_config, title, x_label, y_label}]`
+  — рендерится в PNG (`charts.go`, без внешних зависимостей); редактор — структурная
+  форма в клиенте (было raw JSON).
+- **Порядок столбцов протокола/UI-таблицы** (2026-08-21) — из `methods.presentation.
+  fields` (см. модели выше); для методов без presentation — алфавитный порядок
+  найденных ключей (детерминированный фолбэк, раньше был случайный обход `map`
+  в Go — баг, исправлен как побочный эффект блока 3). «Фотография»-атрибуты — превью
+  `<img>` в HTML-протоколе и в UI-таблице; в DOCX — текст/ссылка (DOCX-writer не
+  встраивает изображения).
 
 ## Статусы заявки
 
@@ -188,9 +249,24 @@ app-level admin (добавление участников, правка мет�
     - «Методы» — список из кэша, **не фильтруется по текущей лабе** (2026-08-19: метод
       может принадлежать нескольким/внешней лабе, список показывает все методы, у
       каждого — строка «Лаборатории: …» с именами всех его лаб); форма создания
-      (код/название/описание/чекбоксы лабораторий/показатели, admin), JSON-редактор
-      конфигов (formulas/classification/chart_configs/input_parameters + описание +
-      те же чекбоксы лабораторий, admin), удаление (admin, 409 при использовании).
+      (код/название/описание/чекбоксы лабораторий/показатели, admin); удаление (admin,
+      409 при использовании). **Конфигуратор метода** (кнопка «✎ Конфиг», admin,
+      2026-08-21 — структурные построчные редакторы вместо raw JSON):
+      - **«📄 Импортировать из стандарта (ИИ)»** — загрузка `.rtf`/`.txt` текста
+        стандарта → черновик атрибутов+правил+представления от ИИ (`sbe-llm`,
+        модель — настройка плагина, см. ниже) заполняет редакторы ниже для ревью
+        (никогда не сохраняется автоматически).
+      - **Атрибуты метода** (`input_parameters`) — построчно: id/название/тип
+        данных/способ заполнения/уровень; для расчётных — формула (DSL) + «🤖 ИИ»
+        (предложение формулы по описанию); для агрегированных без формулы —
+        атрибут-источник + принцип; кнопка «🔗 синонимы» — альтернативные raw-имена
+        для сопоставления с email-импортом десктопной ЛИМС.
+      - **Правила классификации** — построчно: пороговое/булево/«соответствие
+        целевому показателю».
+      - **Представление данных** — drag-and-drop порядок/подписи/видимость столбцов
+        (UI-таблица результатов + протокол) с живым предпросмотром.
+      - **Графики** (`chart_configs`) — карточки тип/оси/подписи/ряды.
+      - `formulas` — только просмотр (строится сервером из атрибутов).
     - «Объекты» — список, только чтение (создание — в sbe-requests); у каждой строки
       кнопка **«→ Заявки»** (2026-08-21) — переход к списку заявок этого объекта
       (понадобилось после объединения дублей объектов в lab-service, 469 → 134,
@@ -203,7 +279,9 @@ app-level admin (добавление участников, правка мет�
       скрыт для не-admin — `GET /lab-members` сам admin-only на сервере).
 - **Дашборд из плагина удалён** (2026-08-18): таб и метод отсутствуют; отдельный плагин-дашборд
   будет использовать серверный `GET /dashboard`. Серверный эндпоинт не удалять.
-- Настройки: `apiUrl` + раздел «Права доступа» (роли + общий доступ, admin).
+- Настройки: `apiUrl`, **`llmModel`** (2026-08-21, дефолт `gpt-5.6-luna` — модель для
+  `sbe-llm`, которая сама модель не хранит, см. `sbe-mailer`/`sbe-presentations` — тот же
+  паттерн) + раздел «Права доступа» (роли + общий доступ, admin).
 - **Реализовано 2026-08-19**: бэкенд ролей (superadmin/lab_auditor/фильтрация `/labs`) —
   см. раздел «Роли» выше.
 - **Запланировано**: делегированные полномочия `lab_admin` внутри своей лабы (не

@@ -82,6 +82,116 @@ export interface LabGroup {
   updated_at: string;
 }
 
+/** Тип данных атрибута метода (конфигуратор методов, блок 1). */
+export type AttributeDataType = 'text' | 'int' | 'float' | 'date' | 'time' | 'photo';
+/** Способ заполнения атрибута. */
+export type AttributeFillMethod = 'manual' | 'instrument' | 'calculated';
+/** Уровень атрибута: значение по каждой серии («данные эксперимента») или одно
+ * значение на заявку+метод («агрегированные результаты»). */
+export type AttributeLevel = 'experiment' | 'aggregated';
+
+/** Простое агрегирование атрибута уровня "aggregated" без своей формулы — сервер сам
+ * строит formulas-запись `{method}({source})` (lab-service, deriveFormulasFromAttributes). */
+export interface AttributeAggregation {
+  source: string;
+  method: 'avg' | 'min' | 'max';
+}
+
+/** Атрибут метода — элемент methods.input_parameters. Единственный источник formulas
+ * для расчётных/агрегированных атрибутов (сервер перестраивает formulas из этого
+ * списка при каждом сохранении конфига). */
+export interface MethodAttribute {
+  id: string;
+  name: string;
+  data_type: AttributeDataType;
+  fill_method: AttributeFillMethod;
+  level: AttributeLevel;
+  /** DSL-выражение — для fill_method="calculated" (в т.ч. агрегированные атрибуты со
+   * сложной формулой, напр. калибровочная интерполяция). */
+  formula?: string;
+  /** Простая агрегация — для level="aggregated" без своей формулы. */
+  aggregation?: AttributeAggregation;
+  /** Альтернативные raw-имена этого атрибута (2026-08-21) — позволяет назвать
+   * атрибут как удобно в конфигураторе без оглядки на то, как поле называется в
+   * legacy-источниках (email-импорт от десктопной ЛИМС); при приёме результатов
+   * из письма synonyms сопоставляются с id (см. email_ingest.go resolveResultKey). */
+  synonyms?: string[];
+}
+
+/** Правило классификации — "пороговое": вычисленный показатель сравнивается с
+ * отсортированными по возрастанию порогами (сервер сортирует сам), берётся первый, где
+ * значение <= value, иначе — последний (самый худший). */
+export interface ThresholdClassificationRule {
+  rule_type: 'threshold';
+  parameter_name: string;
+  output_name?: string;
+  thresholds: Array<{ value: number; grade: string }>;
+  aggregation_rule?: 'avg' | 'best' | 'worst';
+}
+
+/** Правило классификации — "булево": простое условие над значением атрибута. */
+export interface BooleanClassificationRule {
+  rule_type: 'boolean';
+  parameter_name: string;
+  output_name?: string;
+  operator: '==' | '!=' | '<' | '<=' | '>' | '>=';
+  value: string | number;
+  true_grade: string;
+  false_grade: string;
+}
+
+/** Правило классификации — "соответствие целевому показателю»: сравнение вычисленного
+ * показателя с «Целевым показателем» заявки (objects.characteristics.target_indicators,
+ * sbe-requests) по порядку determinable_indicators метода. */
+export interface ComplianceClassificationRule {
+  rule_type: 'compliance';
+  parameter_name: string;
+  output_name?: string;
+  comply_text?: string;
+  not_comply_text?: string;
+  not_assessed_text?: string;
+}
+
+export type ClassificationRule =
+  | ThresholdClassificationRule
+  | BooleanClassificationRule
+  | ComplianceClassificationRule;
+
+/** Один ряд графика — источник значений (id атрибута) + подпись в легенде. */
+export interface ChartSeriesConfig {
+  source_param: string;
+  label?: string;
+}
+
+/** Конфиг графика — элемент methods.chart_configs (рендерится charts.go, свой
+ * PNG без внешних зависимостей). Тип графика/оси/ряды — конфигуратор методов, блок 3. */
+export interface ChartConfig {
+  id: string;
+  title?: string;
+  chart_type: 'line' | 'scatter' | 'bar';
+  x_column?: string;
+  x_label?: string;
+  y_label?: string;
+  series_config: ChartSeriesConfig[];
+}
+
+/** Один столбец таблицы результатов (UI) и/или протокола — элемент
+ * methods.presentation.fields; порядок элементов массива = порядок отображения
+ * (конфигуратор методов, блок 3, 2026-08-21). */
+export interface PresentationField {
+  attribute_id: string;
+  label?: string;
+  show_in_ui: boolean;
+  show_in_protocol: boolean;
+}
+
+/** methods.presentation — представление данных метода в UI-таблице результатов
+ * и в протоколе. Атрибуты, не упомянутые в fields, показываются как раньше (все
+ * ключи, без явного порядка) — обратная совместимость для нетронутых методов. */
+export interface MethodPresentation {
+  fields: PresentationField[];
+}
+
 /** Метод испытаний (справочник lab-service). Может принадлежать нескольким
  * лабораториям (2026-08-19, method_labs many-to-many) — lab_ids заменяет старую
  * единичную lab_id. */
@@ -92,10 +202,12 @@ export interface LabMethod {
   lab_ids: number[];
   description: string;
   determinable_indicators: string[];
+  /** Формируется сервером из input_parameters — не редактируется напрямую (2026-08-21). */
   formulas: Array<Record<string, unknown>>;
-  classification: Array<Record<string, unknown>>;
-  chart_configs: Array<Record<string, unknown>>;
-  input_parameters: Array<Record<string, unknown>>;
+  classification: ClassificationRule[];
+  chart_configs: ChartConfig[];
+  input_parameters: MethodAttribute[];
+  presentation: MethodPresentation;
   created_at: string;
   updated_at: string;
 }
@@ -168,9 +280,10 @@ export interface LabMember {
 /** Конфигурация метода (formulas/classification/chart_configs/input_parameters). */
 export interface MethodConfig {
   formulas: Array<Record<string, unknown>>;
-  classification: Array<Record<string, unknown>>;
-  chart_configs: Array<Record<string, unknown>>;
-  input_parameters: Array<Record<string, unknown>>;
+  classification: ClassificationRule[];
+  chart_configs: ChartConfig[];
+  input_parameters: MethodAttribute[];
+  presentation: MethodPresentation;
 }
 
 /** Протокол заявки. */

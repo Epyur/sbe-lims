@@ -306,6 +306,15 @@
   margin: 4px 0;
 }
 
+/* Превью «фотография»-атрибутов в таблице результатов (блок 3, presentation). */
+.tn-lims-thumb {
+  max-width: 80px;
+  max-height: 80px;
+  border: 1px solid var(--border-divider-default);
+  border-radius: 4px;
+  display: block;
+}
+
 .tn-lims-modal {
   border: 1px solid var(--border-default);
   border-radius: 8px;
@@ -373,4 +382,33 @@
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+/* .tn-lims-input/.tn-lims-select default to width:100% (правильно для одного
+ * широкого поля на строку), но внутри строчного tn-lims-flex-редактора
+ * (конфигуратор методов: одна строка = все свойства атрибута/правила) это
+ * ломает раскладку — 100%-ный элемент занимает всю ширину строки, и flex-wrap
+ * переносит каждое следующее поле на новую строку. Компактная раскладка в
+ * один ряд, перенос — только когда реально не хватает места.
+ * overflow:hidden+max-width — <select> в некоторых версиях Chromium/Electron
+ * игнорирует чистый min-width:0 внутри flex и не сжимается ниже ширины самого
+ * длинного <option> без этого. */
+.tn-lims-flex > .tn-lims-input,
+.tn-lims-flex > .tn-lims-select {
+  width: auto;
+  flex: 1 1 120px;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Раскрываемые панели (ИИ-помощник формулы, синонимы атрибута) вложены прямо в
+ * строку-tn-lims-flex, но должны идти СВОЕЙ строкой под остальными полями, а не
+ * втискиваться как ещё один узкий элемент ряда — flex-basis:100% в flex-wrap
+ * контейнере всегда переносит следующий элемент на новую строку. */
+.tn-lims-flex > .tn-lims-ai-assist,
+.tn-lims-flex > .tn-lims-synonyms {
+  flex: 1 1 100%;
+  width: 100%;
 }

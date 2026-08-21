@@ -1,6 +1,13 @@
 import { ItemView, Notice, WorkspaceLeaf } from 'obsidian';
 import type SbeLimsPlugin from '../main';
 import type {
+  AttributeDataType,
+  AttributeFillMethod,
+  AttributeLevel,
+  BooleanClassificationRule,
+  ChartConfig,
+  ClassificationRule,
+  ComplianceClassificationRule,
   Equipment,
   Inventor,
   Lab,
@@ -10,9 +17,14 @@ import type {
   LabProject,
   LimsRequest,
   MeasurementResult,
+  MethodAttribute,
   MethodConfig,
+  PresentationField,
+  ThresholdClassificationRule,
 } from '../types/lims';
 import { errorMessage } from '../../../sbe-core/src/utils/errors';
+import type { ExistingAttributeSummary } from '../services/llm-assist.service';
+import { extractStandardText } from '../services/rtf-to-text';
 
 export const SBE_LIMS_VIEW_TYPE = 'sbe-lims-view';
 
@@ -751,7 +763,7 @@ export class LimsView extends ItemView {
     const results = await this.plugin.syncService.listResults(req.id);
     const seriesRows = results.filter(r => r.method_id === req.method_id && !r.is_statistical_row);
     if (seriesRows.length > 0) {
-      this.renderResultsTable(methodDiv, seriesRows);
+      this.renderResultsTable(methodDiv, seriesRows, req.method_id);
     } else {
       methodDiv.createDiv({ cls: 'tn-lims-meta' }).setText('Результатов пока нет');
     }
@@ -785,19 +797,47 @@ export class LimsView extends ItemView {
     });
   }
 
-  private renderResultsTable(container: HTMLElement, rows: MeasurementResult[]): void {
-    const table = container.createEl('table', { cls: 'tn-table' });
+  /** Таблица серий — колонки по methods.presentation (show_in_ui, порядок/подписи),
+   * фолбэк на все найденные ключи в алфавитном порядке для методов, ещё не
+   * сконфигурированных в блоке 3. «Фотография»-атрибуты — превью, не текст. */
+  private renderResultsTable(container: HTMLElement, rows: MeasurementResult[], methodId: number): void {
+    const cfg = this.methodConfigOf(methodId);
+    const attrs = cfg.input_parameters;
     const keys = new Set<string>();
     for (const r of rows) for (const k of Object.keys(r.values)) keys.add(k);
-    const keyList = Array.from(keys);
+
+    const used = new Set<string>();
+    const columns: Array<{ key: string; label: string; isPhoto: boolean }> = [];
+    for (const f of cfg.presentation.fields) {
+      if (used.has(f.attribute_id)) continue;
+      used.add(f.attribute_id);
+      if (!f.show_in_ui || !keys.has(f.attribute_id)) continue;
+      const attr = attrs.find(a => a.id === f.attribute_id);
+      columns.push({ key: f.attribute_id, label: f.label || attr?.name || f.attribute_id, isPhoto: attr?.data_type === 'photo' });
+    }
+    const rest = Array.from(keys).filter(k => !used.has(k)).sort();
+    for (const k of rest) {
+      const attr = attrs.find(a => a.id === k);
+      columns.push({ key: k, label: attr?.name || k, isPhoto: attr?.data_type === 'photo' });
+    }
+
+    const table = container.createEl('table', { cls: 'tn-table' });
     const thead = table.createEl('thead').createEl('tr');
     thead.createEl('th').setText('Серия');
-    for (const k of keyList) thead.createEl('th').setText(k);
+    for (const col of columns) thead.createEl('th').setText(col.label);
     const tbody = table.createEl('tbody');
     for (const r of rows) {
       const tr = tbody.createEl('tr');
       tr.createEl('td').setText(String(r.series_num));
-      for (const k of keyList) tr.createEl('td').setText(this.fmt(r.values[k]));
+      for (const col of columns) {
+        const td = tr.createEl('td');
+        const val = r.values[col.key];
+        if (col.isPhoto && typeof val === 'string' && val) {
+          td.createEl('img', { attr: { src: val, alt: col.label }, cls: 'tn-lims-thumb' });
+        } else {
+          td.setText(this.fmt(val));
+        }
+      }
     }
   }
 
@@ -900,49 +940,186 @@ export class LimsView extends ItemView {
     });
   }
 
-  /** JSON-редактор formulas/classification/chart_configs/input_parameters метода
-   * (admin) + чекбоксы лабораторий (lab_ids, метод может принадлежать нескольким). */
+  /** Конфигуратор метода (admin): атрибуты (input_parameters) + правила
+   * классификации — структурные редакторы; chart_configs — пока JSON-текстареа
+   * (WYSIWYG-конструктор — отдельная фаза); formulas вычисляется сервером из
+   * атрибутов при каждом сохранении (deriveFormulasFromAttributes, lab-service) —
+   * здесь только просмотр, редактирование напрямую не имеет смысла. */
   private renderMethodConfigForm(container: HTMLElement, methodId: number): void {
     const existing = container.querySelector('.tn-lims-series-form');
     if (existing) { existing.remove(); return; }
     const cfg = this.methodConfigOf(methodId);
     const method = this.plugin.methods.find(m => m.id === methodId);
+    const determinableIndicators = method?.determinable_indicators || [];
     const form = container.createDiv({ cls: 'tn-lims-series-form' });
+
     form.createDiv({ cls: 'tn-lims-meta' }).setText('Описание:');
     const description = form.createEl('input', { attr: { type: 'text', placeholder: 'Описание' }, cls: 'tn-lims-input' });
     description.value = method?.description || '';
     form.createDiv({ cls: 'tn-lims-meta' }).setText('Лаборатории (метод может принадлежать нескольким):');
     const getLabIDs = this.renderLabCheckboxes(form, method?.lab_ids || []);
-    const fields: Array<{ key: keyof MethodConfig; label: string }> = [
-      { key: 'formulas', label: 'formulas (JSON)' },
-      { key: 'classification', label: 'classification (JSON)' },
-      { key: 'chart_configs', label: 'chart_configs (JSON)' },
-      { key: 'input_parameters', label: 'input_parameters (JSON)' },
-    ];
-    const areas: Partial<Record<keyof MethodConfig, HTMLTextAreaElement>> = {};
-    for (const f of fields) {
-      form.createDiv({ cls: 'tn-lims-meta' }).setText(f.label);
-      const ta = form.createEl('textarea', { cls: 'tn-lims-input' });
-      ta.rows = 4;
-      ta.value = JSON.stringify(cfg[f.key], null, 2);
-      areas[f.key] = ta;
+
+    // ---- Импорт из стандарта (ИИ-черновик атрибутов/правил/представления) ----
+    // DOM-элементы создаются здесь (чтобы блок был визуально первым), обработчик
+    // click навешивается ниже — после того, как attrs/rules/presentationFields и
+    // их redraw-замыкания уже объявлены (нужны обработчику).
+    form.createEl('h4', { text: '📄 Импортировать из стандарта (ИИ)' });
+    const importRow = form.createDiv({ cls: 'tn-lims-flex' });
+    const importFileInput = importRow.createEl('input', { attr: { type: 'file', accept: '.rtf,.txt' } });
+    const importBtn = importRow.createEl('button', { text: '🤖 Сформировать проект', cls: 'tn-btn tn-btn-ghost' });
+
+    // ---- Блок 1: атрибуты метода ----
+    const attrs: MethodAttribute[] = cfg.input_parameters.map(a => ({ ...a }));
+    form.createEl('h4', { text: 'Атрибуты метода' });
+    const attrsListEl = form.createDiv();
+    let redrawAttrs: () => void;
+    redrawAttrs = () => {
+      attrsListEl.empty();
+      this.renderAttributeRows(attrsListEl, attrs, determinableIndicators, () => redrawAttrs());
+    };
+    redrawAttrs();
+    const addAttrBtn = form.createEl('button', { text: '➕ Добавить атрибут', cls: 'tn-btn tn-btn-ghost' });
+    addAttrBtn.addEventListener('click', () => {
+      attrs.push({ id: '', name: '', data_type: 'text', fill_method: 'manual', level: 'experiment' });
+      redrawAttrs();
+    });
+
+    // ---- Блок 2: правила классификации ----
+    const rules: ClassificationRule[] = cfg.classification.map(r => ({ ...r }));
+    form.createEl('h4', { text: 'Правила классификации' });
+    const rulesListEl = form.createDiv();
+    let redrawRules: () => void;
+    redrawRules = () => {
+      rulesListEl.empty();
+      this.renderClassificationRows(rulesListEl, rules, attrs, determinableIndicators, () => redrawRules());
+    };
+    redrawRules();
+    const addRuleBtn = form.createEl('button', { text: '➕ Добавить правило', cls: 'tn-btn tn-btn-ghost' });
+    addRuleBtn.addEventListener('click', () => {
+      rules.push({ rule_type: 'threshold', parameter_name: '', thresholds: [] });
+      redrawRules();
+    });
+
+    // formulas — вычисляется сервером, только просмотр
+    form.createDiv({ cls: 'tn-lims-meta' }).setText('formulas (вычисляется сервером из атрибутов — только просмотр):');
+    const formulasPreview = form.createEl('pre', { cls: 'tn-lims-input' });
+    formulasPreview.setText(JSON.stringify(cfg.formulas, null, 2));
+
+    // ---- Блок 3а: представление данных (порядок/подписи/видимость колонок в
+    // UI-таблице результатов и в протоколе) — drag-and-drop + живой предпросмотр ----
+    const presentationFields: PresentationField[] = cfg.presentation.fields
+      .filter(f => attrs.some(a => a.id === f.attribute_id))
+      .map(f => ({ ...f }));
+    // атрибуты, которых пока нет в presentation (новые/метод впервые конфигурируется
+    // в блоке 3) — добавляем в конец в их текущем порядке, чтобы список сразу
+    // отражал все атрибуты, а не только уже расставленные.
+    for (const a of attrs) {
+      if (!a.id || presentationFields.some(f => f.attribute_id === a.id)) continue;
+      presentationFields.push({ attribute_id: a.id, show_in_ui: true, show_in_protocol: true });
     }
+    form.createEl('h4', { text: 'Представление данных (таблица результатов и протокол)' });
+    form.createDiv({ cls: 'tn-lims-meta' }).setText('Перетащите строки, чтобы задать порядок столбцов:');
+    const presentationListEl = form.createDiv();
+    const previewEl = form.createDiv();
+    let redrawPresentation: () => void;
+    redrawPresentation = () => {
+      presentationListEl.empty();
+      this.renderPresentationRows(presentationListEl, presentationFields, attrs, () => redrawPresentation());
+      this.renderPresentationPreview(previewEl, presentationFields, attrs);
+    };
+    redrawPresentation();
+
+    importBtn.addEventListener('click', async () => {
+      const file = importFileInput.files?.[0];
+      if (!file) { new Notice('Выберите файл стандарта (.rtf или .txt)'); return; }
+      if ((attrs.length > 0 || rules.length > 0) && !window.confirm(
+        'Заменить текущие атрибуты и правила проектом от ИИ? Ничего не сохранится, пока вы не нажмёте «Сохранить».',
+      )) {
+        return;
+      }
+      importBtn.disabled = true;
+      try {
+        const buf = await file.arrayBuffer();
+        const standardText = extractStandardText(buf, file.name);
+        // атрибуты ДРУГИХ методов — для переиспользования по смыслу, не самоцитирование
+        const seenIds = new Set<string>();
+        const existingAttributes: ExistingAttributeSummary[] = [];
+        for (const m of this.plugin.methods) {
+          if (m.id === methodId) continue;
+          // methodConfigOf нормализует input_parameters — напрямую m.input_parameters
+          // трогать нельзя: сервер, с которым сейчас говорит клиент, может быть
+          // старее фронтенда (см. AGENTS.md) и вообще не отдавать это поле.
+          for (const a of this.methodConfigOf(m.id).input_parameters) {
+            if (!a.id || seenIds.has(a.id)) continue;
+            seenIds.add(a.id);
+            existingAttributes.push({ id: a.id, name: a.name, data_type: a.data_type, fill_method: a.fill_method, level: a.level });
+          }
+        }
+        const draft = await this.plugin.llmAssist.draftAttributesAndClassification(standardText, existingAttributes);
+        attrs.splice(0, attrs.length, ...(Array.isArray(draft.attributes) ? draft.attributes : []));
+        rules.splice(0, rules.length, ...(Array.isArray(draft.classification) ? draft.classification : []));
+        if (attrs.length === 0) {
+          new Notice('ИИ не смог сформировать ни одного атрибута из этого файла — проверьте, что это текстовый .rtf/.txt со стандартом, и что модель LLM настроена в настройках плагина');
+          return;
+        }
+        const draftPresentation = await this.plugin.llmAssist.draftPresentation(attrs);
+        presentationFields.splice(0, presentationFields.length, ...(Array.isArray(draftPresentation.fields) ? draftPresentation.fields : []));
+        redrawAttrs();
+        redrawRules();
+        redrawPresentation();
+        new Notice('Проект сформирован — проверьте, особенно значения с пометкой «ТРЕБУЕТ ПРОВЕРКИ», перед сохранением');
+      } catch (e: unknown) {
+        // без явного console.error ошибка была видна только в Notice (текст без
+        // стека) — обнаружено при живой отладке "объект не итерабельный": Notice
+        // не даёт понять, где именно бросило исключение.
+        console.error('ЛИМС: ошибка импорта из стандарта:', e);
+        new Notice(`Ошибка формирования проекта: ${errorMessage(e)}`);
+      } finally {
+        importBtn.disabled = false;
+      }
+    });
+
+    // ---- Блок 3б: графики (chart_configs) — структурный редактор ----
+    // Нормализация на случай конфигов, сохранённых старым raw-JSON textarea
+    // (до блока 3) без части полей — иначе редактор упал бы на .map(undefined).
+    const charts: ChartConfig[] = cfg.chart_configs.map((c, i) => ({
+      id: c.id || `chart_${i}`,
+      title: c.title,
+      chart_type: c.chart_type === 'scatter' || c.chart_type === 'bar' ? c.chart_type : 'line',
+      x_column: c.x_column,
+      x_label: c.x_label,
+      y_label: c.y_label,
+      series_config: Array.isArray(c.series_config) ? c.series_config.map(s => ({ ...s })) : [],
+    }));
+    form.createEl('h4', { text: 'Графики' });
+    const chartsListEl = form.createDiv();
+    let redrawCharts: () => void;
+    redrawCharts = () => {
+      chartsListEl.empty();
+      this.renderChartRows(chartsListEl, charts, attrs, () => redrawCharts());
+    };
+    redrawCharts();
+    const addChartBtn = form.createEl('button', { text: '➕ Добавить график', cls: 'tn-btn tn-btn-ghost' });
+    addChartBtn.addEventListener('click', () => {
+      charts.push({ id: `chart_${Date.now()}`, chart_type: 'line', series_config: [] });
+      redrawCharts();
+    });
+
     const saveBtn = form.createEl('button', { text: '💾 Сохранить', cls: 'tn-btn tn-btn-primary' });
     saveBtn.addEventListener('click', async () => {
       const labIDs = getLabIDs();
       if (labIDs.length === 0) { new Notice('Укажите хотя бы одну лабораторию'); return; }
+      const validationError = this.validateAttributesAndRules(attrs, rules) || this.validateChartsAndPresentation(charts, presentationFields, attrs);
+      if (validationError) { new Notice(validationError); return; }
+      const attrIds = new Set(attrs.map(a => a.id));
       const patch: Partial<MethodConfig> & { lab_ids?: number[]; description?: string } = {
         lab_ids: labIDs,
         description: description.value.trim(),
+        input_parameters: attrs,
+        classification: rules,
+        chart_configs: charts,
+        presentation: { fields: presentationFields.filter(f => attrIds.has(f.attribute_id)) },
       };
-      try {
-        for (const f of fields) {
-          patch[f.key] = JSON.parse(areas[f.key]!.value) as never;
-        }
-      } catch (e: unknown) {
-        new Notice(`Неверный JSON: ${errorMessage(e)}`);
-        return;
-      }
       try {
         await this.plugin.syncService.updateMethodConfig(methodId, patch);
         await this.plugin.refreshMethods();
@@ -952,6 +1129,499 @@ export class LimsView extends ItemView {
         new Notice(`Ошибка: ${errorMessage(e)}`);
       }
     });
+  }
+
+  /** Рисует перетаскиваемые строки блока «Представление данных» (нативный HTML5
+   * drag-and-drop, без библиотек) — порядок элементов массива fields = порядок
+   * столбцов. onChange — полная перерисовка (после drop/удаления). */
+  private renderPresentationRows(
+    container: HTMLElement,
+    fields: PresentationField[],
+    attrs: MethodAttribute[],
+    onChange: () => void,
+  ): void {
+    let dragFromIdx: number | null = null;
+    fields.forEach((f, idx) => {
+      const attr = attrs.find(a => a.id === f.attribute_id);
+      const row = container.createDiv({ cls: 'tn-lims-method', attr: { draggable: 'true' } });
+      row.style.cursor = 'grab';
+      row.addEventListener('dragstart', () => { dragFromIdx = idx; });
+      row.addEventListener('dragover', (ev) => { ev.preventDefault(); });
+      row.addEventListener('drop', (ev) => {
+        ev.preventDefault();
+        if (dragFromIdx === null || dragFromIdx === idx) return;
+        const [moved] = fields.splice(dragFromIdx, 1);
+        fields.splice(idx, 0, moved);
+        dragFromIdx = null;
+        onChange();
+      });
+
+      const rowFlex = row.createDiv({ cls: 'tn-lims-flex' });
+      rowFlex.createSpan({ text: '⠿', cls: 'tn-lims-meta' });
+      rowFlex.createSpan({ text: attr?.name || f.attribute_id });
+      const labelInput = rowFlex.createEl('input', {
+        attr: { type: 'text', placeholder: 'подпись (по умолчанию — название атрибута)' },
+        cls: 'tn-lims-input',
+      });
+      labelInput.value = f.label || '';
+      labelInput.addEventListener('change', () => { f.label = labelInput.value.trim() || undefined; onChange(); });
+
+      const uiLabel = rowFlex.createEl('label', { cls: 'tn-lims-flex' });
+      const uiCb = uiLabel.createEl('input', { attr: { type: 'checkbox' } });
+      uiCb.checked = f.show_in_ui;
+      uiLabel.createSpan({ text: 'в UI' });
+      uiCb.addEventListener('change', () => { f.show_in_ui = uiCb.checked; onChange(); });
+
+      const protoLabel = rowFlex.createEl('label', { cls: 'tn-lims-flex' });
+      const protoCb = protoLabel.createEl('input', { attr: { type: 'checkbox' } });
+      protoCb.checked = f.show_in_protocol;
+      protoLabel.createSpan({ text: 'в протоколе' });
+      protoCb.addEventListener('change', () => { f.show_in_protocol = protoCb.checked; onChange(); });
+    });
+  }
+
+  /** Живой предпросмотр таблицы результатов по текущему порядку/подписям/видимости
+   * (одна вымышленная строка примера — без реальных данных, только layout). */
+  private renderPresentationPreview(container: HTMLElement, fields: PresentationField[], attrs: MethodAttribute[]): void {
+    container.empty();
+    container.createDiv({ cls: 'tn-lims-meta' }).setText('Предпросмотр (пример):');
+    const visible = fields.filter(f => f.show_in_ui);
+    const table = container.createEl('table', { cls: 'tn-table' });
+    const thead = table.createEl('thead').createEl('tr');
+    thead.createEl('th').setText('Серия');
+    for (const f of visible) {
+      const attr = attrs.find(a => a.id === f.attribute_id);
+      thead.createEl('th').setText(f.label || attr?.name || f.attribute_id);
+    }
+    const tr = table.createEl('tbody').createEl('tr');
+    tr.createEl('td').setText('1');
+    for (const f of visible) {
+      const attr = attrs.find(a => a.id === f.attribute_id);
+      const td = tr.createEl('td');
+      if (attr?.data_type === 'photo') {
+        td.setText('[фото]');
+      } else {
+        td.setText('—');
+      }
+    }
+  }
+
+  /** Карточки графиков (блок 3б, chart_configs) — тот же паттерн, что атрибуты/
+   * правила классификации. */
+  private renderChartRows(
+    container: HTMLElement,
+    charts: ChartConfig[],
+    attrs: MethodAttribute[],
+    onChange: () => void,
+  ): void {
+    charts.forEach((chart, idx) => {
+      const card = container.createDiv({ cls: 'tn-lims-method' });
+      const row1 = card.createDiv({ cls: 'tn-lims-flex' });
+      const titleInput = row1.createEl('input', { attr: { type: 'text', placeholder: 'Заголовок графика' }, cls: 'tn-lims-input' });
+      titleInput.value = chart.title || '';
+      titleInput.addEventListener('change', () => { chart.title = titleInput.value.trim() || undefined; });
+      row1.createSpan({ text: 'Тип:' });
+      const typeSelect = row1.createEl('select', { cls: 'tn-lims-select' });
+      for (const [val, label] of [['line', 'Линия'], ['scatter', 'Точки'], ['bar', 'Столбцы']] as Array<[ChartConfig['chart_type'], string]>) {
+        typeSelect.createEl('option', { attr: { value: val }, text: label });
+      }
+      typeSelect.value = chart.chart_type;
+      typeSelect.addEventListener('change', () => { chart.chart_type = typeSelect.value as ChartConfig['chart_type']; });
+      const delBtn = row1.createEl('button', { text: '✖', cls: 'tn-btn tn-btn-ghost' });
+      delBtn.addEventListener('click', () => { charts.splice(idx, 1); onChange(); });
+
+      const row2 = card.createDiv({ cls: 'tn-lims-flex' });
+      row2.createSpan({ text: 'Ось X:' });
+      const xSelect = row2.createEl('select', { cls: 'tn-lims-select' });
+      xSelect.createEl('option', { attr: { value: '' }, text: '— номер серии —' });
+      for (const a of attrs) {
+        if (!a.id) continue;
+        xSelect.createEl('option', { attr: { value: a.id }, text: a.name || a.id });
+      }
+      xSelect.value = chart.x_column || '';
+      xSelect.addEventListener('change', () => { chart.x_column = xSelect.value || undefined; });
+      const xLabelInput = row2.createEl('input', { attr: { type: 'text', placeholder: 'Подпись оси X' }, cls: 'tn-lims-input' });
+      xLabelInput.value = chart.x_label || '';
+      xLabelInput.addEventListener('change', () => { chart.x_label = xLabelInput.value.trim() || undefined; });
+      const yLabelInput = row2.createEl('input', { attr: { type: 'text', placeholder: 'Подпись оси Y' }, cls: 'tn-lims-input' });
+      yLabelInput.value = chart.y_label || '';
+      yLabelInput.addEventListener('change', () => { chart.y_label = yLabelInput.value.trim() || undefined; });
+
+      card.createDiv({ cls: 'tn-lims-meta' }).setText('Ряды:');
+      const seriesListEl = card.createDiv();
+      const redrawSeries = () => {
+        seriesListEl.empty();
+        chart.series_config.forEach((sc, sIdx) => {
+          const sRow = seriesListEl.createDiv({ cls: 'tn-lims-flex' });
+          const srcSelect = sRow.createEl('select', { cls: 'tn-lims-select' });
+          srcSelect.createEl('option', { attr: { value: '' }, text: '— источник —' });
+          for (const a of attrs) {
+            if (!a.id) continue;
+            srcSelect.createEl('option', { attr: { value: a.id }, text: a.name || a.id });
+          }
+          srcSelect.value = sc.source_param;
+          srcSelect.addEventListener('change', () => { sc.source_param = srcSelect.value; });
+          const sLabelInput = sRow.createEl('input', { attr: { type: 'text', placeholder: 'Подпись ряда' }, cls: 'tn-lims-input' });
+          sLabelInput.value = sc.label || '';
+          sLabelInput.addEventListener('change', () => { sc.label = sLabelInput.value.trim() || undefined; });
+          const sDelBtn = sRow.createEl('button', { text: '✖', cls: 'tn-btn tn-btn-ghost' });
+          sDelBtn.addEventListener('click', () => { chart.series_config.splice(sIdx, 1); redrawSeries(); });
+        });
+      };
+      redrawSeries();
+      const addSeriesBtn = card.createEl('button', { text: '➕ Ряд', cls: 'tn-btn tn-btn-ghost' });
+      addSeriesBtn.addEventListener('click', () => { chart.series_config.push({ source_param: '' }); redrawSeries(); });
+    });
+  }
+
+  /** Валидация графиков и представления перед сохранением. */
+  private validateChartsAndPresentation(charts: ChartConfig[], fields: PresentationField[], attrs: MethodAttribute[]): string | null {
+    const attrIds = new Set(attrs.map(a => a.id));
+    for (const c of charts) {
+      if (c.series_config.length === 0) return `График «${c.title || c.id}»: добавьте хотя бы один ряд`;
+      for (const sc of c.series_config) {
+        if (!sc.source_param.trim()) return `График «${c.title || c.id}»: укажите источник для каждого ряда`;
+      }
+    }
+    const seen = new Set<string>();
+    for (const f of fields) {
+      if (!attrIds.has(f.attribute_id)) continue; // устаревший атрибут — молча пропускаем
+      if (seen.has(f.attribute_id)) return `Повторяющийся атрибут в представлении: ${f.attribute_id}`;
+      seen.add(f.attribute_id);
+    }
+    return null;
+  }
+
+  /** Рисует строки атрибутов метода (блок 1) — одна строка = все свойства ОДНОГО
+   * атрибута (единый tn-lims-flex, без разбивки на подблоки). Мутирует attrs
+   * "на месте"; onChange — полная перерисовка списка (нужна при переключении
+   * fill_method/level, которые меняют набор видимых полей строки). */
+  private renderAttributeRows(
+    container: HTMLElement,
+    attrs: MethodAttribute[],
+    determinableIndicators: string[],
+    onChange: () => void,
+  ): void {
+    attrs.forEach((attr, idx) => {
+      const row = container.createDiv({ cls: 'tn-lims-method tn-lims-flex' });
+      const idInput = row.createEl('input', { attr: { type: 'text', placeholder: 'id (напр. comb_length_1)' }, cls: 'tn-lims-input' });
+      idInput.value = attr.id;
+      idInput.addEventListener('change', () => { attr.id = idInput.value.trim(); });
+      const nameInput = row.createEl('input', { attr: { type: 'text', placeholder: 'Название' }, cls: 'tn-lims-input' });
+      nameInput.value = attr.name;
+      nameInput.addEventListener('change', () => { attr.name = nameInput.value.trim(); });
+
+      const typeSelect = row.createEl('select', { cls: 'tn-lims-select' });
+      const typeOptions: Array<[AttributeDataType, string]> = [
+        ['text', 'Текст'], ['int', 'Целое число'], ['float', 'Дробное число'],
+        ['date', 'Дата'], ['time', 'Время'], ['photo', 'Фотография'],
+      ];
+      for (const [val, label] of typeOptions) typeSelect.createEl('option', { attr: { value: val }, text: label });
+      typeSelect.value = attr.data_type;
+      typeSelect.addEventListener('change', () => { attr.data_type = typeSelect.value as AttributeDataType; });
+
+      const fillSelect = row.createEl('select', { cls: 'tn-lims-select' });
+      const fillOptions: Array<[AttributeFillMethod, string]> = [
+        ['manual', 'Ручной ввод'], ['instrument', 'Данные прибора'], ['calculated', 'Расчёт'],
+      ];
+      for (const [val, label] of fillOptions) fillSelect.createEl('option', { attr: { value: val }, text: label });
+      fillSelect.value = attr.fill_method;
+      fillSelect.addEventListener('change', () => { attr.fill_method = fillSelect.value as AttributeFillMethod; onChange(); });
+
+      const levelSelect = row.createEl('select', { cls: 'tn-lims-select' });
+      const levelOptions: Array<[AttributeLevel, string]> = [
+        ['experiment', 'Данные эксперимента'], ['aggregated', 'Агрегированные результаты'],
+      ];
+      for (const [val, label] of levelOptions) levelSelect.createEl('option', { attr: { value: val }, text: label });
+      levelSelect.value = attr.level;
+      levelSelect.addEventListener('change', () => { attr.level = levelSelect.value as AttributeLevel; onChange(); });
+
+      if (attr.fill_method === 'calculated') {
+        const formulaInput = row.createEl('input', {
+          attr: { type: 'text', placeholder: 'Формула (DSL, на основе атрибутов метода)' },
+          cls: 'tn-lims-input',
+        });
+        formulaInput.value = attr.formula || '';
+        formulaInput.addEventListener('change', () => { attr.formula = formulaInput.value; });
+        const aiBtn = row.createEl('button', { text: '🤖 ИИ', cls: 'tn-btn tn-btn-ghost' });
+        aiBtn.addEventListener('click', () => this.openAiFormulaAssist(row, attrs, determinableIndicators, formulaInput));
+      } else if (attr.level === 'aggregated') {
+        row.createSpan({ text: 'по:' });
+        const sourceSelect = row.createEl('select', { cls: 'tn-lims-select' });
+        sourceSelect.createEl('option', { attr: { value: '' }, text: '— атрибут —' });
+        for (const other of attrs) {
+          if (other === attr || other.level !== 'experiment' || !other.id) continue;
+          sourceSelect.createEl('option', { attr: { value: other.id }, text: other.name || other.id });
+        }
+        sourceSelect.value = attr.aggregation?.source || '';
+        const methodSelect = row.createEl('select', { cls: 'tn-lims-select' });
+        const aggMethodOptions: Array<['avg' | 'min' | 'max', string]> = [
+          ['avg', 'среднему'], ['min', 'минимальному'], ['max', 'максимальному'],
+        ];
+        for (const [val, label] of aggMethodOptions) methodSelect.createEl('option', { attr: { value: val }, text: label });
+        methodSelect.value = attr.aggregation?.method || 'avg';
+        const syncAggregation = () => {
+          attr.aggregation = sourceSelect.value
+            ? { source: sourceSelect.value, method: methodSelect.value as 'avg' | 'min' | 'max' }
+            : undefined;
+        };
+        sourceSelect.addEventListener('change', syncAggregation);
+        methodSelect.addEventListener('change', syncAggregation);
+      }
+
+      const synBtn = row.createEl('button', { text: '🔗 синонимы', cls: 'tn-btn tn-btn-ghost' });
+      synBtn.addEventListener('click', () => this.toggleSynonymsPanel(row, attr));
+
+      const delBtn = row.createEl('button', { text: '✖', cls: 'tn-btn tn-btn-ghost' });
+      delBtn.addEventListener('click', () => { attrs.splice(idx, 1); onChange(); });
+    });
+  }
+
+  /** Панель синонимов атрибута (2026-08-21): альтернативные raw-имена поля из
+   * legacy email-импорта (десктопная ЛИМС) — позволяет называть атрибут как удобно
+   * в конфигураторе без оглядки на то, как поле называется в старых письмах;
+   * соответствие используется при приёме результатов (resolveResultKey,
+   * email_ingest.go) раньше глобальных canonicalFieldNames/knownRawFields. */
+  private toggleSynonymsPanel(row: HTMLElement, attr: MethodAttribute): void {
+    const existing = row.querySelector('.tn-lims-synonyms');
+    if (existing) { existing.remove(); return; }
+    const panel = row.createDiv({ cls: 'tn-lims-synonyms tn-lims-series-form' });
+    panel.createDiv({ cls: 'tn-lims-meta' }).setText(
+      'Синонимы — альтернативные имена этого поля в старых письмах/десктопной ЛИМС, через запятую (напр. flam_time):',
+    );
+    const input = panel.createEl('input', {
+      attr: { type: 'text', placeholder: 'flam_time, old_field_name' },
+      cls: 'tn-lims-input',
+    });
+    input.value = (attr.synonyms || []).join(', ');
+    input.addEventListener('change', () => {
+      const list = input.value.split(',').map(s => s.trim()).filter(Boolean);
+      attr.synonyms = list.length > 0 ? list : undefined;
+    });
+  }
+
+  /** Мини-панель ИИ-помощника (блок 1): описание задачи от лаборанта → предложенное
+   * DSL-выражение показывается для правки/подтверждения — НИКОГДА не вставляется в
+   * поле формулы автоматически, только по явному действию пользователя. Панель
+   * появляется под строкой атрибута (не часть самой строки — это инструмент, не
+   * настройка). */
+  private openAiFormulaAssist(
+    row: HTMLElement,
+    attrs: MethodAttribute[],
+    determinableIndicators: string[],
+    formulaInput: HTMLInputElement,
+  ): void {
+    const existingPanel = row.querySelector('.tn-lims-ai-assist');
+    if (existingPanel) { existingPanel.remove(); return; }
+    const panel = row.createDiv({ cls: 'tn-lims-ai-assist tn-lims-series-form' });
+    panel.createDiv({ cls: 'tn-lims-meta' }).setText('Опишите, что должна вычислять формула:');
+    const descArea = panel.createEl('textarea', { cls: 'tn-lims-input' });
+    descArea.rows = 2;
+    const resultArea = panel.createEl('textarea', { cls: 'tn-lims-input' });
+    resultArea.rows = 2;
+    resultArea.disabled = true;
+    resultArea.placeholder = 'Здесь появится предложенная формула';
+    const btnRow = panel.createDiv({ cls: 'tn-lims-flex' });
+    const askBtn = btnRow.createEl('button', { text: '🤖 Предложить формулу', cls: 'tn-btn tn-btn-primary' });
+    const insertBtn = btnRow.createEl('button', { text: '↳ Вставить в формулу', cls: 'tn-btn tn-btn-ghost' });
+    insertBtn.style.display = 'none';
+    askBtn.addEventListener('click', async () => {
+      if (!descArea.value.trim()) { new Notice('Опишите задачу для ИИ'); return; }
+      askBtn.disabled = true;
+      try {
+        const suggestion = await this.plugin.llmAssist.suggestFormula(descArea.value.trim(), attrs, determinableIndicators);
+        resultArea.value = suggestion;
+        insertBtn.style.display = '';
+      } catch (e: unknown) {
+        new Notice(`Ошибка ИИ-помощника: ${errorMessage(e)}`);
+      } finally {
+        askBtn.disabled = false;
+      }
+    });
+    insertBtn.addEventListener('click', () => {
+      formulaInput.value = resultArea.value;
+      panel.remove();
+    });
+  }
+
+  /** Рисует строки правил классификации (блок 2) — одна строка = все свойства
+   * ОДНОГО правила (единый tn-lims-flex; для «пороговых» правил список порогов —
+   * переменной длины, поэтому он остаётся отдельным вложенным списком под строкой). */
+  private renderClassificationRows(
+    container: HTMLElement,
+    rules: ClassificationRule[],
+    attrs: MethodAttribute[],
+    determinableIndicators: string[],
+    onChange: () => void,
+  ): void {
+    rules.forEach((rule, idx) => {
+      const card = container.createDiv({ cls: 'tn-lims-method' });
+      const row = card.createDiv({ cls: 'tn-lims-flex' });
+      const typeSelect = row.createEl('select', { cls: 'tn-lims-select' });
+      const typeOptions: Array<[ClassificationRule['rule_type'], string]> = [
+        ['threshold', 'Пороговое'], ['boolean', 'Булево'], ['compliance', 'Соответствие целевому показателю'],
+      ];
+      for (const [val, label] of typeOptions) typeSelect.createEl('option', { attr: { value: val }, text: label });
+      typeSelect.value = rule.rule_type;
+      typeSelect.addEventListener('change', () => {
+        const newType = typeSelect.value as ClassificationRule['rule_type'];
+        const common = { parameter_name: rule.parameter_name, output_name: rule.output_name };
+        if (newType === 'threshold') rules[idx] = { ...common, rule_type: 'threshold', thresholds: [] };
+        else if (newType === 'boolean') rules[idx] = { ...common, rule_type: 'boolean', operator: '==', value: '', true_grade: '', false_grade: '' };
+        else rules[idx] = { ...common, rule_type: 'compliance' };
+        onChange();
+      });
+
+      const paramSelect = row.createEl('select', { cls: 'tn-lims-select' });
+      paramSelect.createEl('option', { attr: { value: '' }, text: '— параметр —' });
+      for (const a of attrs) {
+        if (!a.id) continue;
+        paramSelect.createEl('option', { attr: { value: a.id }, text: a.name || a.id });
+      }
+      paramSelect.value = rule.parameter_name;
+      paramSelect.addEventListener('change', () => { rule.parameter_name = paramSelect.value; });
+
+      const outputInput = row.createEl('input', {
+        attr: { type: 'text', placeholder: `результат (по умолч.: ${rule.parameter_name || '...'}_grade)` },
+        cls: 'tn-lims-input',
+      });
+      outputInput.value = rule.output_name || '';
+      outputInput.addEventListener('change', () => { rule.output_name = outputInput.value.trim() || undefined; });
+
+      if (rule.rule_type === 'threshold') {
+        this.renderThresholdFields(row, card, rule, determinableIndicators);
+      } else if (rule.rule_type === 'boolean') {
+        this.renderBooleanFields(row, rule, determinableIndicators);
+      } else {
+        this.renderComplianceFields(row, rule);
+      }
+
+      const delBtn = row.createEl('button', { text: '✖', cls: 'tn-btn tn-btn-ghost' });
+      delBtn.addEventListener('click', () => { rules.splice(idx, 1); onChange(); });
+    });
+  }
+
+  /** Пороговое правило: сортировка порогов по возрастанию и выбор первого подходящего
+   * — на сервере (classifyThreshold). Агрегация — простое поле строки; сам список
+   * порогов ({значение, показатель}) переменной длины — вложенный список под строкой. */
+  private renderThresholdFields(
+    row: HTMLElement,
+    card: HTMLElement,
+    rule: ThresholdClassificationRule,
+    determinableIndicators: string[],
+  ): void {
+    row.createSpan({ text: 'при неск. сериях:' });
+    const aggSelect = row.createEl('select', { cls: 'tn-lims-select' });
+    const aggOptions: Array<[string, string]> = [['', 'среднее'], ['best', 'лучшее'], ['worst', 'худшее']];
+    for (const [val, label] of aggOptions) aggSelect.createEl('option', { attr: { value: val }, text: label });
+    aggSelect.value = rule.aggregation_rule || '';
+    aggSelect.addEventListener('change', () => {
+      rule.aggregation_rule = (aggSelect.value || undefined) as ThresholdClassificationRule['aggregation_rule'];
+    });
+
+    card.createDiv({ cls: 'tn-lims-meta' }).setText(`Пороги (показатели метода: ${determinableIndicators.join(', ') || '—'}):`);
+    const list = card.createDiv();
+    let redraw: () => void;
+    redraw = () => {
+      list.empty();
+      rule.thresholds.forEach((t, i) => {
+        const tRow = list.createDiv({ cls: 'tn-lims-flex' });
+        const valueInput = tRow.createEl('input', { attr: { type: 'number', placeholder: 'значение' }, cls: 'tn-lims-input' });
+        valueInput.value = String(t.value);
+        valueInput.addEventListener('change', () => { t.value = Number(valueInput.value) || 0; });
+        const gradeSelect = tRow.createEl('select', { cls: 'tn-lims-select' });
+        gradeSelect.createEl('option', { attr: { value: '' }, text: '— показатель —' });
+        for (const g of determinableIndicators) gradeSelect.createEl('option', { attr: { value: g }, text: g });
+        gradeSelect.value = t.grade;
+        gradeSelect.addEventListener('change', () => { t.grade = gradeSelect.value; });
+        const delBtn = tRow.createEl('button', { text: '✖', cls: 'tn-btn tn-btn-ghost' });
+        delBtn.addEventListener('click', () => { rule.thresholds.splice(i, 1); redraw(); });
+      });
+    };
+    redraw();
+    const addBtn = card.createEl('button', { text: '➕ Порог', cls: 'tn-btn tn-btn-ghost' });
+    addBtn.addEventListener('click', () => {
+      rule.thresholds.push({ value: 0, grade: determinableIndicators[0] || '' });
+      redraw();
+    });
+  }
+
+  /** Булево правило: одно условие над значением параметра-источника — все поля
+   * инлайн в общей строке правила. */
+  private renderBooleanFields(
+    row: HTMLElement,
+    rule: BooleanClassificationRule,
+    determinableIndicators: string[],
+  ): void {
+    const opSelect = row.createEl('select', { cls: 'tn-lims-select' });
+    for (const op of ['==', '!=', '<', '<=', '>', '>=']) opSelect.createEl('option', { attr: { value: op }, text: op });
+    opSelect.value = rule.operator;
+    opSelect.addEventListener('change', () => { rule.operator = opSelect.value as BooleanClassificationRule['operator']; });
+    const valueInput = row.createEl('input', { attr: { type: 'text', placeholder: 'значение' }, cls: 'tn-lims-input' });
+    valueInput.value = String(rule.value ?? '');
+    valueInput.addEventListener('change', () => { rule.value = valueInput.value; });
+
+    row.createSpan({ text: 'если верно →' });
+    const trueSelect = row.createEl('select', { cls: 'tn-lims-select' });
+    trueSelect.createEl('option', { attr: { value: '' }, text: '— показатель —' });
+    for (const g of determinableIndicators) trueSelect.createEl('option', { attr: { value: g }, text: g });
+    trueSelect.value = rule.true_grade;
+    trueSelect.addEventListener('change', () => { rule.true_grade = trueSelect.value; });
+
+    row.createSpan({ text: 'иначе →' });
+    const falseSelect = row.createEl('select', { cls: 'tn-lims-select' });
+    falseSelect.createEl('option', { attr: { value: '' }, text: '— показатель —' });
+    for (const g of determinableIndicators) falseSelect.createEl('option', { attr: { value: g }, text: g });
+    falseSelect.value = rule.false_grade;
+    falseSelect.addEventListener('change', () => { rule.false_grade = falseSelect.value; });
+  }
+
+  /** Правило соответствия целевому показателю: цель всегда «Целевой показатель»
+   * заявки (objects.characteristics.target_indicators) — здесь только тексты
+   * результата, инлайн в общей строке правила, с разумными подписями по умолчанию. */
+  private renderComplianceFields(row: HTMLElement, rule: ComplianceClassificationRule): void {
+    const complyInput = row.createEl('input', { attr: { type: 'text', placeholder: 'Соответствует' }, cls: 'tn-lims-input' });
+    complyInput.value = rule.comply_text || '';
+    complyInput.addEventListener('change', () => { rule.comply_text = complyInput.value.trim() || undefined; });
+    const notComplyInput = row.createEl('input', { attr: { type: 'text', placeholder: 'Не соответствует' }, cls: 'tn-lims-input' });
+    notComplyInput.value = rule.not_comply_text || '';
+    notComplyInput.addEventListener('change', () => { rule.not_comply_text = notComplyInput.value.trim() || undefined; });
+    const notAssessedInput = row.createEl('input', { attr: { type: 'text', placeholder: 'Не оценивается' }, cls: 'tn-lims-input' });
+    notAssessedInput.value = rule.not_assessed_text || '';
+    notAssessedInput.addEventListener('change', () => { rule.not_assessed_text = notAssessedInput.value.trim() || undefined; });
+  }
+
+  /** Валидация перед сохранением — сообщения на русском, показываются через Notice. */
+  private validateAttributesAndRules(attrs: MethodAttribute[], rules: ClassificationRule[]): string | null {
+    const ids = new Set<string>();
+    for (const a of attrs) {
+      if (!a.id.trim()) return 'У каждого атрибута должен быть заполнен id';
+      // id атрибута — идентификатор в DSL-формулах (lab-service/dsl.go): только
+      // латиница/цифры/подчёркивание, не с цифры — иначе формулы, ссылающиеся на
+      // атрибут, не разберутся на сервере.
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(a.id)) {
+        return `id атрибута «${a.id}» должен быть латиницей без пробелов (буквы/цифры/«_», не начинать с цифры)`;
+      }
+      if (ids.has(a.id)) return `Повторяющийся id атрибута: ${a.id}`;
+      ids.add(a.id);
+      if (!a.name.trim()) return `Атрибут «${a.id}»: укажите название`;
+      if (a.fill_method === 'calculated' && !a.formula?.trim()) {
+        return `Атрибут «${a.id}»: укажите формулу (способ заполнения — «Расчёт»)`;
+      }
+      if (a.fill_method !== 'calculated' && a.level === 'aggregated' && !a.aggregation) {
+        return `Атрибут «${a.id}»: укажите принцип агрегирования или формулу`;
+      }
+    }
+    for (const r of rules) {
+      if (!r.parameter_name.trim()) return 'У каждого правила классификации укажите параметр-источник';
+      if (r.rule_type === 'threshold' && r.thresholds.length === 0) {
+        return `Правило по «${r.parameter_name}»: добавьте хотя бы один порог`;
+      }
+      if (r.rule_type === 'boolean' && (!r.true_grade.trim() || !r.false_grade.trim())) {
+        return `Правило по «${r.parameter_name}»: укажите показатели для «верно»/«иначе»`;
+      }
+    }
+    return null;
   }
 
   /** Объекты исследования — только чтение (создание в sbe-requests). */
@@ -1272,6 +1942,7 @@ export class LimsView extends ItemView {
       classification: Array.isArray(m?.classification) ? m.classification : [],
       chart_configs: Array.isArray(m?.chart_configs) ? m.chart_configs : [],
       input_parameters: Array.isArray(m?.input_parameters) ? m.input_parameters : [],
+      presentation: m?.presentation && Array.isArray(m.presentation.fields) ? m.presentation : { fields: [] },
     };
   }
 
