@@ -82,23 +82,29 @@ LabMethod{ id, code, name,
 // атрибуту (сервер перестраивает formulas[] из этого списка при каждом сохранении).
 MethodAttribute{ id: string,  // ^[A-Za-z_][A-Za-z0-9_]*$, уникален в пределах метода
                   name: string,
-                  data_type: 'text'|'int'|'float'|'date'|'time'|'photo',
+                  data_type: 'text'|'int'|'float'|'date'|'time'|'photo'|'boolean',  // boolean: true/false в БД, Да/Нет в UI (2026-08-22)
                   fill_method: 'manual'|'instrument'|'calculated',
                   level: 'experiment'|'aggregated',
                   formula?: string,  // DSL-выражение — для fill_method="calculated"
                   aggregation?: { source: string, method: 'avg'|'min'|'max' },  // level="aggregated" без своей формулы
                   synonyms?: string[] }  // альтернативные raw-имена для email-импорта (resolveResultKey, lab-service)
 
-// Правило классификации — один из трёх типов (rule_type — дискриминатор).
-ThresholdClassificationRule{ rule_type: 'threshold', parameter_name: string, output_name?: string,
-                             thresholds: Array<{value: number, grade: string}>,  // сервер сортирует по value ↑, первый где значение<=value
-                             aggregation_rule?: 'best'|'worst' }  // при нескольких сериях; иначе среднее
-BooleanClassificationRule{ rule_type: 'boolean', parameter_name: string, output_name?: string,
-                           operator: '=='|'!='|'<'|'<='|'>'|'>=', value: string|number,
-                           true_grade: string, false_grade: string }
-ComplianceClassificationRule{ rule_type: 'compliance', parameter_name: string, output_name?: string,
-                              comply_text?: string, not_comply_text?: string, not_assessed_text?: string }
-                              // цель — objects.characteristics.target_indicators[methodId] заявки, не задаётся здесь
+// Правило классификации (2026-08-22v2, единая модель — заменяет прежние три
+// rule_type: threshold/boolean/compliance): "Если А [знак] Б (И/ИЛИ …), то
+// output_name = grade" — как в Excel IF/AND/OR. branches проверяются ПО ПОРЯДКУ
+// (сервер не пересортировывает), первая совпавшая — результат.
+Operand = { kind: 'attribute', id: string } | { kind: 'literal', value: string|number } | { kind: 'target_indicator' }
+          // target_indicator — objects.characteristics.target_indicators[methodId] заявки
+ClassificationClause{ left: Operand, operator: '=='|'!='|'<'|'<='|'>'|'>=', right: Operand }
+ClassificationBranch{ clauses?: ClassificationClause[],  // пусто/не задано — безусловная ветка "Иначе"
+                       join?: 'and'|'or',  // как связаны МЕЖДУ СОБОЙ несколько clauses (по умолч. "and")
+                       grade: string }
+ClassificationRule{ output_name: string,
+                     aggregation_rule?: 'none'|'avg'|'min'|'max',  // при нескольких сериях; "none" (по умолч.) — не сравнивать между сериями
+                     branches: ClassificationBranch[] }
+// Термины "лучше"/"хуже" в проекте не используются (оценочные категории неприменимы к
+// объективной оценке результатов испытаний) — только "выше/ниже", "больше/меньше",
+// "максимальное/минимальное" (см. AGENTS.md, раздел «Правила»).
 
 // Представление данных (presentation, блок 3) — порядок/подписи/видимость столбцов в
 // UI-таблице результатов и в протоколе; порядок элементов fields = порядок столбцов.
@@ -144,18 +150,21 @@ ProtocolResponse{ html, docx_base64, generated_at }
   `aggregated_results` (`calculation_type: "formula_aggregated"`).
   Агрегации: `avg`/`min`/`max`/`sum`/`count`/`median`/`std` — один аргумент-идентификатор
   агрегирует по сериям; несколько аргументов (`avg(a,b,c)`) — среднее нескольких
-  атрибутов ОДНОЙ серии (2026-08-21). Плюс (2026-08-21): `worst_grade`/`best_grade`
-  (сравнение показателей по порядку `determinable_indicators` метода),
-  `interpolate(x, xs, ys)` (линейная интерполяция по параллельным атрибутам-массивам),
-  `agg_where('avg'|'min'|'max'|'sum', value_attr, cond_attr, 'значение')` (агрегат по
-  сериям, где условие выполняется).
-- Классификация `methods.classification` — три типа (`rule_type`):
-  - `threshold` — пороги сортируются на сервере по `value` ↑, берётся первый, где
-    значение ≤ порог, иначе последний (самый худший).
-  - `boolean` — одно условие над значением параметра.
-  - `compliance` (2026-08-21) — сравнение вычисленного показателя с целевым из
-    `objects.characteristics.target_indicators[methodId]` заявки по позиции в
-    `determinable_indicators` метода (индекс ≤ цели → «Соответствует»).
+  атрибутов ОДНОЙ серии (2026-08-21). Плюс: `min_grade`/`max_grade` (2026-08-21,
+  переименовано из `worst_grade`/`best_grade` 2026-08-22 — см. AGENTS.md «Правила»;
+  сравнение показателей по порядку `determinable_indicators` метода, индекс 0 —
+  максимальный/больше остальных), `interpolate(x, xs, ys)` (линейная интерполяция по
+  параллельным атрибутам-массивам), `agg_where('avg'|'min'|'max'|'sum', value_attr,
+  cond_attr, 'значение')` (агрегат по сериям, где условие выполняется).
+- Классификация `methods.classification` (2026-08-22v2, единая модель — см. модели
+  выше): каждое правило — `branches[]`, проверяемые по порядку, первая совпавшая
+  ветка пишет `grade` в `output_name`. Ветка — `clauses[]` (атомарные "Operand
+  [знак] Operand"), объединённые `join` ("and"/"or"); пустой `clauses` — безусловная
+  ветка "Иначе". Рекомендуемый паттерн для соответствия целевому показателю: две
+  ветки `achieved >= target_indicator` / `achieved < target_indicator` плюс
+  catch-all "Не оценивается". `aggregation_rule="none"` (по умолчанию) — не сравнивать
+  между сериями, брать значение текущей записи как есть; `avg`/`min`/`max` — свести
+  числовые значения атрибута по всем сериям заявки+метода.
 - Авто-статистика: при сохранении серии создаётся стат-строка
   (`is_statistical_row=true`, `calculation_type='auto_statistics'`) с avg/count по параметрам.
 - `chart_configs` `[{id, chart_type: line|scatter|bar, x_column, series_config, title, x_label, y_label}]`

@@ -382,7 +382,7 @@ export class LimsSyncService {
    * лабораторий метода, минимум одна) + опционально description. */
   async updateMethodConfig(
     methodId: number,
-    cfg: Partial<MethodConfig> & { lab_ids?: number[]; description?: string },
+    cfg: Partial<MethodConfig> & { lab_ids?: number[]; description?: string; determinable_indicators?: string[] },
   ): Promise<void> {
     const token = await this.getToken();
     const res = await this.request({

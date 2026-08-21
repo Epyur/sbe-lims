@@ -4,10 +4,9 @@ import type {
   AttributeDataType,
   AttributeFillMethod,
   AttributeLevel,
-  BooleanClassificationRule,
   ChartConfig,
   ClassificationRule,
-  ComplianceClassificationRule,
+  ComparisonOperator,
   Equipment,
   Inventor,
   Lab,
@@ -19,10 +18,11 @@ import type {
   MeasurementResult,
   MethodAttribute,
   MethodConfig,
+  Operand,
   PresentationField,
-  ThresholdClassificationRule,
 } from '../types/lims';
 import { errorMessage } from '../../../sbe-core/src/utils/errors';
+import { sanitizeAttributesWithRename } from '../services/llm-assist.service';
 import type { ExistingAttributeSummary } from '../services/llm-assist.service';
 import { extractStandardText } from '../services/rtf-to-text';
 
@@ -38,6 +38,20 @@ const STATUS_LABELS: Record<string, string> = {
 /** Префикс legacy-номера трекера почты (LIMS_LPI); requests.external_id хранит
  * только числовую часть — префикс восстанавливается для отображения. */
 const EXTERNAL_ID_PREFIX = 'LPIZAYAVKINAPRO-';
+
+/** Знаки сравнения для условий правила классификации (2026-08-22). */
+const COMPARISON_OPERATOR_OPTIONS: Array<[ComparisonOperator, string]> = [
+  ['<', 'меньше'], ['<=', 'меньше или равно'], ['>', 'больше'], ['>=', 'больше или равно'],
+  ['==', 'точно равно'], ['!=', 'точно не равно'],
+];
+
+/** Значение из текстового поля операнда «значение» — число, если строка целиком
+ * читается как число, иначе как есть (текст/«Да»-«Нет»/показатель). */
+function parseConditionLiteral(raw: string): string | number {
+  const trimmed = raw.trim();
+  if (trimmed !== '' && !Number.isNaN(Number(trimmed))) return Number(trimmed);
+  return raw;
+}
 
 /** Ключи разделов дерева навигации (фасад; наполнение подключается позже). */
 type NavKey =
@@ -914,9 +928,13 @@ export class LimsView extends ItemView {
     const name = row.createEl('input', { attr: { type: 'text', placeholder: 'Название' }, cls: 'tn-lims-input' });
     const description = row.createEl('input', { attr: { type: 'text', placeholder: 'Описание' }, cls: 'tn-lims-input' });
     const indicators = row.createEl('input', {
-      attr: { type: 'text', placeholder: 'Показатели (через запятую)' },
+      attr: { type: 'text', placeholder: 'Показатели по убыванию, напр. Г1, Г2, Г3, Г4' },
       cls: 'tn-lims-input',
     });
+    form.createDiv({ cls: 'tn-lims-meta' }).setText(
+      'Порядок ввода показателей задаёт ранг: первый считается «выше»/«больше» остальных ' +
+      '(Г1, Г2, Г3, Г4 → Г1 > Г2 > Г3 > Г4) — используется в правилах классификации и формулах min_grade/max_grade.',
+    );
     form.createDiv({ cls: 'tn-lims-meta' }).setText('Лаборатории (метод может принадлежать нескольким):');
     const getLabIDs = this.renderLabCheckboxes(form, []);
     const addBtn = form.createEl('button', { text: '➕ Добавить метод', cls: 'tn-btn tn-btn-primary' });
@@ -950,7 +968,12 @@ export class LimsView extends ItemView {
     if (existing) { existing.remove(); return; }
     const cfg = this.methodConfigOf(methodId);
     const method = this.plugin.methods.find(m => m.id === methodId);
-    const determinableIndicators = method?.determinable_indicators || [];
+    const determinableIndicators: string[] = [...(method?.determinable_indicators || [])];
+    // Форвард-объявления: редакторы атрибутов/правил читают determinableIndicators
+    // для списков-опций показателя — при редактировании показателей (см. ниже)
+    // их нужно перерисовать вместе со списком показателей.
+    let redrawAttrs: () => void = () => {};
+    let redrawRules: () => void = () => {};
     const form = container.createDiv({ cls: 'tn-lims-series-form' });
 
     form.createDiv({ cls: 'tn-lims-meta' }).setText('Описание:');
@@ -959,20 +982,74 @@ export class LimsView extends ItemView {
     form.createDiv({ cls: 'tn-lims-meta' }).setText('Лаборатории (метод может принадлежать нескольким):');
     const getLabIDs = this.renderLabCheckboxes(form, method?.lab_ids || []);
 
+    // ---- Показатели метода (determinable_indicators) — порядок = ранг ----
+    form.createEl('h4', { text: 'Показатели метода' });
+    form.createDiv({ cls: 'tn-lims-meta' }).setText(
+      'Порядок задаёт ранг: первый показатель считается «выше»/«больше» остальных ' +
+      '(напр. Г1, Г2, Г3, Г4 → Г1 > Г2 > Г3 > Г4) — используется в правилах ' +
+      'классификации и в min_grade/max_grade. Если ошиблись при создании метода — ' +
+      'поправьте порядок здесь стрелками.',
+    );
+    const indicatorsListEl = form.createDiv();
+    let redrawIndicators: () => void;
+    redrawIndicators = () => {
+      indicatorsListEl.empty();
+      determinableIndicators.forEach((val, i) => {
+        const row = indicatorsListEl.createDiv({ cls: 'tn-lims-flex' });
+        const upBtn = row.createEl('button', { text: '▲', cls: 'tn-btn tn-btn-ghost' });
+        upBtn.disabled = i === 0;
+        upBtn.addEventListener('click', () => {
+          [determinableIndicators[i - 1], determinableIndicators[i]] = [determinableIndicators[i], determinableIndicators[i - 1]];
+          redrawIndicators(); redrawAttrs(); redrawRules();
+        });
+        const downBtn = row.createEl('button', { text: '▼', cls: 'tn-btn tn-btn-ghost' });
+        downBtn.disabled = i === determinableIndicators.length - 1;
+        downBtn.addEventListener('click', () => {
+          [determinableIndicators[i], determinableIndicators[i + 1]] = [determinableIndicators[i + 1], determinableIndicators[i]];
+          redrawIndicators(); redrawAttrs(); redrawRules();
+        });
+        const valInput = row.createEl('input', { attr: { type: 'text', placeholder: 'показатель' }, cls: 'tn-lims-input' });
+        valInput.value = val;
+        valInput.addEventListener('change', () => {
+          determinableIndicators[i] = valInput.value.trim();
+          redrawAttrs(); redrawRules();
+        });
+        const delBtn = row.createEl('button', { text: '✖', cls: 'tn-btn tn-btn-ghost' });
+        delBtn.addEventListener('click', () => {
+          determinableIndicators.splice(i, 1);
+          redrawIndicators(); redrawAttrs(); redrawRules();
+        });
+      });
+    };
+    redrawIndicators();
+    const addIndicatorBtn = form.createEl('button', { text: '➕ Показатель', cls: 'tn-btn tn-btn-ghost' });
+    addIndicatorBtn.addEventListener('click', () => {
+      determinableIndicators.push('');
+      redrawIndicators();
+    });
+
     // ---- Импорт из стандарта (ИИ-черновик атрибутов/правил/представления) ----
-    // DOM-элементы создаются здесь (чтобы блок был визуально первым), обработчик
-    // click навешивается ниже — после того, как attrs/rules/presentationFields и
-    // их redraw-замыкания уже объявлены (нужны обработчику).
+    // ---- Загрузка атрибутов из JSON (без ИИ — готовый список) ----
+    // DOM-элементы создаются здесь (чтобы блоки были визуально первыми), обработчики
+    // click навешиваются ниже — после того, как attrs/rules/presentationFields и
+    // их redraw-замыкания уже объявлены (нужны обработчикам).
     form.createEl('h4', { text: '📄 Импортировать из стандарта (ИИ)' });
     const importRow = form.createDiv({ cls: 'tn-lims-flex' });
     const importFileInput = importRow.createEl('input', { attr: { type: 'file', accept: '.rtf,.txt' } });
     const importBtn = importRow.createEl('button', { text: '🤖 Сформировать проект', cls: 'tn-btn tn-btn-ghost' });
 
+    form.createEl('h4', { text: '📋 Загрузить атрибуты из JSON' });
+    const jsonImportArea = form.createEl('textarea', {
+      attr: { placeholder: 'Вставьте JSON-массив атрибутов (или объект с полем attributes/input_parameters)' },
+      cls: 'tn-lims-input',
+    });
+    jsonImportArea.rows = 4;
+    const jsonImportBtn = form.createEl('button', { text: '⬆ Загрузить', cls: 'tn-btn tn-btn-ghost' });
+
     // ---- Блок 1: атрибуты метода ----
     const attrs: MethodAttribute[] = cfg.input_parameters.map(a => ({ ...a }));
     form.createEl('h4', { text: 'Атрибуты метода' });
     const attrsListEl = form.createDiv();
-    let redrawAttrs: () => void;
     redrawAttrs = () => {
       attrsListEl.empty();
       this.renderAttributeRows(attrsListEl, attrs, determinableIndicators, () => redrawAttrs());
@@ -988,7 +1065,6 @@ export class LimsView extends ItemView {
     const rules: ClassificationRule[] = cfg.classification.map(r => ({ ...r }));
     form.createEl('h4', { text: 'Правила классификации' });
     const rulesListEl = form.createDiv();
-    let redrawRules: () => void;
     redrawRules = () => {
       rulesListEl.empty();
       this.renderClassificationRows(rulesListEl, rules, attrs, determinableIndicators, () => redrawRules());
@@ -996,7 +1072,7 @@ export class LimsView extends ItemView {
     redrawRules();
     const addRuleBtn = form.createEl('button', { text: '➕ Добавить правило', cls: 'tn-btn tn-btn-ghost' });
     addRuleBtn.addEventListener('click', () => {
-      rules.push({ rule_type: 'threshold', parameter_name: '', thresholds: [] });
+      rules.push({ output_name: '', branches: [] });
       redrawRules();
     });
 
@@ -1011,12 +1087,9 @@ export class LimsView extends ItemView {
       .filter(f => attrs.some(a => a.id === f.attribute_id))
       .map(f => ({ ...f }));
     // атрибуты, которых пока нет в presentation (новые/метод впервые конфигурируется
-    // в блоке 3) — добавляем в конец в их текущем порядке, чтобы список сразу
-    // отражал все атрибуты, а не только уже расставленные.
-    for (const a of attrs) {
-      if (!a.id || presentationFields.some(f => f.attribute_id === a.id)) continue;
-      presentationFields.push({ attribute_id: a.id, show_in_ui: true, show_in_protocol: true });
-    }
+    // в блоке 3, либо атрибуты только что загружены/сформированы) — добавляем в
+    // конец в их текущем порядке, чтобы список сразу отражал все атрибуты.
+    this.syncPresentationFieldsToAttrs(presentationFields, attrs);
     form.createEl('h4', { text: 'Представление данных (таблица результатов и протокол)' });
     form.createDiv({ cls: 'tn-lims-meta' }).setText('Перетащите строки, чтобы задать порядок столбцов:');
     const presentationListEl = form.createDiv();
@@ -1079,6 +1152,38 @@ export class LimsView extends ItemView {
       }
     });
 
+    jsonImportBtn.addEventListener('click', () => {
+      const text = jsonImportArea.value.trim();
+      if (!text) { new Notice('Вставьте JSON с атрибутами в поле выше'); return; }
+      if (attrs.length > 0 && !window.confirm(
+        'Заменить текущие атрибуты вставленным JSON? Ничего не сохранится, пока вы не нажмёте «Сохранить».',
+      )) {
+        return;
+      }
+      try {
+        const parsed = JSON.parse(text) as unknown;
+        const rawList = this.extractAttributeArray(parsed);
+        if (!rawList) {
+          new Notice('Не нашёл массив атрибутов (ожидается JSON-массив или объект с полем attributes/input_parameters)');
+          return;
+        }
+        const { attributes } = sanitizeAttributesWithRename(rawList);
+        if (attributes.length === 0) {
+          new Notice('Не нашлось ни одного распознанного атрибута (у каждого нужно как минимум "name")');
+          return;
+        }
+        attrs.splice(0, attrs.length, ...attributes);
+        this.syncPresentationFieldsToAttrs(presentationFields, attrs);
+        redrawAttrs();
+        redrawPresentation();
+        jsonImportArea.value = '';
+        new Notice(`Загружено атрибутов: ${attributes.length} — проверьте перед сохранением`);
+      } catch (e: unknown) {
+        console.error('ЛИМС: ошибка загрузки атрибутов из JSON:', e);
+        new Notice(`Ошибка загрузки JSON: ${errorMessage(e)}`);
+      }
+    });
+
     // ---- Блок 3б: графики (chart_configs) — структурный редактор ----
     // Нормализация на случай конфигов, сохранённых старым raw-JSON textarea
     // (до блока 3) без части полей — иначе редактор упал бы на .map(undefined).
@@ -1112,13 +1217,14 @@ export class LimsView extends ItemView {
       const validationError = this.validateAttributesAndRules(attrs, rules) || this.validateChartsAndPresentation(charts, presentationFields, attrs);
       if (validationError) { new Notice(validationError); return; }
       const attrIds = new Set(attrs.map(a => a.id));
-      const patch: Partial<MethodConfig> & { lab_ids?: number[]; description?: string } = {
+      const patch: Partial<MethodConfig> & { lab_ids?: number[]; description?: string; determinable_indicators?: string[] } = {
         lab_ids: labIDs,
         description: description.value.trim(),
         input_parameters: attrs,
         classification: rules,
         chart_configs: charts,
         presentation: { fields: presentationFields.filter(f => attrIds.has(f.attribute_id)) },
+        determinable_indicators: determinableIndicators.filter(Boolean),
       };
       try {
         await this.plugin.syncService.updateMethodConfig(methodId, patch);
@@ -1314,7 +1420,7 @@ export class LimsView extends ItemView {
       const typeSelect = row.createEl('select', { cls: 'tn-lims-select' });
       const typeOptions: Array<[AttributeDataType, string]> = [
         ['text', 'Текст'], ['int', 'Целое число'], ['float', 'Дробное число'],
-        ['date', 'Дата'], ['time', 'Время'], ['photo', 'Фотография'],
+        ['date', 'Дата'], ['time', 'Время'], ['boolean', 'Да/Нет'], ['photo', 'Фотография'],
       ];
       for (const [val, label] of typeOptions) typeSelect.createEl('option', { attr: { value: val }, text: label });
       typeSelect.value = attr.data_type;
@@ -1444,9 +1550,16 @@ export class LimsView extends ItemView {
     });
   }
 
-  /** Рисует строки правил классификации (блок 2) — одна строка = все свойства
-   * ОДНОГО правила (единый tn-lims-flex; для «пороговых» правил список порогов —
-   * переменной длины, поэтому он остаётся отдельным вложенным списком под строкой). */
+  /** Рисует строки правил классификации (блок 2, 2026-08-22v2 — по прямой правке
+   * пользователя: прежняя версия «если атрибут [знак] Б» фиксировала ОДИН атрибут
+   * на всё правило — этого недостаточно, нужна привычная как в Excel структура
+   * «Если А [знак] Б (И/ИЛИ Если В [знак] Г ...), то результат = показатель», где
+   * первый логический признак «Если» показан явно словом в самой форме, а не
+   * только в подписи-подсказке. Одна строка правила = результат/агрегация; ниже —
+   * список ВЕТОК (branches) переменной длины (порядок важен — сервер не
+   * пересортировывает, первая совпавшая решает; ветка без условий = безусловное
+   * «Иначе»), каждая ветка — список clauses (атомарных «А [знак] Б»),
+   * объединённых через И/ИЛИ. */
   private renderClassificationRows(
     container: HTMLElement,
     rules: ClassificationRule[],
@@ -1457,138 +1570,194 @@ export class LimsView extends ItemView {
     rules.forEach((rule, idx) => {
       const card = container.createDiv({ cls: 'tn-lims-method' });
       const row = card.createDiv({ cls: 'tn-lims-flex' });
-      const typeSelect = row.createEl('select', { cls: 'tn-lims-select' });
-      const typeOptions: Array<[ClassificationRule['rule_type'], string]> = [
-        ['threshold', 'Пороговое'], ['boolean', 'Булево'], ['compliance', 'Соответствие целевому показателю'],
-      ];
-      for (const [val, label] of typeOptions) typeSelect.createEl('option', { attr: { value: val }, text: label });
-      typeSelect.value = rule.rule_type;
-      typeSelect.addEventListener('change', () => {
-        const newType = typeSelect.value as ClassificationRule['rule_type'];
-        const common = { parameter_name: rule.parameter_name, output_name: rule.output_name };
-        if (newType === 'threshold') rules[idx] = { ...common, rule_type: 'threshold', thresholds: [] };
-        else if (newType === 'boolean') rules[idx] = { ...common, rule_type: 'boolean', operator: '==', value: '', true_grade: '', false_grade: '' };
-        else rules[idx] = { ...common, rule_type: 'compliance' };
-        onChange();
-      });
 
-      const paramSelect = row.createEl('select', { cls: 'tn-lims-select' });
-      paramSelect.createEl('option', { attr: { value: '' }, text: '— параметр —' });
-      for (const a of attrs) {
-        if (!a.id) continue;
-        paramSelect.createEl('option', { attr: { value: a.id }, text: a.name || a.id });
-      }
-      paramSelect.value = rule.parameter_name;
-      paramSelect.addEventListener('change', () => { rule.parameter_name = paramSelect.value; });
-
+      row.createSpan({ text: 'результат (Атрибут С):' });
       const outputInput = row.createEl('input', {
-        attr: { type: 'text', placeholder: `результат (по умолч.: ${rule.parameter_name || '...'}_grade)` },
+        attr: { type: 'text', placeholder: 'id атрибута-результата, напр. gg_grade' },
         cls: 'tn-lims-input',
       });
       outputInput.value = rule.output_name || '';
-      outputInput.addEventListener('change', () => { rule.output_name = outputInput.value.trim() || undefined; });
+      outputInput.addEventListener('change', () => {
+        rule.output_name = outputInput.value.trim();
+        redrawBranches();
+      });
 
-      if (rule.rule_type === 'threshold') {
-        this.renderThresholdFields(row, card, rule, determinableIndicators);
-      } else if (rule.rule_type === 'boolean') {
-        this.renderBooleanFields(row, rule, determinableIndicators);
-      } else {
-        this.renderComplianceFields(row, rule);
-      }
+      row.createSpan({ text: 'при неск. сериях:' });
+      const aggSelect = row.createEl('select', { cls: 'tn-lims-select' });
+      const aggOptions: Array<[string, string]> = [
+        ['none', 'Не сравнивать между сериями'], ['avg', 'Среднее'], ['min', 'Минимальное'], ['max', 'Максимальное'],
+      ];
+      for (const [val, label] of aggOptions) aggSelect.createEl('option', { attr: { value: val }, text: label });
+      aggSelect.value = rule.aggregation_rule || 'none';
+      aggSelect.addEventListener('change', () => {
+        rule.aggregation_rule = aggSelect.value as ClassificationRule['aggregation_rule'];
+      });
 
-      const delBtn = row.createEl('button', { text: '✖', cls: 'tn-btn tn-btn-ghost' });
+      const delBtn = row.createEl('button', { text: '✖ правило', cls: 'tn-btn tn-btn-ghost' });
       delBtn.addEventListener('click', () => { rules.splice(idx, 1); onChange(); });
+
+      card.createDiv({ cls: 'tn-lims-meta' }).setText(
+        'Ветки «Если…» проверяются по порядку сверху вниз, первая совпавшая — результат. ' +
+        'Ветка «Иначе» — без условий, срабатывает всегда (обычно последняя).',
+      );
+      const redrawBranches = this.renderBranchRows(card, rule, attrs, determinableIndicators);
     });
   }
 
-  /** Пороговое правило: сортировка порогов по возрастанию и выбор первого подходящего
-   * — на сервере (classifyThreshold). Агрегация — простое поле строки; сам список
-   * порогов ({значение, показатель}) переменной длины — вложенный список под строкой. */
-  private renderThresholdFields(
-    row: HTMLElement,
+  /** Список веток одного правила (переменной длины, порядок важен — см. ▲▼). Каждая
+   * ветка — явное «Если [clause] (И/ИЛИ [clause] …) → [показатель]» либо «Иначе →
+   * [показатель]» (пустой список clauses). */
+  private renderBranchRows(
     card: HTMLElement,
-    rule: ThresholdClassificationRule,
+    rule: ClassificationRule,
+    attrs: MethodAttribute[],
     determinableIndicators: string[],
-  ): void {
-    row.createSpan({ text: 'при неск. сериях:' });
-    const aggSelect = row.createEl('select', { cls: 'tn-lims-select' });
-    const aggOptions: Array<[string, string]> = [['', 'среднее'], ['best', 'лучшее'], ['worst', 'худшее']];
-    for (const [val, label] of aggOptions) aggSelect.createEl('option', { attr: { value: val }, text: label });
-    aggSelect.value = rule.aggregation_rule || '';
-    aggSelect.addEventListener('change', () => {
-      rule.aggregation_rule = (aggSelect.value || undefined) as ThresholdClassificationRule['aggregation_rule'];
-    });
-
-    card.createDiv({ cls: 'tn-lims-meta' }).setText(`Пороги (показатели метода: ${determinableIndicators.join(', ') || '—'}):`);
+  ): () => void {
     const list = card.createDiv();
     let redraw: () => void;
     redraw = () => {
       list.empty();
-      rule.thresholds.forEach((t, i) => {
-        const tRow = list.createDiv({ cls: 'tn-lims-flex' });
-        const valueInput = tRow.createEl('input', { attr: { type: 'number', placeholder: 'значение' }, cls: 'tn-lims-input' });
-        valueInput.value = String(t.value);
-        valueInput.addEventListener('change', () => { t.value = Number(valueInput.value) || 0; });
-        const gradeSelect = tRow.createEl('select', { cls: 'tn-lims-select' });
+      rule.branches.forEach((branch, i) => {
+        const branchBox = list.createDiv({ cls: 'tn-lims-method' });
+        const topRow = branchBox.createDiv({ cls: 'tn-lims-flex' });
+        const upBtn = topRow.createEl('button', { text: '▲', cls: 'tn-btn tn-btn-ghost' });
+        upBtn.disabled = i === 0;
+        upBtn.addEventListener('click', () => {
+          [rule.branches[i - 1], rule.branches[i]] = [rule.branches[i], rule.branches[i - 1]];
+          redraw();
+        });
+        const downBtn = topRow.createEl('button', { text: '▼', cls: 'tn-btn tn-btn-ghost' });
+        downBtn.disabled = i === rule.branches.length - 1;
+        downBtn.addEventListener('click', () => {
+          [rule.branches[i], rule.branches[i + 1]] = [rule.branches[i + 1], rule.branches[i]];
+          redraw();
+        });
+        const delBranchBtn = topRow.createEl('button', { text: '✖ ветку', cls: 'tn-btn tn-btn-ghost' });
+        delBranchBtn.addEventListener('click', () => { rule.branches.splice(i, 1); redraw(); });
+
+        const clauses = branch.clauses || [];
+        if (clauses.length === 0) {
+          topRow.createEl('strong', { text: 'Иначе' });
+        } else {
+          branchBox.createEl('strong', { text: 'Если' });
+          const clausesEl = branchBox.createDiv();
+          clauses.forEach((clause, ci) => {
+            const clauseRow = clausesEl.createDiv({ cls: 'tn-lims-flex' });
+            if (ci === 0) {
+              clauseRow.createSpan({ cls: 'tn-lims-meta', text: '' });
+            } else {
+              const joinSelect = clauseRow.createEl('select', { cls: 'tn-lims-select' });
+              joinSelect.createEl('option', { attr: { value: 'and' }, text: 'И' });
+              joinSelect.createEl('option', { attr: { value: 'or' }, text: 'ИЛИ' });
+              joinSelect.value = branch.join || 'and';
+              joinSelect.addEventListener('change', () => {
+                branch.join = joinSelect.value === 'or' ? 'or' : 'and';
+                redraw();
+              });
+            }
+            this.renderOperandEditor(clauseRow, clause.left, attrs, 'А');
+            const opSelect = clauseRow.createEl('select', { cls: 'tn-lims-select' });
+            for (const [val, label] of COMPARISON_OPERATOR_OPTIONS) opSelect.createEl('option', { attr: { value: val }, text: label });
+            opSelect.value = clause.operator;
+            opSelect.addEventListener('change', () => { clause.operator = opSelect.value as ComparisonOperator; });
+            this.renderOperandEditor(clauseRow, clause.right, attrs, 'Б');
+            const delClauseBtn = clauseRow.createEl('button', { text: '✖', cls: 'tn-btn tn-btn-ghost' });
+            delClauseBtn.addEventListener('click', () => { clauses.splice(ci, 1); redraw(); });
+          });
+          const addClauseRow = branchBox.createDiv({ cls: 'tn-lims-flex' });
+          const addAndBtn = addClauseRow.createEl('button', { text: '➕ И условие', cls: 'tn-btn tn-btn-ghost' });
+          addAndBtn.addEventListener('click', () => {
+            if (clauses.length > 0) branch.join = 'and';
+            clauses.push({ left: { kind: 'attribute', id: attrs.find(a => a.id)?.id || '' }, operator: '<=', right: { kind: 'literal', value: '' } });
+            branch.clauses = clauses;
+            redraw();
+          });
+          const addOrBtn = addClauseRow.createEl('button', { text: '➕ ИЛИ условие', cls: 'tn-btn tn-btn-ghost' });
+          addOrBtn.addEventListener('click', () => {
+            if (clauses.length > 0) branch.join = 'or';
+            clauses.push({ left: { kind: 'attribute', id: attrs.find(a => a.id)?.id || '' }, operator: '<=', right: { kind: 'literal', value: '' } });
+            branch.clauses = clauses;
+            redraw();
+          });
+        }
+
+        const thenRow = branchBox.createDiv({ cls: 'tn-lims-flex' });
+        thenRow.createSpan({ text: `то ${rule.output_name || 'результат'} =` });
+        const gradeSelect = thenRow.createEl('select', { cls: 'tn-lims-select' });
         gradeSelect.createEl('option', { attr: { value: '' }, text: '— показатель —' });
         for (const g of determinableIndicators) gradeSelect.createEl('option', { attr: { value: g }, text: g });
-        gradeSelect.value = t.grade;
-        gradeSelect.addEventListener('change', () => { t.grade = gradeSelect.value; });
-        const delBtn = tRow.createEl('button', { text: '✖', cls: 'tn-btn tn-btn-ghost' });
-        delBtn.addEventListener('click', () => { rule.thresholds.splice(i, 1); redraw(); });
+        gradeSelect.value = branch.grade;
+        gradeSelect.addEventListener('change', () => { branch.grade = gradeSelect.value; });
       });
     };
     redraw();
-    const addBtn = card.createEl('button', { text: '➕ Порог', cls: 'tn-btn tn-btn-ghost' });
-    addBtn.addEventListener('click', () => {
-      rule.thresholds.push({ value: 0, grade: determinableIndicators[0] || '' });
+    const addRow = card.createDiv({ cls: 'tn-lims-flex' });
+    const addIfBtn = addRow.createEl('button', { text: '➕ Ветка «Если…»', cls: 'tn-btn tn-btn-ghost' });
+    addIfBtn.addEventListener('click', () => {
+      rule.branches.push({
+        clauses: [{ left: { kind: 'attribute', id: attrs.find(a => a.id)?.id || '' }, operator: '<=', right: { kind: 'literal', value: '' } }],
+        grade: determinableIndicators[0] || '',
+      });
       redraw();
     });
+    const addElseBtn = addRow.createEl('button', { text: '➕ Ветка «Иначе»', cls: 'tn-btn tn-btn-ghost' });
+    addElseBtn.addEventListener('click', () => {
+      rule.branches.push({ grade: determinableIndicators[0] || '' });
+      redraw();
+    });
+    return redraw;
   }
 
-  /** Булево правило: одно условие над значением параметра-источника — все поля
-   * инлайн в общей строке правила. */
-  private renderBooleanFields(
-    row: HTMLElement,
-    rule: BooleanClassificationRule,
-    determinableIndicators: string[],
+  /** Редактор одного операнда атомарного сравнения (Атрибут А или Атрибут Б в
+   * формулировке пользователя) — переключатель вида (атрибут/значение/целевой
+   * показатель заявки) + соответствующий под-контрол. Мутирует operand на месте
+   * (через onChange — вызывающий код должен перерисовать список после структурных
+   * изменений вида, но не после правки простого значения). label — для placeholder. */
+  private renderOperandEditor(
+    container: HTMLElement,
+    operand: Operand,
+    attrs: MethodAttribute[],
+    label: string,
   ): void {
-    const opSelect = row.createEl('select', { cls: 'tn-lims-select' });
-    for (const op of ['==', '!=', '<', '<=', '>', '>=']) opSelect.createEl('option', { attr: { value: op }, text: op });
-    opSelect.value = rule.operator;
-    opSelect.addEventListener('change', () => { rule.operator = opSelect.value as BooleanClassificationRule['operator']; });
-    const valueInput = row.createEl('input', { attr: { type: 'text', placeholder: 'значение' }, cls: 'tn-lims-input' });
-    valueInput.value = String(rule.value ?? '');
-    valueInput.addEventListener('change', () => { rule.value = valueInput.value; });
+    const box = container.createDiv({ cls: 'tn-lims-flex' });
+    const kindSelect = box.createEl('select', { cls: 'tn-lims-select' });
+    const kindOptions: Array<[Operand['kind'], string]> = [
+      ['attribute', 'атрибут'], ['literal', 'значение'], ['target_indicator', 'целевой показатель заявки'],
+    ];
+    for (const [val, kLabel] of kindOptions) kindSelect.createEl('option', { attr: { value: val }, text: kLabel });
+    kindSelect.value = operand.kind;
 
-    row.createSpan({ text: 'если верно →' });
-    const trueSelect = row.createEl('select', { cls: 'tn-lims-select' });
-    trueSelect.createEl('option', { attr: { value: '' }, text: '— показатель —' });
-    for (const g of determinableIndicators) trueSelect.createEl('option', { attr: { value: g }, text: g });
-    trueSelect.value = rule.true_grade;
-    trueSelect.addEventListener('change', () => { rule.true_grade = trueSelect.value; });
-
-    row.createSpan({ text: 'иначе →' });
-    const falseSelect = row.createEl('select', { cls: 'tn-lims-select' });
-    falseSelect.createEl('option', { attr: { value: '' }, text: '— показатель —' });
-    for (const g of determinableIndicators) falseSelect.createEl('option', { attr: { value: g }, text: g });
-    falseSelect.value = rule.false_grade;
-    falseSelect.addEventListener('change', () => { rule.false_grade = falseSelect.value; });
-  }
-
-  /** Правило соответствия целевому показателю: цель всегда «Целевой показатель»
-   * заявки (objects.characteristics.target_indicators) — здесь только тексты
-   * результата, инлайн в общей строке правила, с разумными подписями по умолчанию. */
-  private renderComplianceFields(row: HTMLElement, rule: ComplianceClassificationRule): void {
-    const complyInput = row.createEl('input', { attr: { type: 'text', placeholder: 'Соответствует' }, cls: 'tn-lims-input' });
-    complyInput.value = rule.comply_text || '';
-    complyInput.addEventListener('change', () => { rule.comply_text = complyInput.value.trim() || undefined; });
-    const notComplyInput = row.createEl('input', { attr: { type: 'text', placeholder: 'Не соответствует' }, cls: 'tn-lims-input' });
-    notComplyInput.value = rule.not_comply_text || '';
-    notComplyInput.addEventListener('change', () => { rule.not_comply_text = notComplyInput.value.trim() || undefined; });
-    const notAssessedInput = row.createEl('input', { attr: { type: 'text', placeholder: 'Не оценивается' }, cls: 'tn-lims-input' });
-    notAssessedInput.value = rule.not_assessed_text || '';
-    notAssessedInput.addEventListener('change', () => { rule.not_assessed_text = notAssessedInput.value.trim() || undefined; });
+    const subEl = box.createDiv({ cls: 'tn-lims-flex' });
+    const renderSub = () => {
+      subEl.empty();
+      if (operand.kind === 'attribute') {
+        const sel = subEl.createEl('select', { cls: 'tn-lims-select' });
+        sel.createEl('option', { attr: { value: '' }, text: `— атрибут ${label} —` });
+        for (const a of attrs) {
+          if (!a.id) continue;
+          sel.createEl('option', { attr: { value: a.id }, text: a.name || a.id });
+        }
+        sel.value = operand.id;
+        sel.addEventListener('change', () => { (operand as { kind: 'attribute'; id: string }).id = sel.value; });
+      } else if (operand.kind === 'literal') {
+        const input = subEl.createEl('input', { attr: { type: 'text', placeholder: `значение ${label} (число, Да/Нет, показатель…)` }, cls: 'tn-lims-input' });
+        input.value = String(operand.value);
+        input.addEventListener('change', () => { (operand as { kind: 'literal'; value: string | number }).value = parseConditionLiteral(input.value); });
+      } else {
+        subEl.createSpan({ cls: 'tn-lims-meta', text: 'целевой показатель заявки' });
+      }
+    };
+    renderSub();
+    kindSelect.addEventListener('change', () => {
+      const kind = kindSelect.value as Operand['kind'];
+      if (kind === 'attribute') Object.assign(operand, { kind: 'attribute', id: attrs.find(a => a.id)?.id || '' });
+      else if (kind === 'literal') Object.assign(operand, { kind: 'literal', value: '' });
+      else Object.assign(operand, { kind: 'target_indicator' });
+      // удалить более не относящиеся к делу поля прежнего вида операнда
+      if (kind !== 'attribute') delete (operand as Record<string, unknown>).id;
+      if (kind !== 'literal') delete (operand as Record<string, unknown>).value;
+      renderSub();
+    });
   }
 
   /** Валидация перед сохранением — сообщения на русском, показываются через Notice. */
@@ -1613,12 +1782,17 @@ export class LimsView extends ItemView {
       }
     }
     for (const r of rules) {
-      if (!r.parameter_name.trim()) return 'У каждого правила классификации укажите параметр-источник';
-      if (r.rule_type === 'threshold' && r.thresholds.length === 0) {
-        return `Правило по «${r.parameter_name}»: добавьте хотя бы один порог`;
-      }
-      if (r.rule_type === 'boolean' && (!r.true_grade.trim() || !r.false_grade.trim())) {
-        return `Правило по «${r.parameter_name}»: укажите показатели для «верно»/«иначе»`;
+      if (!r.output_name.trim()) return 'У каждого правила классификации укажите результат (Атрибут С)';
+      if (r.branches.length === 0) return `Правило «${r.output_name}»: добавьте хотя бы одну ветку («Если…» или «Иначе»)`;
+      for (const branch of r.branches) {
+        if (!branch.grade.trim()) return `Правило «${r.output_name}»: у каждой ветки укажите показатель`;
+        for (const clause of branch.clauses || []) {
+          for (const [side, operand] of [['А', clause.left], ['Б', clause.right]] as const) {
+            if (operand.kind === 'attribute' && !ids.has(operand.id)) {
+              return `Правило «${r.output_name}»: условие ссылается на несуществующий атрибут ${side} «${operand.id}»`;
+            }
+          }
+        }
       }
     }
     return null;
@@ -1944,6 +2118,105 @@ export class LimsView extends ItemView {
       input_parameters: Array.isArray(m?.input_parameters) ? m.input_parameters : [],
       presentation: m?.presentation && Array.isArray(m.presentation.fields) ? m.presentation : { fields: [] },
     };
+  }
+
+  /** Синхронизирует presentationFields с текущим списком атрибутов "на месте" —
+   * убирает записи об удалённых атрибутах, дописывает в конец записи для новых
+   * (полная замена/загрузка атрибутов не должна оставлять представление в
+   * рассинхроне). Используется и при первом открытии формы, и после
+   * ИИ-черновика/загрузки атрибутов из JSON. */
+  private syncPresentationFieldsToAttrs(presentationFields: PresentationField[], attrs: MethodAttribute[]): void {
+    const validIds = new Set(attrs.map(a => a.id));
+    for (let i = presentationFields.length - 1; i >= 0; i--) {
+      if (!validIds.has(presentationFields[i].attribute_id)) presentationFields.splice(i, 1);
+    }
+    for (const a of attrs) {
+      if (!a.id || presentationFields.some(f => f.attribute_id === a.id)) continue;
+      presentationFields.push({ attribute_id: a.id, show_in_ui: true, show_in_protocol: true });
+    }
+  }
+
+  /** Достаёт массив "сырых" атрибутов из вставленного JSON — три распознаваемых
+   * формата: (1) уже массив атрибутов; (2) объект-обёртка с полем attributes/
+   * input_parameters (напр. выгрузка целого метода); (3) — 2026-08-22, по
+   * практике — плоский объект ПРИМЕРА результата (реальное письмо email-импорта:
+   * ключ = raw-имя поля, значение = пример измерения) — в этом случае атрибуты
+   * не заданы явно, а ВЫВОДЯТСЯ из ключей/значений (см. inferAttributesFromSample).
+   * null — только если вообще не удалось трактовать ни так, ни так. */
+  private extractAttributeArray(parsed: unknown): unknown[] | null {
+    if (Array.isArray(parsed)) return parsed;
+    if (parsed && typeof parsed === 'object') {
+      const obj = parsed as Record<string, unknown>;
+      if (Array.isArray(obj.attributes)) return obj.attributes;
+      if (Array.isArray(obj.input_parameters)) return obj.input_parameters;
+      // плоский объект без обёртки — трактуем как пример result-payload
+      return this.inferAttributesFromSample(obj);
+    }
+    return null;
+  }
+
+  /** Поля письма email-импорта, которые НЕ становятся generic-атрибутами — либо
+   * маршрутизация (type/method/ID/series_num/aim_indicator), либо уже есть свои
+   * колонки на MeasurementResult (photo_before/photo_after), см. resultMetaFields
+   * в email_ingest.go (тот же список, серверная сторона). */
+  private static readonly SAMPLE_SKIP_KEYS = new Set([
+    'type', 'method', 'id', 'series_num', 'aim_indicator',
+    'photo_before', 'photo_after', 'source_file', 'timestamp',
+  ]);
+
+  /** ЗЕРКАЛО server_back/lab-service/email_ingest.go canonicalFieldNames — держать
+   * в синхроне вручную. Raw-имя письма переименовывается сервером ДО попадания в
+   * values, поэтому при выводе атрибута из примера письма нужно угадывать id по
+   * уже каноническому имени, а не по сырому ключу — иначе реальные результаты
+   * никогда не попадут в атрибут с "правильным" на вид, но не тем id. */
+  private static readonly CANONICAL_FIELD_NAMES: Record<string, string> = {
+    Comb_lenth_1: 'comb_length_1', Comb_lenth_2: 'comb_length_2',
+    Comb_lenth_3: 'comb_length_3', Comb_lenth_4: 'comb_length_4',
+    sampels_in_date: 'samples_in_date', flam_date_material_in: 'samples_in_date',
+    flam_fixation: 'mounting_method', flam_subst: 'substrate',
+    flam_inventor: 'inventor', additional_inf: 'additional_info',
+    flam_additional_inf: 'additional_info', flam_exp_date: 'exp_date',
+    flam_rep_date: 'report_date',
+  };
+
+  /** Выводит черновик атрибутов из ПРИМЕРА значений (плоский объект "имя поля" →
+   * "значение") — практичнее, чем требовать от пользователя написать полное
+   * определение атрибута вручную: вставил реальное письмо результата — получил
+   * черновик атрибутов с угаданным типом данных по значению, дальше правишь как
+   * обычно. id/name — сам ключ (в реальных письмах уже осмысленное raw-имя). */
+  private inferAttributesFromSample(sample: Record<string, unknown>): unknown[] {
+    const out: unknown[] = [];
+    for (const [key, value] of Object.entries(sample)) {
+      if (LimsView.SAMPLE_SKIP_KEYS.has(key.toLowerCase())) continue;
+      // raw-имя может быть переименовано сервером (canonicalFieldNames) ДО того,
+      // как попадёт в values — атрибут заводим сразу под тем именем, под которым
+      // реальные результаты и придут, иначе они пройдут мимо.
+      const id = LimsView.CANONICAL_FIELD_NAMES[key] || key;
+      out.push({
+        id,
+        name: key,
+        data_type: this.guessDataType(value),
+        fill_method: 'manual',
+        level: 'experiment',
+      });
+    }
+    return out;
+  }
+
+  /** Угадывает data_type атрибута по примеру значения — пустая строка (часто
+   * встречается в письмах прибора, см. json_attr.md) не даёт сигнала, дефолт text. */
+  private guessDataType(value: unknown): AttributeDataType {
+    if (typeof value === 'boolean') return 'boolean';
+    if (typeof value === 'number') return Number.isInteger(value) ? 'int' : 'float';
+    if (typeof value !== 'string') return 'text';
+    const v = value.trim();
+    if (!v) return 'text';
+    if (/^(да|нет)$/i.test(v)) return 'boolean';
+    if (/^-?\d+$/.test(v)) return 'int';
+    if (/^-?\d+[.,]\d+$/.test(v)) return 'float';
+    if (/^\d{4}-\d{2}-\d{2}$/.test(v) || /^\d{2}\.\d{2}\.\d{4}$/.test(v)) return 'date';
+    if (/^\d{1,2}:\d{2}(:\d{2})?$/.test(v)) return 'time';
+    return 'text';
   }
 
   private showHtmlModal(req: LimsRequest, html: string): HTMLElement {

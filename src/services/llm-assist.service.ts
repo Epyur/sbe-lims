@@ -6,10 +6,13 @@ import type {
   AttributeDataType,
   AttributeFillMethod,
   AttributeLevel,
-  BooleanClassificationRule,
+  ClassificationBranch,
+  ClassificationClause,
   ClassificationRule,
+  ComparisonOperator,
   MethodAttribute,
   MethodPresentation,
+  Operand,
   PresentationField,
 } from '../types/lims';
 
@@ -21,7 +24,7 @@ const DSL_GRAMMAR = `Грамматика DSL формул lab-service (безо
 - Ссылка на атрибут метода — просто его id, без кавычек.
 - avg(a, b, c) / min(a, b, c) / max(a, b, c) / sum(a, b, c) — среднее/мин/макс/сумма нескольких атрибутов ОДНОЙ серии.
 - avg(id) / min(id) / max(id) / sum(id) / count(id) / median(id) / std(id) — то же по ОДНОМУ атрибуту, агрегируя по всем сериям заявки (для атрибутов уровня "Агрегированные результаты").
-- worst_grade(g1, g2, ...) / best_grade(g1, g2, ...) — худший/лучший из перечисленных показателей-атрибутов по порядку показателей метода (от лучшего к худшему).
+- min_grade(g1, g2, ...) / max_grade(g1, g2, ...) — минимальный/максимальный из перечисленных показателей-атрибутов по порядку показателей метода (по убыванию).
 - interpolate(x, xs, ys) — линейная интерполяция: x — число (или атрибут), xs/ys — атрибуты-массивы одной длины (напр. калибровочная таблица прибора).
 - agg_where('avg'|'min'|'max'|'sum', значение_атрибут, условие_атрибут, 'значение') — агрегат по сериям заявки, где условие_атрибут равен указанному значению (только для уровня "Агрегированные результаты").
 - Значение формулы — значение самого выражения, присваивание не нужно.`;
@@ -36,11 +39,11 @@ export interface ExistingAttributeSummary {
   level: string;
 }
 
-const VALID_DATA_TYPES = new Set(['text', 'int', 'float', 'date', 'time', 'photo']);
+const VALID_DATA_TYPES = new Set(['text', 'int', 'float', 'date', 'time', 'photo', 'boolean']);
 const VALID_FILL_METHODS = new Set(['manual', 'instrument', 'calculated']);
 const VALID_LEVELS = new Set(['experiment', 'aggregated']);
-const VALID_RULE_TYPES = new Set(['threshold', 'boolean', 'compliance']);
 const VALID_OPERATORS = new Set(['==', '!=', '<', '<=', '>', '>=']);
+const VALID_OPERAND_KINDS = new Set(['literal', 'attribute', 'target_indicator']);
 
 const CYRILLIC_TO_LATIN: Record<string, string> = {
   а: 'a', б: 'b', в: 'v', г: 'g', д: 'd', е: 'e', ё: 'e', ж: 'zh', з: 'z', и: 'i', й: 'i',
@@ -84,12 +87,14 @@ function remapIdentifiers(expr: string, renameMap: Map<string, string>): string 
   return out;
 }
 
-/** Санитизация черновика атрибутов от ИИ: неизвестные data_type/fill_method/level
- * заменяются на безопасный дефолт (не отбрасывают весь атрибут — только теряют
- * специфику, которую пользователь всё равно проверит), id приводится к валидному
- * виду. Возвращает и карту переименований — для remapIdentifiers по formula/
- * aggregation.source и для parameter_name правил классификации того же черновика. */
-function sanitizeAttributesWithRename(raw: unknown): { attributes: MethodAttribute[]; renameMap: Map<string, string> } {
+/** Санитизация черновика атрибутов (от ИИ ИЛИ из загруженного вручную JSON —
+ * экспортируется для повторного использования обоих путей одной и той же
+ * гарантией валидности): неизвестные data_type/fill_method/level заменяются на
+ * безопасный дефолт (не отбрасывают весь атрибут — только теряют специфику,
+ * которую пользователь всё равно проверит), id приводится к валидному виду.
+ * Возвращает и карту переименований — для remapIdentifiers по formula/
+ * aggregation.source и для parameter_name правил классификации того же набора. */
+export function sanitizeAttributesWithRename(raw: unknown): { attributes: MethodAttribute[]; renameMap: Map<string, string> } {
   const renameMap = new Map<string, string>();
   if (!Array.isArray(raw)) return { attributes: [], renameMap };
   const taken = new Set<string>();
@@ -139,51 +144,60 @@ function sanitizeAttributesWithRename(raw: unknown): { attributes: MethodAttribu
   return { attributes: attrs, renameMap };
 }
 
-/** Санитизация черновика правил классификации — неизвестный rule_type отбрасывает
- * запись целиком (не понятно, как безопасно её достроить); остальные поля
- * коэрцируются к ожидаемым типам. parameter_name прогоняется через renameMap
- * атрибутов того же черновика (см. sanitizeAttributesWithRename). */
+/** Санитизирует один операнд атомарного сравнения (см. Operand) — неизвестный/
+ * отсутствующий kind коэрцируется к литералу с пустым значением. id атрибута
+ * прогоняется через renameMap (тот же черновик, см. sanitizeAttributesWithRename). */
+function sanitizeOperand(raw: unknown, renameMap: Map<string, string>): Operand {
+  const o = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+  const kind = VALID_OPERAND_KINDS.has(o.kind as string) ? o.kind : 'literal';
+  if (kind === 'attribute') {
+    const rawId = typeof o.id === 'string' ? o.id.trim() : '';
+    return { kind: 'attribute', id: renameMap.get(rawId) || rawId };
+  }
+  if (kind === 'target_indicator') return { kind: 'target_indicator' };
+  const value = o.value;
+  return { kind: 'literal', value: typeof value === 'number' ? value : String(value ?? '') };
+}
+
+/** Санитизация черновика правил классификации (2026-08-22v2, единая модель —
+ * "Если А [знак] Б (И/ИЛИ …), то результат = показатель"): запись без результата
+ * или без единой ветки отбрасывается целиком; остальные поля коэрцируются к
+ * ожидаемым типам. Ссылки на атрибуты (output_name, Operand.id) прогоняются через
+ * renameMap атрибутов того же черновика (см. sanitizeAttributesWithRename). */
 function sanitizeClassification(raw: unknown, renameMap: Map<string, string>): ClassificationRule[] {
   if (!Array.isArray(raw)) return [];
   const out: ClassificationRule[] = [];
   for (const item of raw) {
     if (!item || typeof item !== 'object') continue;
     const r = item as Record<string, unknown>;
-    if (!VALID_RULE_TYPES.has(r.rule_type as string)) continue;
-    const rawParam = typeof r.parameter_name === 'string' ? r.parameter_name.trim() : '';
-    if (!rawParam) continue;
-    const parameter_name = renameMap.get(rawParam) || rawParam;
-    const output_name = typeof r.output_name === 'string' && r.output_name.trim() ? r.output_name.trim() : undefined;
+    const rawOutput = typeof r.output_name === 'string' ? r.output_name.trim() : '';
+    if (!rawOutput) continue;
+    const output_name = renameMap.get(rawOutput) || rawOutput;
+    const aggregation_rule = r.aggregation_rule === 'avg' || r.aggregation_rule === 'min' || r.aggregation_rule === 'max' ? r.aggregation_rule : undefined;
 
-    if (r.rule_type === 'threshold') {
-      const thresholds = (Array.isArray(r.thresholds) ? r.thresholds : [])
-        .filter((t): t is Record<string, unknown> => !!t && typeof t === 'object')
-        .map(t => ({ value: Number(t.value) || 0, grade: typeof t.grade === 'string' ? t.grade.trim() : '' }))
-        .filter(t => t.grade);
-      const aggregation_rule = r.aggregation_rule === 'best' || r.aggregation_rule === 'worst' ? r.aggregation_rule : undefined;
-      out.push({ rule_type: 'threshold', parameter_name, output_name, thresholds, aggregation_rule });
-    } else if (r.rule_type === 'boolean') {
-      const operator = (VALID_OPERATORS.has(r.operator as string) ? r.operator : '==') as BooleanClassificationRule['operator'];
-      const value = typeof r.value === 'string' || typeof r.value === 'number' ? r.value : '';
-      out.push({
-        rule_type: 'boolean',
-        parameter_name,
-        output_name,
-        operator,
-        value,
-        true_grade: typeof r.true_grade === 'string' ? r.true_grade.trim() : '',
-        false_grade: typeof r.false_grade === 'string' ? r.false_grade.trim() : '',
-      });
-    } else {
-      out.push({
-        rule_type: 'compliance',
-        parameter_name,
-        output_name,
-        comply_text: typeof r.comply_text === 'string' ? r.comply_text.trim() || undefined : undefined,
-        not_comply_text: typeof r.not_comply_text === 'string' ? r.not_comply_text.trim() || undefined : undefined,
-        not_assessed_text: typeof r.not_assessed_text === 'string' ? r.not_assessed_text.trim() || undefined : undefined,
-      });
-    }
+    const branches = (Array.isArray(r.branches) ? r.branches : [])
+      .filter((b): b is Record<string, unknown> => !!b && typeof b === 'object')
+      .map((b): ClassificationBranch | null => {
+        const grade = typeof b.grade === 'string' ? b.grade.trim() : '';
+        if (!grade) return null;
+        const rawClauses = Array.isArray(b.clauses) ? b.clauses : [];
+        const clauses = rawClauses
+          .filter((c): c is Record<string, unknown> => !!c && typeof c === 'object')
+          .map((c): ClassificationClause | null => {
+            if (!VALID_OPERATORS.has(c.operator as string)) return null;
+            return {
+              left: sanitizeOperand(c.left, renameMap),
+              operator: c.operator as ComparisonOperator,
+              right: sanitizeOperand(c.right, renameMap),
+            };
+          })
+          .filter((c): c is ClassificationClause => c !== null);
+        const join = b.join === 'or' ? 'or' : undefined;
+        return clauses.length > 0 ? { clauses, join, grade } : { grade };
+      })
+      .filter((b): b is ClassificationBranch => b !== null);
+
+    out.push({ output_name, aggregation_rule, branches });
   }
   return out;
 }
@@ -263,7 +277,7 @@ export class LimsLlmAssist {
 Атрибуты метода, доступные в формуле:
 ${attrsList || '(атрибутов пока нет)'}
 
-Показатели метода (determinable_indicators, от лучшего к худшему): ${determinableIndicators.join(', ') || '(не заданы)'}
+Показатели метода (determinable_indicators, по убыванию): ${determinableIndicators.join(', ') || '(не заданы)'}
 
 Ответь ТОЛЬКО самим выражением формулы на этой грамматике, без пояснений, без markdown-обёртки, без кавычек вокруг всего ответа.`;
     const result = await service.complete(system, description, { model: this.resolveModel() });
@@ -291,14 +305,18 @@ ${attrsList || '(атрибутов пока нет)'}
 ${DSL_GRAMMAR}
 
 Формат атрибута метода (JSON):
-{"id": "лат_идентификатор", "name": "название на русском", "data_type": "text"|"int"|"float"|"date"|"time"|"photo", "fill_method": "manual"|"instrument"|"calculated", "level": "experiment"|"aggregated", "formula": "DSL-выражение (только если fill_method=calculated)", "aggregation": {"source": "id атрибута уровня experiment", "method": "avg"|"min"|"max"} (только если level=aggregated и своей формулы нет)}
+{"id": "лат_идентификатор", "name": "название на русском", "data_type": "text"|"int"|"float"|"date"|"time"|"boolean"|"photo", "fill_method": "manual"|"instrument"|"calculated", "level": "experiment"|"aggregated", "formula": "DSL-выражение (только если fill_method=calculated)", "aggregation": {"source": "id атрибута уровня experiment", "method": "avg"|"min"|"max"} (только если level=aggregated и своей формулы нет)}
 Правила для id: только латиница/цифры/подчёркивание, не начинать с цифры, уникальны в пределах метода (^[A-Za-z_][A-Za-z0-9_]*$).
 id — ЭТО ПЕРЕВОД смысла на английский (или общепринятый латинский термин), а НЕ фонетическая транслитерация русских слов: "длительность пламенного горения" -> "flame_duration" (правильно), НЕ "dlit_plam_gor" (неправильно — транслитерация русских слов латиницей нечитаема и не является переводом).
+data_type="boolean" — значение true/false (в UI — Да/Нет); используй для атрибутов вида "наблюдалось/не наблюдалось", "да/нет" из текста стандарта, а не text.
 
-Формат правила классификации (JSON, один из трёх типов):
-{"rule_type": "threshold", "parameter_name": "id атрибута-источника", "output_name": "id результата (опц.)", "thresholds": [{"value": число, "grade": "показатель"}], "aggregation_rule": "best"|"worst" (опц., по умолч. среднее)}
-{"rule_type": "boolean", "parameter_name": "...", "operator": "=="|"!="|"<"|"<="|">"|">=", "value": "...", "true_grade": "...", "false_grade": "..."}
-{"rule_type": "compliance", "parameter_name": "...", "comply_text": "...", "not_comply_text": "...", "not_assessed_text": "..."}
+Формат правила классификации (JSON, единая модель — "Если А [знак] Б (И/ИЛИ А2 [знак] Б2 …), то результат = показатель", как в Excel IF/AND/OR):
+{"output_name": "id атрибута-результата", "aggregation_rule": "none"|"avg"|"min"|"max" (опц., по умолч. "none" — не сравнивать между сериями, брать значение текущей записи), "branches": [{"clauses": [{"left": Операнд, "operator": "<"|"<="|">"|">="|"=="|"!=", "right": Операнд}], "join": "and"|"or" (опц., по умолч. "and" — как связаны МЕЖДУ СОБОЙ несколько clauses одной ветки), "grade": "показатель"}]}
+Операнд — {"kind": "attribute", "id": "id атрибута"} | {"kind": "literal", "value": число|строка} | {"kind": "target_indicator"} (целевой показатель заявки). И left, и right — любой из трёх видов.
+Ветка без "clauses" (пустой массив/не задан) — безусловная ветка "Иначе", срабатывает всегда — ставь последней, если нужен catch-all вместо отсутствия результата.
+Ветки проверяются ПО ПОРЯДКУ массива (сервер не сортирует), первая совпавшая — результат.
+Примеры: пороговое правило — clause {"left":{"kind":"attribute","id":"x"},"operator":"<=","right":{"kind":"literal","value":50}}; булево (data_type=boolean) — right.kind="literal" со значением true/false, operator "=="; соответствие целевому показателю заявки — right.kind="target_indicator" (обычно 2 ветки: ">=" / "<" плюс catch-all "не оценивается"); несколько условий сразу — несколько clauses в одной ветке с join "and"/"or".
+Знаки "<"/"<="/">"/">=" при сравнении ДВУХ показателей метода (оба входят в determinable_indicators) трактуются как сравнение по порядку ввода показателей (первый введённый — "больше"/"выше"), иначе — обычное числовое сравнение.
 
 Уже существующие атрибуты в системе (из других методов — переиспользуй id и название, если параметр стандарта смыслово совпадает, вместо того чтобы придумывать новый):
 ${existingList || '(пока нет)'}

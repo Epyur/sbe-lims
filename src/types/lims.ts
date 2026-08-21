@@ -82,8 +82,13 @@ export interface LabGroup {
   updated_at: string;
 }
 
-/** Тип данных атрибута метода (конфигуратор методов, блок 1). */
-export type AttributeDataType = 'text' | 'int' | 'float' | 'date' | 'time' | 'photo';
+/** Тип данных атрибута метода (конфигуратор методов, блок 1). "photo" — значение
+ * хранится как URL (в перспективе — фото с мобильного терминала, загруженное в S3);
+ * "boolean" (2026-08-22) — значение хранится как настоящий JSON true/false, в UI —
+ * Да/Нет. */
+export type AttributeDataType = 'text' | 'int' | 'float' | 'date' | 'time' | 'photo' | 'boolean';
+/** Знак сравнения — пороговое правило классификации (условие на строку, 2026-08-22). */
+export type ComparisonOperator = '==' | '!=' | '<' | '<=' | '>' | '>=';
 /** Способ заполнения атрибута. */
 export type AttributeFillMethod = 'manual' | 'instrument' | 'calculated';
 /** Уровень атрибута: значение по каждой серии («данные эксперимента») или одно
@@ -118,44 +123,61 @@ export interface MethodAttribute {
   synonyms?: string[];
 }
 
-/** Правило классификации — "пороговое": вычисленный показатель сравнивается с
- * отсортированными по возрастанию порогами (сервер сортирует сам), берётся первый, где
- * значение <= value, иначе — последний (самый худший). */
-export interface ThresholdClassificationRule {
-  rule_type: 'threshold';
-  parameter_name: string;
-  output_name?: string;
-  thresholds: Array<{ value: number; grade: string }>;
-  aggregation_rule?: 'avg' | 'best' | 'worst';
+/** Операнд атомарного сравнения в правиле классификации (2026-08-22v2): атрибут
+ * текущей записи, литеральное значение (число/текст/"Да"-"Нет"/показатель), или
+ * «целевой показатель» заявки (objects.characteristics.target_indicators,
+ * sbe-requests). Используется и слева, и справа от знака сравнения — «Атрибут А»
+ * и «Атрибут Б» из формулировки пользователя оба могут быть любым из трёх видов. */
+export type Operand =
+  | { kind: 'attribute'; id: string }
+  | { kind: 'literal'; value: string | number }
+  | { kind: 'target_indicator' };
+
+/** Один атомарный тест «Атрибут А [знак] Атрибут Б» — строительный блок ветки
+ * правила (см. ClassificationBranch). */
+export interface ClassificationClause {
+  left: Operand;
+  operator: ComparisonOperator;
+  right: Operand;
 }
 
-/** Правило классификации — "булево": простое условие над значением атрибута. */
-export interface BooleanClassificationRule {
-  rule_type: 'boolean';
-  parameter_name: string;
-  output_name?: string;
-  operator: '==' | '!=' | '<' | '<=' | '>' | '>=';
-  value: string | number;
-  true_grade: string;
-  false_grade: string;
+/** Одна ветка правила — «Если [clauses, объединённые join], то результат = grade».
+ * `clauses` пустой/не задан — безусловная ветка («Иначе», без явного «Если»);
+ * ставится последней в списке, заменяет старый неявный фолбэк/спец-поля. Ветки
+ * проверяются ПО ПОРЯДКУ массива (сервер не пересортировывает), первая
+ * совпавшая — результат. */
+export interface ClassificationBranch {
+  clauses?: ClassificationClause[];
+  /** Как объединяются clauses при их больше одного — везде "И" или везде "ИЛИ"
+   * (без вложенных групп — соответствует базовому AND()/OR() из Excel, к которому
+   * апеллировал пользователь). По умолчанию "И". */
+  join?: 'and' | 'or';
+  grade: string;
 }
 
-/** Правило классификации — "соответствие целевому показателю»: сравнение вычисленного
- * показателя с «Целевым показателем» заявки (objects.characteristics.target_indicators,
- * sbe-requests) по порядку determinable_indicators метода. */
-export interface ComplianceClassificationRule {
-  rule_type: 'compliance';
-  parameter_name: string;
-  output_name?: string;
-  comply_text?: string;
-  not_comply_text?: string;
-  not_assessed_text?: string;
+/** Правило классификации (2026-08-22v2, по прямой просьбе пользователя — прежняя
+ * версия свела все правила к цепочке «если А [знак] Б» с ОДНИМ фиксированным А на
+ * правило; это не подходило: нужна привычная как в Excel структура «Если А [знак]
+ * Б (И/ИЛИ Если В [знак] Г ...), то Д = значение», где А/Б (и В/Г и т.д.) — любые
+ * два операнда (см. Operand), а не один общий источник. output_name — атрибут Д
+ * (результат); он ОДИН на всё правило, ветки только выбирают, какое значение туда
+ * записать. Знаки `<`/`<=`/`>`/`>=` при сравнении ДВУХ показателей метода (оба
+ * входят в determinable_indicators) трактуются как сравнение по позиции в этом
+ * списке — первый введённый показатель считается «большим» (Г1,Г2,Г3,Г4 ->
+ * Г1>Г2>Г3>Г4, подтверждено пользователем); иначе — обычное числовое сравнение. */
+export interface ClassificationRule {
+  output_name: string;
+  /** Как свести значения атрибута по нескольким сериям заявки+метода в одно —
+   * для операндов kind="attribute" в clauses этого правила. "none" (по умолчанию,
+   * в т.ч. когда поле не задано) — НЕ сравнивать между сериями: берётся значение
+   * из текущей записи (одной серии или уже агрегированной строки), без свода
+   * нескольких серий в одно число. "avg"/"min"/"max" — свести по всем сериям.
+   * Термины "лучше"/"хуже" здесь и везде в проекте не используются (оценочные
+   * категории неприменимы к объективной оценке результатов испытаний) —
+   * только "выше/ниже", "больше/меньше", "максимальное/минимальное". */
+  aggregation_rule?: 'none' | 'avg' | 'min' | 'max';
+  branches: ClassificationBranch[];
 }
-
-export type ClassificationRule =
-  | ThresholdClassificationRule
-  | BooleanClassificationRule
-  | ComplianceClassificationRule;
 
 /** Один ряд графика — источник значений (id атрибута) + подпись в легенде. */
 export interface ChartSeriesConfig {
