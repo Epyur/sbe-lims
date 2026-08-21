@@ -84,6 +84,23 @@ lab_operator/lab_admin/владелец. Не трогали: эндпоинт �
 
 ## История работ
 
+### 2026-08-21 — v0.1.11 (ребрендинг «LogicLAB.ЛИМС»; кнопка «🔄 Синхронизация»)
+- **По просьбе пользователя**, 2 пункта:
+  1. Отображаемое имя вьюхи (`getDisplayText()` и титул в шапке `buildShell()`)
+     заменено с длинной фразы «Лабораторная информационная менеджмент система СБЕ
+     ПМиПИР» на **«LogicLAB.ЛИМС»** — та же схема брендинга модуля, что уже
+     используется в `sbe-requests` («LogicLAB.Заявки», см. `sbe-requests/AGENTS.md`).
+     `manifest.json`/`name` не менялся (там и в sbe-requests — обычное описание, не
+     бренд).
+  2. Добавлена кнопка **«🔄 Синхронизация»** в сайдбаре (сразу под деревом навигации,
+     класс `tn-lims-collapse`, без новых стилей) — `LimsView.syncAndRender()`
+     перезапрашивает роль (`getMyPermission`), список лабораторий (`listLabs`) и кэш
+     методов плагина (`SbeLimsPlugin.refreshMethods()`), затем перерисовывает текущую
+     страницу. Аналог `syncAndRender()` в `sbe-requests`, адаптирован — у sbe-lims нет
+     локальной БД/очереди push, только re-pull (сервер и так канон, кэшируются только
+     `methods`/`labs`/роль на клиенте).
+- `npx tsc --noEmit` EXIT=0; `npm run build` OK. Версия 0.1.10 → **0.1.11**.
+
 ### 2026-08-20 — v0.1.10 (пересборка за sbe-core: SbeContactsApi)
 - `sbe-core`: добавлены `SbeContactsApi` и `'sbe-contacts'` в `SbeServiceMap` — пересборка `main.js`, исходники плагина не менялись. Версия 0.1.9 → **0.1.10** (manifest + package.json).
 - `npx tsc --noEmit` EXIT=0; `npm run build` OK.

@@ -107,7 +107,7 @@ export class LimsView extends ItemView {
   }
 
   getDisplayText(): string {
-    return 'Лабораторная информационная менеджмент система СБЕ ПМиПИР';
+    return 'LogicLAB.ЛИМС';
   }
 
   getIcon(): string {
@@ -132,7 +132,7 @@ export class LimsView extends ItemView {
   private buildShell(): void {
     // шапка
     const topbar = this.rootEl.createDiv({ cls: 'tn-lims-topbar' });
-    topbar.createDiv({ cls: 'tn-lims-module-title', text: 'Лабораторная информационная менеджмент система СБЕ ПМиПИР' });
+    topbar.createDiv({ cls: 'tn-lims-module-title', text: 'LogicLAB.ЛИМС' });
     this.crumbEl = topbar.createDiv({ cls: 'tn-lims-crumb' });
     const spacer = topbar.createDiv({ cls: 'tn-lims-spacer' });
     spacer.empty();
@@ -160,6 +160,12 @@ export class LimsView extends ItemView {
     // дерево навигации
     this.navEl = sidebar.createDiv({ cls: 'tn-lims-nav' });
     this.buildNav();
+
+    // синхронизация — оперативное обновление лабораторий/методов/текущей страницы
+    const syncBtn = sidebar.createDiv({ cls: 'tn-lims-collapse' });
+    syncBtn.createSpan({ text: '🔄' });
+    syncBtn.createSpan({ cls: 'tn-lims-collapse-lbl', text: 'Синхронизация' });
+    syncBtn.addEventListener('click', () => { void this.syncAndRender(); });
 
     // «Настройки» — внизу сайдбара (flex:1 у navEl прижимает этот блок к низу),
     // отдельно от дерева: лаборатории/администраторы — не раздел работы с заявками.
@@ -267,6 +273,32 @@ export class LimsView extends ItemView {
     this.labSwitchEl.empty();
     for (const lab of this.labs) {
       this.labSwitchEl.createEl('option', { value: String(lab.id), text: lab.name || lab.code });
+    }
+  }
+
+  /** Оперативное обновление: роль, лаборатории, кэш методов и текущая страница — с сервера. */
+  async syncAndRender(): Promise<void> {
+    try {
+      const perm = await this.plugin.syncService.getMyPermission();
+      this.myRole = perm.role;
+      this.labs = await this.plugin.syncService.listLabs();
+      await this.plugin.refreshMethods();
+      this.refreshLabSwitcher();
+      if (this.labId !== null && this.labSwitchEl.querySelector(`option[value="${this.labId}"]`)) {
+        this.labSwitchEl.value = String(this.labId);
+      } else if (this.labSwitchEl.options.length > 0) {
+        this.labId = this.labs[0].id;
+        this.labSwitchEl.value = String(this.labId);
+      } else {
+        this.labId = null;
+      }
+      this.settingsBtnEl.style.display = (this.myRole === 'admin' || this.myRole === 'superadmin') ? '' : 'none';
+      this.syncNavActive();
+      await this.renderPage();
+    } catch (e: unknown) {
+      new Notice(`ЛИМС: синхронизация не выполнена — ${errorMessage(e)}`);
+      this.syncNavActive();
+      await this.renderPage();
     }
   }
 
