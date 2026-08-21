@@ -57,6 +57,31 @@ export interface LabObject {
   updated_at: string;
 }
 
+/** Проект (справочник lab-service; создание/правка — в sbe-requests, здесь
+ * только чтение для отображения деталей заявки, как у заявителя). */
+export interface LabProject {
+  id: number;
+  parent_id: number;
+  code: string;
+  name: string;
+  description: string;
+  is_ekn: boolean;
+  group_id: number;
+  owner_email: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Группа участников (видимость заявок группы; создание — в sbe-requests). */
+export interface LabGroup {
+  id: number;
+  name: string;
+  owner_email: string;
+  members: Array<{ email: string; role: string }>;
+  created_at: string;
+  updated_at: string;
+}
+
 /** Метод испытаний (справочник lab-service). Может принадлежать нескольким
  * лабораториям (2026-08-19, method_labs many-to-many) — lab_ids заменяет старую
  * единичную lab_id. */

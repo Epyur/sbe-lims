@@ -6,8 +6,10 @@ import type {
   Equipment,
   Inventor,
   Lab,
+  LabGroup,
   LabMember,
   LabObject,
+  LabProject,
   LimsRequest,
   MeasurementResult,
   MethodConfig,
@@ -219,6 +221,44 @@ export class LimsSyncService {
       return Array.isArray(data.objects) ? data.objects : [];
     } catch (e: unknown) {
       console.warn('ЛИМС: не JSON в ответе objects:', errorMessage(e));
+      return [];
+    }
+  }
+
+  /** Проекты (только чтение — создание/правка в sbe-requests); нужны здесь
+   * только для отображения деталей заявки, как у заявителя. */
+  async listProjects(): Promise<LabProject[]> {
+    const token = await this.getToken();
+    const res = await this.request({
+      url: `${this.baseUrl}/api/lab/projects`,
+      method: 'GET',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    this.assertOk(res);
+    try {
+      const data = JSON.parse(res.text) as { projects?: LabProject[] };
+      return Array.isArray(data.projects) ? data.projects : [];
+    } catch (e: unknown) {
+      console.warn('ЛИМС: не JSON в ответе projects:', errorMessage(e));
+      return [];
+    }
+  }
+
+  /** Группы (только чтение — создание в sbe-requests); нужны здесь только
+   * для отображения деталей заявки, как у заявителя. */
+  async listGroups(): Promise<LabGroup[]> {
+    const token = await this.getToken();
+    const res = await this.request({
+      url: `${this.baseUrl}/api/lab/groups`,
+      method: 'GET',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    this.assertOk(res);
+    try {
+      const data = JSON.parse(res.text) as { groups?: LabGroup[] };
+      return Array.isArray(data.groups) ? data.groups : [];
+    } catch (e: unknown) {
+      console.warn('ЛИМС: не JSON в ответе groups:', errorMessage(e));
       return [];
     }
   }

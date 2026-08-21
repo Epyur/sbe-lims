@@ -1,6 +1,17 @@
 import { ItemView, Notice, WorkspaceLeaf } from 'obsidian';
 import type SbeLimsPlugin from '../main';
-import type { Equipment, Inventor, Lab, LabMember, LimsRequest, MeasurementResult, MethodConfig } from '../types/lims';
+import type {
+  Equipment,
+  Inventor,
+  Lab,
+  LabGroup,
+  LabMember,
+  LabObject,
+  LabProject,
+  LimsRequest,
+  MeasurementResult,
+  MethodConfig,
+} from '../types/lims';
 import { errorMessage } from '../../../sbe-core/src/utils/errors';
 
 export const SBE_LIMS_VIEW_TYPE = 'sbe-lims-view';
@@ -11,6 +22,10 @@ const STATUS_LABELS: Record<string, string> = {
   processing: '🟡 В работе',
   completed: '✅ Завершена',
 };
+
+/** Префикс legacy-номера трекера почты (LIMS_LPI); requests.external_id хранит
+ * только числовую часть — префикс восстанавливается для отображения. */
+const EXTERNAL_ID_PREFIX = 'LPIZAYAVKINAPRO-';
 
 /** Ключи разделов дерева навигации (фасад; наполнение подключается позже). */
 type NavKey =
@@ -92,6 +107,11 @@ export class LimsView extends ItemView {
   private labId: number | null = null;
   private collapsed = false;
   private labs: Lab[] = [];
+  /** Кэш объектов/проектов/групп — только для отображения деталей заявки
+   * (как у заявителя в sbe-requests), не для редактирования. */
+  private objects: LabObject[] = [];
+  private projects: LabProject[] = [];
+  private groups: LabGroup[] = [];
   private myRole = '';
   private currentRequestsFilter?: (r: LimsRequest) => boolean;
 
@@ -249,11 +269,22 @@ export class LimsView extends ItemView {
     try {
       const perm = await this.plugin.syncService.getMyPermission();
       this.myRole = perm.role;
-      const data = await this.plugin.syncService.listLabs();
-      this.labs = data;
+      const [labs, objects, projects, groups] = await Promise.all([
+        this.plugin.syncService.listLabs(),
+        this.plugin.syncService.listObjects(),
+        this.plugin.syncService.listProjects(),
+        this.plugin.syncService.listGroups(),
+      ]);
+      this.labs = labs;
+      this.objects = objects;
+      this.projects = projects;
+      this.groups = groups;
     } catch (e: unknown) {
       this.myRole = '';
       this.labs = [];
+      this.objects = [];
+      this.projects = [];
+      this.groups = [];
     }
 
     this.refreshLabSwitcher();
@@ -281,7 +312,16 @@ export class LimsView extends ItemView {
     try {
       const perm = await this.plugin.syncService.getMyPermission();
       this.myRole = perm.role;
-      this.labs = await this.plugin.syncService.listLabs();
+      const [labs, objects, projects, groups] = await Promise.all([
+        this.plugin.syncService.listLabs(),
+        this.plugin.syncService.listObjects(),
+        this.plugin.syncService.listProjects(),
+        this.plugin.syncService.listGroups(),
+      ]);
+      this.labs = labs;
+      this.objects = objects;
+      this.projects = projects;
+      this.groups = groups;
       await this.plugin.refreshMethods();
       this.refreshLabSwitcher();
       if (this.labId !== null && this.labSwitchEl.querySelector(`option[value="${this.labId}"]`)) {
@@ -505,6 +545,20 @@ export class LimsView extends ItemView {
 
   // ---- (наполнение: методы прошлой вьюхи, будут подключены к узлам дерева) ----
 
+  /** Переход из справочника «Объекты» к заявкам конкретного объекта (нужен
+   * из-за объединения дублей объектов в справочнике — 2026-08-21: у одного
+   * объекта может быть много заявок, в т.ч. объекты-плейсхолдеры «без
+   * названия», у которых иначе не отличить, какая заявка к ним относится). */
+  private async showRequestsForObject(objectId: number, objectLabel: string): Promise<void> {
+    this.key = 'requests';
+    this.syncNavActive();
+    const title = `Заявки объекта «${objectLabel}»`;
+    this.crumbEl.setText(`${this.currentLabName()} · ${title}`);
+    this.pageTitleEl.setText(title);
+    this.pageSubEl.setText('Отфильтровано по объекту из справочника «Объекты»');
+    await this.renderRequests(r => r.object_id === objectId);
+  }
+
   /** Список заявок (возврат из карточки). Опциональный фильтр — для «Очереди»/«Результатов». */
   private async renderRequests(filter?: (r: LimsRequest) => boolean): Promise<void> {
     this.currentRequestsFilter = filter;
@@ -513,6 +567,8 @@ export class LimsView extends ItemView {
     try {
       let requests = await this.plugin.syncService.listRequests();
       if (filter) requests = requests.filter(filter);
+      // Новые сверху: сперва по году номера, затем по самому номеру (2026-08-21).
+      requests = [...requests].sort((a, b) => (b.number_year - a.number_year) || (b.number_seq - a.number_seq));
       this.bodyEl.empty();
       const table = this.bodyEl.createEl('table', { cls: 'tn-table' });
       const thead = table.createEl('thead').createEl('tr');
@@ -540,6 +596,48 @@ export class LimsView extends ItemView {
     return m ? `${m.code}${m.name ? ' — ' + m.name : ''}` : `#${methodId}`;
   }
 
+  private objectName(objectId: number): string {
+    const obj = this.objects.find(o => o.id === objectId);
+    return obj ? obj.name : '—';
+  }
+
+  private projectName(projectId: number): string {
+    if (projectId <= 0) return 'Без проекта';
+    const p = this.projects.find(pr => pr.id === projectId);
+    return p ? `${p.code}${p.name ? ' — ' + p.name : ''}` : '—';
+  }
+
+  private groupName(groupId: number): string {
+    if (groupId <= 0) return '—';
+    const g = this.groups.find(gr => gr.id === groupId);
+    return g ? g.name : '—';
+  }
+
+  private priorityLabel(priority: string): string {
+    switch (priority) {
+      case 'critical': return 'Критичный';
+      case 'blocker': return 'Блокер (остановить исполнение других заявок)';
+      case 'normal': return 'Средний';
+      default: return priority || 'Средний';
+    }
+  }
+
+  private purposeLabel(purpose: string): string {
+    switch (purpose) {
+      case 'quality_control': return 'Текущий контроль';
+      case 'rnd': return 'НИОКР';
+      case 'certification': return 'Сертификация';
+      case 'declaration': return 'Декларирование';
+      default: return purpose || '—';
+    }
+  }
+
+  private formatDate(iso: string): string {
+    if (!iso) return '—';
+    const d = new Date(iso);
+    return Number.isNaN(d.getTime()) ? '—' : d.toLocaleDateString();
+  }
+
   /** Карточка заявки: серии результатов, ввод, расчёт, статус, графики, протокол. */
   private async renderRequestDetail(req: LimsRequest): Promise<void> {
     this.bodyEl.empty();
@@ -549,8 +647,35 @@ export class LimsView extends ItemView {
 
     this.bodyEl.createEl('h3', { text: `№ ${req.lab_number || `${req.number_seq}/${req.number_year}`} — ${req.title || 'без названия'}` });
 
-    const meta = this.bodyEl.createDiv({ cls: 'tn-lims-meta tn-lims-mb8' });
-    meta.setText(`Статус: ${STATUS_LABELS[req.status] || req.status} · Заказчик: ${req.owner_email || '—'}`);
+    // Все детали заявки, как у заявителя (sbe-requests) — сразу под номером,
+    // единым блоком (2026-08-21, по просьбе пользователя).
+    const meta = this.bodyEl.createDiv({ cls: 'tn-lims-meta tn-lims-mb12' });
+    meta.createDiv({ text: `Номер заказчику: ${req.customer_number || '—'}` });
+    meta.createDiv({ text: `📁 Проект: ${this.projectName(req.project_id)}` });
+    meta.createDiv({ text: `👥 Группа: ${this.groupName(req.group_id)}` });
+    meta.createDiv({ text: `🔬 Объект: ${this.objectName(req.object_id)}` });
+    if (req.ekn) meta.createDiv({ text: `🔢 ЕКН: ${req.ekn}` });
+    if (req.external_id) meta.createDiv({ text: `📧 Внешний идентификатор: ${EXTERNAL_ID_PREFIX}${req.external_id}` });
+    const obj = this.objects.find(o => o.id === req.object_id);
+    const chars = obj?.characteristics as { batch_number?: unknown; sample_id?: unknown } | undefined;
+    if (chars) {
+      if (chars.batch_number !== undefined) meta.createDiv({ text: `📦 Номер партии: ${chars.batch_number}` });
+      if (chars.sample_id) meta.createDiv({ text: `🏷 Идентификатор образца: ${chars.sample_id}` });
+    }
+    meta.createDiv({ text: `⚡ Приоритет: ${this.priorityLabel(req.priority)}` });
+    if (req.test_purpose) meta.createDiv({ text: `🎯 Цель испытания: ${this.purposeLabel(req.test_purpose)}` });
+    if (req.lab_id > 0) {
+      const lab = this.labs.find(l => l.id === req.lab_id);
+      meta.createDiv({ text: `🏢 Лаборатория: ${lab ? (lab.name || lab.code) : '—'}` });
+    }
+    meta.createDiv({ text: `👤 Владелец: ${req.owner_email || '—'}` });
+    meta.createDiv({ text: `📅 Создана: ${this.formatDate(req.created_at)}` });
+    meta.createDiv({ text: `📅 Обновлена: ${this.formatDate(req.updated_at)}` });
+    meta.createDiv({ text: `Статус: ${STATUS_LABELS[req.status] || req.status}` });
+
+    if (req.description) {
+      this.bodyEl.createDiv({ cls: 'tn-lims-meta tn-lims-mb12' }).createDiv({ text: `📝 ${req.description}` });
+    }
 
     // статус
     if (this.canEditStatus) {
@@ -837,13 +962,16 @@ export class LimsView extends ItemView {
       }
       const table = this.bodyEl.createEl('table', { cls: 'tn-table' });
       const thead = table.createEl('thead').createEl('tr');
-      for (const h of ['Название', 'Описание', 'Характеристики']) thead.createEl('th').setText(h);
+      for (const h of ['Название', 'Описание', 'Характеристики', '']) thead.createEl('th').setText(h);
       const tbody = table.createEl('tbody');
       for (const o of objects) {
         const tr = tbody.createEl('tr');
         tr.createEl('td').setText(o.name || `#${o.id}`);
         tr.createEl('td').setText(o.description || '—');
         tr.createEl('td').setText(Object.keys(o.characteristics || {}).length > 0 ? JSON.stringify(o.characteristics) : '—');
+        const actions = tr.createEl('td');
+        const linkBtn = actions.createEl('button', { text: '→ Заявки', cls: 'tn-btn tn-btn-ghost' });
+        linkBtn.addEventListener('click', () => void this.showRequestsForObject(o.id, o.name || `#${o.id}`));
       }
     } catch (e: unknown) {
       this.bodyEl.empty();
