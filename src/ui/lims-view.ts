@@ -1079,7 +1079,7 @@ export class LimsView extends ItemView {
     redrawRules();
     const addRuleBtn = form.createEl('button', { text: '➕ Добавить правило', cls: 'tn-btn tn-btn-ghost' });
     addRuleBtn.addEventListener('click', () => {
-      rules.push({ output_name: '', branches: [] });
+      rules.push({ branches: [], subjects: [] });
       redrawRules();
     });
 
@@ -1665,16 +1665,17 @@ export class LimsView extends ItemView {
     });
   }
 
-  /** Рисует строки правил классификации (блок 2, 2026-08-22v2 — по прямой правке
-   * пользователя: прежняя версия «если атрибут [знак] Б» фиксировала ОДИН атрибут
-   * на всё правило — этого недостаточно, нужна привычная как в Excel структура
-   * «Если А [знак] Б (И/ИЛИ Если В [знак] Г ...), то результат = показатель», где
-   * первый логический признак «Если» показан явно словом в самой форме, а не
-   * только в подписи-подсказке. Одна строка правила = результат/агрегация; ниже —
-   * список ВЕТОК (branches) переменной длины (порядок важен — сервер не
-   * пересортировывает, первая совпавшая решает; ветка без условий = безусловное
-   * «Иначе»), каждая ветка — список clauses (атомарных «А [знак] Б»),
-   * объединённых через И/ИЛИ. */
+  /** Рисует строки правил классификации (блок 2, 2026-08-22v3 — по прямой правке
+   * пользователя: убрана «нефункциональная» строка результата/агрегации, и из
+   * самой схемы условий убрано упоминание конкретных атрибутов — «Если [знак] Б
+   * (И/ИЛИ …), то показатель» — ОДНА схема на всё правило (список ВЕТОК,
+   * порядок важен, ветка без условий = безусловное «Иначе»). Ниже — динамическая
+   * таблица «Оцениваемый атрибут» / «Куда записать результат оценки»: эта же
+   * схема условий применяется ПО ОТДЕЛЬНОСТИ к каждой строке (пользователь:
+   * «прогоняем оба списка через циклы») — можно оценивать сразу несколько
+   * атрибутов одним и тем же набором условий. Свод по нескольким сериям убран
+   * целиком (по прямой правке пользователя) — значение атрибута всегда берётся
+   * из текущей записи как есть. */
   private renderClassificationRows(
     container: HTMLElement,
     rules: ClassificationRule[],
@@ -1684,50 +1685,31 @@ export class LimsView extends ItemView {
   ): void {
     rules.forEach((rule, idx) => {
       const card = container.createDiv({ cls: 'tn-lims-method' });
-      const row = card.createDiv({ cls: 'tn-lims-flex' });
-
-      row.createSpan({ text: 'результат (Атрибут С):' });
-      const outputInput = row.createEl('input', {
-        attr: { type: 'text', placeholder: 'id атрибута-результата, напр. gg_grade' },
-        cls: 'tn-lims-input',
-      });
-      outputInput.value = rule.output_name || '';
-      outputInput.addEventListener('change', () => {
-        rule.output_name = outputInput.value.trim();
-        redrawBranches();
-      });
-
-      row.createSpan({ text: 'при неск. сериях:' });
-      const aggSelect = row.createEl('select', { cls: 'tn-lims-select' });
-      const aggOptions: Array<[string, string]> = [
-        ['none', 'Не сравнивать между сериями'], ['avg', 'Среднее'], ['min', 'Минимальное'], ['max', 'Максимальное'],
-      ];
-      for (const [val, label] of aggOptions) aggSelect.createEl('option', { attr: { value: val }, text: label });
-      aggSelect.value = rule.aggregation_rule || 'none';
-      aggSelect.addEventListener('change', () => {
-        rule.aggregation_rule = aggSelect.value as ClassificationRule['aggregation_rule'];
-      });
-
-      const delBtn = row.createEl('button', { text: '✖ правило', cls: 'tn-btn tn-btn-ghost' });
+      const topRow = card.createDiv({ cls: 'tn-lims-flex' });
+      const delBtn = topRow.createEl('button', { text: '✖ правило', cls: 'tn-btn tn-btn-ghost' });
       delBtn.addEventListener('click', () => { rules.splice(idx, 1); onChange(); });
 
       card.createDiv({ cls: 'tn-lims-meta' }).setText(
         'Ветки «Если…» проверяются по порядку сверху вниз, первая совпавшая — результат. ' +
-        'Ветка «Иначе» — без условий, срабатывает всегда (обычно последняя).',
+        'Ветка «Иначе» — без условий, срабатывает всегда (обычно последняя). ' +
+        'Эта схема условий применяется отдельно к каждой строке таблицы ниже.',
       );
-      const redrawBranches = this.renderBranchRows(card, rule, attrs, determinableIndicators);
+      this.renderBranchRows(card, rule, attrs, determinableIndicators);
+      this.renderSubjectRows(card, rule, attrs);
     });
   }
 
   /** Список веток одного правила (переменной длины, порядок важен — см. ▲▼). Каждая
    * ветка — явное «Если [clause] (И/ИЛИ [clause] …) → [показатель]» либо «Иначе →
-   * [показатель]» (пустой список clauses). */
+   * [показатель]» (пустой список clauses). Левая часть каждого clause — НЕЯВНАЯ
+   * (текущий оцениваемый атрибут из таблицы subjects), поэтому здесь только
+   * оператор + «сравнить с». */
   private renderBranchRows(
     card: HTMLElement,
     rule: ClassificationRule,
     attrs: MethodAttribute[],
     determinableIndicators: string[],
-  ): () => void {
+  ): void {
     const list = card.createDiv();
     let redraw: () => void;
     redraw = () => {
@@ -1770,12 +1752,11 @@ export class LimsView extends ItemView {
                 redraw();
               });
             }
-            this.renderOperandEditor(clauseRow, clause.left, attrs, 'А');
             const opSelect = clauseRow.createEl('select', { cls: 'tn-lims-select' });
             for (const [val, label] of COMPARISON_OPERATOR_OPTIONS) opSelect.createEl('option', { attr: { value: val }, text: label });
             opSelect.value = clause.operator;
             opSelect.addEventListener('change', () => { clause.operator = opSelect.value as ComparisonOperator; });
-            this.renderOperandEditor(clauseRow, clause.right, attrs, 'Б');
+            this.renderOperandEditor(clauseRow, clause.compare_to, attrs);
             const delClauseBtn = clauseRow.createEl('button', { text: '✖', cls: 'tn-btn tn-btn-ghost' });
             delClauseBtn.addEventListener('click', () => { clauses.splice(ci, 1); redraw(); });
           });
@@ -1783,21 +1764,21 @@ export class LimsView extends ItemView {
           const addAndBtn = addClauseRow.createEl('button', { text: '➕ И условие', cls: 'tn-btn tn-btn-ghost' });
           addAndBtn.addEventListener('click', () => {
             if (clauses.length > 0) branch.join = 'and';
-            clauses.push({ left: { kind: 'attribute', id: attrs.find(a => a.id)?.id || '' }, operator: '<=', right: { kind: 'literal', value: '' } });
+            clauses.push({ operator: '<=', compare_to: { kind: 'literal', value: '' } });
             branch.clauses = clauses;
             redraw();
           });
           const addOrBtn = addClauseRow.createEl('button', { text: '➕ ИЛИ условие', cls: 'tn-btn tn-btn-ghost' });
           addOrBtn.addEventListener('click', () => {
             if (clauses.length > 0) branch.join = 'or';
-            clauses.push({ left: { kind: 'attribute', id: attrs.find(a => a.id)?.id || '' }, operator: '<=', right: { kind: 'literal', value: '' } });
+            clauses.push({ operator: '<=', compare_to: { kind: 'literal', value: '' } });
             branch.clauses = clauses;
             redraw();
           });
         }
 
         const thenRow = branchBox.createDiv({ cls: 'tn-lims-flex' });
-        thenRow.createSpan({ text: `то ${rule.output_name || 'результат'} =` });
+        thenRow.createSpan({ text: 'то показатель =' });
         const gradeSelect = thenRow.createEl('select', { cls: 'tn-lims-select' });
         gradeSelect.createEl('option', { attr: { value: '' }, text: '— показатель —' });
         for (const g of determinableIndicators) gradeSelect.createEl('option', { attr: { value: g }, text: g });
@@ -1810,7 +1791,7 @@ export class LimsView extends ItemView {
     const addIfBtn = addRow.createEl('button', { text: '➕ Ветка «Если…»', cls: 'tn-btn tn-btn-ghost' });
     addIfBtn.addEventListener('click', () => {
       rule.branches.push({
-        clauses: [{ left: { kind: 'attribute', id: attrs.find(a => a.id)?.id || '' }, operator: '<=', right: { kind: 'literal', value: '' } }],
+        clauses: [{ operator: '<=', compare_to: { kind: 'literal', value: '' } }],
         grade: determinableIndicators[0] || '',
       });
       redraw();
@@ -1820,24 +1801,66 @@ export class LimsView extends ItemView {
       rule.branches.push({ grade: determinableIndicators[0] || '' });
       redraw();
     });
-    return redraw;
   }
 
-  /** Редактор одного операнда атомарного сравнения (Атрибут А или Атрибут Б в
-   * формулировке пользователя) — переключатель вида (атрибут/значение/целевой
-   * показатель заявки) + соответствующий под-контрол. Мутирует operand на месте
-   * (через onChange — вызывающий код должен перерисовать список после структурных
-   * изменений вида, но не после правки простого значения). label — для placeholder. */
-  private renderOperandEditor(
-    container: HTMLElement,
-    operand: Operand,
-    attrs: MethodAttribute[],
-    label: string,
-  ): void {
+  /** Динамическая таблица «Оцениваемый атрибут» / «Куда записать результат
+   * оценки» (2026-08-22v3, по прямой правке пользователя) — схема условий
+   * правила (branches) применяется ОТДЕЛЬНО к каждой строке: значение
+   * input_attribute_id подставляется как неявная левая часть во все условия,
+   * результат совпавшей ветки пишется в output_attribute_id. Строк может быть
+   * несколько — одно и то же правило можно применить сразу к нескольким
+   * атрибутам. */
+  private renderSubjectRows(card: HTMLElement, rule: ClassificationRule, attrs: MethodAttribute[]): void {
+    card.createDiv({ cls: 'tn-lims-meta' }).setText('Оцениваемый атрибут → куда записать результат оценки:');
+    const table = card.createEl('table', { cls: 'tn-table' });
+    const thead = table.createEl('thead').createEl('tr');
+    thead.createEl('th', { text: 'Оцениваемый атрибут' });
+    thead.createEl('th', { text: 'Куда записать результат оценки' });
+    thead.createEl('th');
+    const tbody = table.createEl('tbody');
+    let redraw: () => void;
+    redraw = () => {
+      tbody.empty();
+      rule.subjects.forEach((subject, i) => {
+        const tr = tbody.createEl('tr');
+        const inputSelect = tr.createEl('td').createEl('select', { cls: 'tn-lims-select' });
+        inputSelect.createEl('option', { attr: { value: '' }, text: '— атрибут —' });
+        for (const a of attrs) {
+          if (!a.id) continue;
+          inputSelect.createEl('option', { attr: { value: a.id }, text: a.name || a.id });
+        }
+        inputSelect.value = subject.input_attribute_id;
+        inputSelect.addEventListener('change', () => { subject.input_attribute_id = inputSelect.value; });
+
+        const outputSelect = tr.createEl('td').createEl('select', { cls: 'tn-lims-select' });
+        outputSelect.createEl('option', { attr: { value: '' }, text: '— атрибут —' });
+        for (const a of attrs) {
+          if (!a.id) continue;
+          outputSelect.createEl('option', { attr: { value: a.id }, text: a.name || a.id });
+        }
+        outputSelect.value = subject.output_attribute_id;
+        outputSelect.addEventListener('change', () => { subject.output_attribute_id = outputSelect.value; });
+
+        const delBtn = tr.createEl('td').createEl('button', { text: '✖', cls: 'tn-btn tn-btn-ghost' });
+        delBtn.addEventListener('click', () => { rule.subjects.splice(i, 1); redraw(); });
+      });
+    };
+    redraw();
+    const addBtn = card.createEl('button', { text: '➕ Строка', cls: 'tn-btn tn-btn-ghost' });
+    addBtn.addEventListener('click', () => {
+      rule.subjects.push({ input_attribute_id: '', output_attribute_id: '' });
+      redraw();
+    });
+  }
+
+  /** Редактор операнда правой части сравнения («сравнить с») — переключатель
+   * вида (атрибут/значение/целевой показатель заявки) + соответствующий
+   * под-контрол. Мутирует operand на месте. */
+  private renderOperandEditor(container: HTMLElement, operand: Operand, attrs: MethodAttribute[]): void {
     const box = container.createDiv({ cls: 'tn-lims-flex' });
     const kindSelect = box.createEl('select', { cls: 'tn-lims-select' });
     const kindOptions: Array<[Operand['kind'], string]> = [
-      ['attribute', 'атрибут'], ['literal', 'значение'], ['target_indicator', 'целевой показатель заявки'],
+      ['literal', 'значению'], ['attribute', 'другому атрибуту'], ['target_indicator', 'целевому показателю заявки'],
     ];
     for (const [val, kLabel] of kindOptions) kindSelect.createEl('option', { attr: { value: val }, text: kLabel });
     kindSelect.value = operand.kind;
@@ -1847,7 +1870,7 @@ export class LimsView extends ItemView {
       subEl.empty();
       if (operand.kind === 'attribute') {
         const sel = subEl.createEl('select', { cls: 'tn-lims-select' });
-        sel.createEl('option', { attr: { value: '' }, text: `— атрибут ${label} —` });
+        sel.createEl('option', { attr: { value: '' }, text: '— атрибут —' });
         for (const a of attrs) {
           if (!a.id) continue;
           sel.createEl('option', { attr: { value: a.id }, text: a.name || a.id });
@@ -1855,7 +1878,7 @@ export class LimsView extends ItemView {
         sel.value = operand.id;
         sel.addEventListener('change', () => { (operand as { kind: 'attribute'; id: string }).id = sel.value; });
       } else if (operand.kind === 'literal') {
-        const input = subEl.createEl('input', { attr: { type: 'text', placeholder: `значение ${label} (число, Да/Нет, показатель…)` }, cls: 'tn-lims-input' });
+        const input = subEl.createEl('input', { attr: { type: 'text', placeholder: 'значение (число, Да/Нет, показатель…)' }, cls: 'tn-lims-input' });
         input.value = String(operand.value);
         input.addEventListener('change', () => { (operand as { kind: 'literal'; value: string | number }).value = parseConditionLiteral(input.value); });
       } else {
@@ -1892,24 +1915,30 @@ export class LimsView extends ItemView {
       if (a.fill_method === 'calculated' && !a.formula?.trim()) {
         return `Атрибут «${a.id}»: укажите формулу (способ заполнения — «Расчёт»)`;
       }
-      if (a.fill_method === 'classification' && !rules.some(r => r.output_name === a.id)) {
-        return `Атрибут «${a.id}»: способ заполнения «Правила классификации», но ни одно правило не пишет в этот атрибут — создайте правило с результатом «${a.id}» или смените способ заполнения`;
+      if (a.fill_method === 'classification' && !rules.some(r => r.subjects.some(s => s.output_attribute_id === a.id))) {
+        return `Атрибут «${a.id}»: способ заполнения «Правила классификации», но ни одно правило не пишет в этот атрибут — добавьте строку с результатом «${a.id}» в таблицу правила или смените способ заполнения`;
       }
       if (a.fill_method !== 'calculated' && a.fill_method !== 'classification' && a.level === 'aggregated' && !a.aggregation) {
         return `Атрибут «${a.id}»: укажите принцип агрегирования или формулу`;
       }
     }
     for (const r of rules) {
-      if (!r.output_name.trim()) return 'У каждого правила классификации укажите результат (Атрибут С)';
-      if (r.branches.length === 0) return `Правило «${r.output_name}»: добавьте хотя бы одну ветку («Если…» или «Иначе»)`;
+      if (r.branches.length === 0) return 'У каждого правила классификации добавьте хотя бы одну ветку («Если…» или «Иначе»)';
+      if (r.subjects.length === 0) return 'У каждого правила классификации добавьте хотя бы одну строку «Оцениваемый атрибут → куда записать результат»';
       for (const branch of r.branches) {
-        if (!branch.grade.trim()) return `Правило «${r.output_name}»: у каждой ветки укажите показатель`;
+        if (!branch.grade.trim()) return 'У каждой ветки правила классификации укажите показатель';
         for (const clause of branch.clauses || []) {
-          for (const [side, operand] of [['А', clause.left], ['Б', clause.right]] as const) {
-            if (operand.kind === 'attribute' && !ids.has(operand.id)) {
-              return `Правило «${r.output_name}»: условие ссылается на несуществующий атрибут ${side} «${operand.id}»`;
-            }
+          if (clause.compare_to.kind === 'attribute' && !ids.has(clause.compare_to.id)) {
+            return `Условие правила классификации ссылается на несуществующий атрибут «${clause.compare_to.id}»`;
           }
+        }
+      }
+      for (const subject of r.subjects) {
+        if (!subject.input_attribute_id || !ids.has(subject.input_attribute_id)) {
+          return 'В таблице правила классификации укажите оцениваемый атрибут для каждой строки';
+        }
+        if (!subject.output_attribute_id || !ids.has(subject.output_attribute_id)) {
+          return `Правило классификации: укажите, куда записать результат оценки атрибута «${subject.input_attribute_id}»`;
         }
       }
     }

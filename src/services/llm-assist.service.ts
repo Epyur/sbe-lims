@@ -159,21 +159,18 @@ function sanitizeOperand(raw: unknown, renameMap: Map<string, string>): Operand 
   return { kind: 'literal', value: typeof value === 'number' ? value : String(value ?? '') };
 }
 
-/** Санитизация черновика правил классификации (2026-08-22v2, единая модель —
- * "Если А [знак] Б (И/ИЛИ …), то результат = показатель"): запись без результата
- * или без единой ветки отбрасывается целиком; остальные поля коэрцируются к
- * ожидаемым типам. Ссылки на атрибуты (output_name, Operand.id) прогоняются через
- * renameMap атрибутов того же черновика (см. sanitizeAttributesWithRename). */
+/** Санитизация черновика правил классификации (2026-08-22v3, единая модель —
+ * "Если [знак] Б (И/ИЛИ …), то показатель", применяется к каждой строке subjects):
+ * запись без единой ветки ИЛИ без единого subject-а отбрасывается целиком; остальные
+ * поля коэрцируются к ожидаемым типам. Ссылки на атрибуты (Operand.id,
+ * subjects[].input_attribute_id/output_attribute_id) прогоняются через renameMap
+ * атрибутов того же черновика (см. sanitizeAttributesWithRename). */
 function sanitizeClassification(raw: unknown, renameMap: Map<string, string>): ClassificationRule[] {
   if (!Array.isArray(raw)) return [];
   const out: ClassificationRule[] = [];
   for (const item of raw) {
     if (!item || typeof item !== 'object') continue;
     const r = item as Record<string, unknown>;
-    const rawOutput = typeof r.output_name === 'string' ? r.output_name.trim() : '';
-    if (!rawOutput) continue;
-    const output_name = renameMap.get(rawOutput) || rawOutput;
-    const aggregation_rule = r.aggregation_rule === 'avg' || r.aggregation_rule === 'min' || r.aggregation_rule === 'max' ? r.aggregation_rule : undefined;
 
     const branches = (Array.isArray(r.branches) ? r.branches : [])
       .filter((b): b is Record<string, unknown> => !!b && typeof b === 'object')
@@ -186,9 +183,8 @@ function sanitizeClassification(raw: unknown, renameMap: Map<string, string>): C
           .map((c): ClassificationClause | null => {
             if (!VALID_OPERATORS.has(c.operator as string)) return null;
             return {
-              left: sanitizeOperand(c.left, renameMap),
               operator: c.operator as ComparisonOperator,
-              right: sanitizeOperand(c.right, renameMap),
+              compare_to: sanitizeOperand(c.compare_to, renameMap),
             };
           })
           .filter((c): c is ClassificationClause => c !== null);
@@ -196,8 +192,23 @@ function sanitizeClassification(raw: unknown, renameMap: Map<string, string>): C
         return clauses.length > 0 ? { clauses, join, grade } : { grade };
       })
       .filter((b): b is ClassificationBranch => b !== null);
+    if (branches.length === 0) continue;
 
-    out.push({ output_name, aggregation_rule, branches });
+    const subjects = (Array.isArray(r.subjects) ? r.subjects : [])
+      .filter((s): s is Record<string, unknown> => !!s && typeof s === 'object')
+      .map((s) => {
+        const rawInput = typeof s.input_attribute_id === 'string' ? s.input_attribute_id.trim() : '';
+        const rawOutput = typeof s.output_attribute_id === 'string' ? s.output_attribute_id.trim() : '';
+        if (!rawInput || !rawOutput) return null;
+        return {
+          input_attribute_id: renameMap.get(rawInput) || rawInput,
+          output_attribute_id: renameMap.get(rawOutput) || rawOutput,
+        };
+      })
+      .filter((s): s is { input_attribute_id: string; output_attribute_id: string } => s !== null);
+    if (subjects.length === 0) continue;
+
+    out.push({ branches, subjects });
   }
   return out;
 }
@@ -309,14 +320,15 @@ ${DSL_GRAMMAR}
 Правила для id: только латиница/цифры/подчёркивание, не начинать с цифры, уникальны в пределах метода (^[A-Za-z_][A-Za-z0-9_]*$).
 id — ЭТО ПЕРЕВОД смысла на английский (или общепринятый латинский термин), а НЕ фонетическая транслитерация русских слов: "длительность пламенного горения" -> "flame_duration" (правильно), НЕ "dlit_plam_gor" (неправильно — транслитерация русских слов латиницей нечитаема и не является переводом).
 data_type="boolean" — значение true/false (в UI — Да/Нет); используй для атрибутов вида "наблюдалось/не наблюдалось", "да/нет" из текста стандарта, а не text.
-fill_method="classification" — используй ТОЛЬКО для атрибута, значение которого целиком определяет правило классификации (его id должен встречаться как output_name хотя бы одного правила в "classification" ниже) — например итоговый показатель/группа/класс, а не для промежуточных измеряемых величин.
+fill_method="classification" — используй ТОЛЬКО для атрибута, значение которого целиком определяет правило классификации (его id должен встречаться как output_attribute_id хотя бы одного subject хотя бы одного правила в "classification" ниже) — например итоговый показатель/группа/класс, а не для промежуточных измеряемых величин.
 
-Формат правила классификации (JSON, единая модель — "Если А [знак] Б (И/ИЛИ А2 [знак] Б2 …), то результат = показатель", как в Excel IF/AND/OR):
-{"output_name": "id атрибута-результата", "aggregation_rule": "none"|"avg"|"min"|"max" (опц., по умолч. "none" — не сравнивать между сериями, брать значение текущей записи), "branches": [{"clauses": [{"left": Операнд, "operator": "<"|"<="|">"|">="|"=="|"!=", "right": Операнд}], "join": "and"|"or" (опц., по умолч. "and" — как связаны МЕЖДУ СОБОЙ несколько clauses одной ветки), "grade": "показатель"}]}
-Операнд — {"kind": "attribute", "id": "id атрибута"} | {"kind": "literal", "value": число|строка} | {"kind": "target_indicator"} (целевой показатель заявки). И left, и right — любой из трёх видов.
+Формат правила классификации (JSON, единая модель — "Если [знак] Б (И/ИЛИ [знак] Б2 …), то показатель", как в Excel IF/AND/OR; левая часть каждого условия НЕЯВНАЯ — см. subjects ниже, конкретный атрибут в самой схеме условий не упоминается):
+{"branches": [{"clauses": [{"operator": "<"|"<="|">"|">="|"=="|"!=", "compare_to": Операнд}], "join": "and"|"or" (опц., по умолч. "and" — как связаны МЕЖДУ СОБОЙ несколько clauses одной ветки), "grade": "показатель"}], "subjects": [{"input_attribute_id": "id оцениваемого атрибута", "output_attribute_id": "id атрибута-результата"}]}
+Операнд (compare_to) — {"kind": "attribute", "id": "id атрибута"} | {"kind": "literal", "value": число|строка} | {"kind": "target_indicator"} (целевой показатель заявки).
 Ветка без "clauses" (пустой массив/не задан) — безусловная ветка "Иначе", срабатывает всегда — ставь последней, если нужен catch-all вместо отсутствия результата.
-Ветки проверяются ПО ПОРЯДКУ массива (сервер не сортирует), первая совпавшая — результат.
-Примеры: пороговое правило — clause {"left":{"kind":"attribute","id":"x"},"operator":"<=","right":{"kind":"literal","value":50}}; булево (data_type=boolean) — right.kind="literal" со значением true/false, operator "=="; соответствие целевому показателю заявки — right.kind="target_indicator" (обычно 2 ветки: ">=" / "<" плюс catch-all "не оценивается"); несколько условий сразу — несколько clauses в одной ветке с join "and"/"or".
+Ветки проверяются ПО ПОРЯДКУ массива (сервер не сортирует), первая совпавшая — результат; ОДНА и та же схема branches применяется ОТДЕЛЬНО к каждой строке subjects (можно оценивать сразу несколько атрибутов одним и тем же набором условий — обязательно заполни subjects, иначе правило ничего не делает).
+Значение атрибута всегда берётся из текущей записи как есть, без свода по нескольким сериям.
+Примеры: пороговое правило — clause {"operator":"<=","compare_to":{"kind":"literal","value":50}}; булево (data_type=boolean) — compare_to.kind="literal" со значением true/false, operator "=="; соответствие целевому показателю заявки — compare_to.kind="target_indicator" (обычно 2 ветки: ">=" / "<" плюс catch-all "не оценивается"); несколько условий сразу — несколько clauses в одной ветке с join "and"/"or".
 Знаки "<"/"<="/">"/">=" при сравнении ДВУХ показателей метода (оба входят в determinable_indicators) трактуются как сравнение по порядку ввода показателей (первый введённый — "больше"/"выше"), иначе — обычное числовое сравнение.
 
 Уже существующие атрибуты в системе (из других методов — переиспользуй id и название, если параметр стандарта смыслово совпадает, вместо того чтобы придумывать новый):

@@ -83,25 +83,30 @@ LabMethod{ id, code, name,
 MethodAttribute{ id: string,  // ^[A-Za-z_][A-Za-z0-9_]*$, уникален в пределах метода
                   name: string,
                   data_type: 'text'|'int'|'float'|'date'|'time'|'photo'|'boolean',  // boolean: true/false в БД, Да/Нет в UI (2026-08-22)
-                  fill_method: 'manual'|'instrument'|'calculated'|'classification',  // classification (2026-08-22): значение пишет правило классификации — id атрибута должен встречаться как output_name хотя бы одного правила (проверяется в validateAttributesAndRules)
+                  fill_method: 'manual'|'instrument'|'calculated'|'classification',  // classification (2026-08-22): значение пишет правило классификации — id атрибута должен встречаться как output_attribute_id хотя бы одного subject хотя бы одного правила (проверяется в validateAttributesAndRules)
                   level: 'experiment'|'aggregated',
                   formula?: string,  // DSL-выражение — для fill_method="calculated"
                   aggregation?: { source: string, method: 'avg'|'min'|'max' },  // level="aggregated" без своей формулы
                   synonyms?: string[] }  // альтернативные raw-имена для email-импорта (resolveResultKey, lab-service)
 
-// Правило классификации (2026-08-22v2, единая модель — заменяет прежние три
-// rule_type: threshold/boolean/compliance): "Если А [знак] Б (И/ИЛИ …), то
-// output_name = grade" — как в Excel IF/AND/OR. branches проверяются ПО ПОРЯДКУ
-// (сервер не пересортировывает), первая совпавшая — результат.
+// Правило классификации (2026-08-22v3, единая модель — заменяет rule_type:
+// threshold/boolean/compliance И более раннюю v2 с output_name на всё правило):
+// "Если [знак] Б (И/ИЛИ …), то показатель" — левая часть каждого условия
+// НЕЯВНАЯ (текущий оцениваемый атрибут), в самой схеме условий конкретные
+// атрибуты не упоминаются. branches — ОДНА схема условий, проверяется ПО
+// ПОРЯДКУ (сервер не пересортировывает), первая совпавшая ветка — результат.
+// subjects — динамическая таблица «оцениваемый атрибут → куда записать
+// результат»: эта же схема условий применяется ОТДЕЛЬНО к каждой строке (можно
+// оценивать несколько атрибутов одним и тем же набором условий). Свод значения
+// по нескольким сериям убран целиком — атрибут читается из текущей записи как есть.
 Operand = { kind: 'attribute', id: string } | { kind: 'literal', value: string|number } | { kind: 'target_indicator' }
           // target_indicator — objects.characteristics.target_indicators[methodId] заявки
-ClassificationClause{ left: Operand, operator: '=='|'!='|'<'|'<='|'>'|'>=', right: Operand }
+ClassificationClause{ operator: '=='|'!='|'<'|'<='|'>'|'>=', compare_to: Operand }
 ClassificationBranch{ clauses?: ClassificationClause[],  // пусто/не задано — безусловная ветка "Иначе"
                        join?: 'and'|'or',  // как связаны МЕЖДУ СОБОЙ несколько clauses (по умолч. "and")
                        grade: string }
-ClassificationRule{ output_name: string,
-                     aggregation_rule?: 'none'|'avg'|'min'|'max',  // при нескольких сериях; "none" (по умолч.) — не сравнивать между сериями
-                     branches: ClassificationBranch[] }
+ClassificationSubject{ input_attribute_id: string, output_attribute_id: string }
+ClassificationRule{ branches: ClassificationBranch[], subjects: ClassificationSubject[] }
 // Термины "лучше"/"хуже" в проекте не используются (оценочные категории неприменимы к
 // объективной оценке результатов испытаний) — только "выше/ниже", "больше/меньше",
 // "максимальное/минимальное" (см. AGENTS.md, раздел «Правила»).
@@ -156,15 +161,18 @@ ProtocolResponse{ html, docx_base64, generated_at }
   максимальный/больше остальных), `interpolate(x, xs, ys)` (линейная интерполяция по
   параллельным атрибутам-массивам), `agg_where('avg'|'min'|'max'|'sum', value_attr,
   cond_attr, 'значение')` (агрегат по сериям, где условие выполняется).
-- Классификация `methods.classification` (2026-08-22v2, единая модель — см. модели
-  выше): каждое правило — `branches[]`, проверяемые по порядку, первая совпавшая
-  ветка пишет `grade` в `output_name`. Ветка — `clauses[]` (атомарные "Operand
-  [знак] Operand"), объединённые `join` ("and"/"or"); пустой `clauses` — безусловная
-  ветка "Иначе". Рекомендуемый паттерн для соответствия целевому показателю: две
-  ветки `achieved >= target_indicator` / `achieved < target_indicator` плюс
-  catch-all "Не оценивается". `aggregation_rule="none"` (по умолчанию) — не сравнивать
-  между сериями, брать значение текущей записи как есть; `avg`/`min`/`max` — свести
-  числовые значения атрибута по всем сериям заявки+метода.
+- Классификация `methods.classification` (2026-08-22v3, единая модель — см. модели
+  выше): каждое правило — ОДНА схема условий `branches[]` + таблица `subjects[]`
+  ("оцениваемый атрибут" → "куда записать результат", может быть несколько строк).
+  Ветки проверяются по порядку, первая совпавшая пишет `grade` В ОТДЕЛЬНОСТИ для
+  КАЖДОЙ строки subjects (значение `input_attribute_id` подставляется как неявная
+  левая часть во все `clauses` — конкретный атрибут в самой схеме условий не
+  упоминается). Ветка — `clauses[]` (атомарные "[знак] Operand"), объединённые
+  `join` ("and"/"or"); пустой `clauses` — безусловная ветка "Иначе". Рекомендуемый
+  паттерн для соответствия целевому показателю: две ветки `achieved >=
+  target_indicator` / `achieved < target_indicator` плюс catch-all "Не оценивается".
+  Значение атрибута всегда берётся из текущей записи как есть, без свода по
+  нескольким сериям (убрано целиком).
 - Авто-статистика: при сохранении серии создаётся стат-строка
   (`is_statistical_row=true`, `calculation_type='auto_statistics'`) с avg/count по параметрам.
 - `chart_configs` `[{id, chart_type: line|scatter|bar, x_column, series_config, title, x_label, y_label}]`
