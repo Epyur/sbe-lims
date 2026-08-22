@@ -1,4 +1,4 @@
-import { ItemView, Notice, WorkspaceLeaf } from 'obsidian';
+import { ItemView, Modal, Notice, WorkspaceLeaf } from 'obsidian';
 import type SbeLimsPlugin from '../main';
 import type {
   AttributeDataType,
@@ -887,7 +887,7 @@ export class LimsView extends ItemView {
       }
       if (this.canAdmin) {
         const editBtn = head.createEl('button', { text: '✎ Конфиг', cls: 'tn-btn tn-btn-ghost' });
-        editBtn.addEventListener('click', () => this.renderMethodConfigForm(card, m.id));
+        editBtn.addEventListener('click', () => new MethodConfigModal(this, m.id).open());
         const delBtn = head.createEl('button', { text: '✖ Удалить', cls: 'tn-btn tn-btn-ghost' });
         delBtn.addEventListener('click', async () => {
           if (!window.confirm(`Удалить метод «${m.code}»? Если по нему уже есть заявки, сервер откажет.`)) return;
@@ -962,17 +962,21 @@ export class LimsView extends ItemView {
    * (WYSIWYG-конструктор — отдельная фаза); formulas вычисляется сервером из
    * атрибутов при каждом сохранении (deriveFormulasFromAttributes, lab-service) —
    * здесь только просмотр, редактирование напрямую не имеет смысла. */
-  private renderMethodConfigForm(container: HTMLElement, methodId: number): void {
-    const existing = container.querySelector('.tn-lims-series-form');
-    if (existing) { existing.remove(); return; }
+  renderMethodConfigForm(container: HTMLElement, methodId: number): void {
     const cfg = this.methodConfigOf(methodId);
     const method = this.plugin.methods.find(m => m.id === methodId);
     const determinableIndicators: string[] = [...(method?.determinable_indicators || [])];
     // Форвард-объявления: редакторы атрибутов/правил читают determinableIndicators
     // для списков-опций показателя — при редактировании показателей (см. ниже)
-    // их нужно перерисовать вместе со списком показателей.
+    // их нужно перерисовать вместе со списком показателей. resyncPresentation —
+    // блок 3 (представление) должен узнавать о новых/удалённых атрибутах сразу
+    // (2026-08-22, по замечанию пользователя: раньше новый атрибут появлялся в
+    // списке столбцов протокола только после «Сохранить» + повторного открытия
+    // конфигуратора — presentationFields не пересинхронизировались при добавлении/
+    // удалении атрибута в этом же сеансе редактирования).
     let redrawAttrs: () => void = () => {};
     let redrawRules: () => void = () => {};
+    let resyncPresentation: () => void = () => {};
     const form = container.createDiv({ cls: 'tn-lims-series-form' });
 
     form.createDiv({ cls: 'tn-lims-meta' }).setText('Описание:');
@@ -1051,12 +1055,16 @@ export class LimsView extends ItemView {
     const attrsListEl = form.createDiv();
     redrawAttrs = () => {
       attrsListEl.empty();
-      this.renderAttributeRows(attrsListEl, attrs, methodId, determinableIndicators, () => redrawAttrs());
+      this.renderAttributeRows(attrsListEl, attrs, methodId, determinableIndicators, () => {
+        resyncPresentation();
+        redrawAttrs();
+      });
     };
     redrawAttrs();
     const addAttrBtn = form.createEl('button', { text: '➕ Добавить атрибут', cls: 'tn-btn tn-btn-ghost' });
     addAttrBtn.addEventListener('click', () => {
       attrs.push({ id: '', name: '', data_type: 'text', fill_method: 'manual', level: 'experiment' });
+      resyncPresentation();
       redrawAttrs();
     });
 
@@ -1100,6 +1108,10 @@ export class LimsView extends ItemView {
       this.renderPresentationPreview(previewEl, presentationFields, attrs);
     };
     redrawPresentation();
+    resyncPresentation = () => {
+      this.syncPresentationFieldsToAttrs(presentationFields, attrs);
+      redrawPresentation();
+    };
 
     importBtn.addEventListener('click', async () => {
       const file = importFileInput.files?.[0];
@@ -1400,7 +1412,7 @@ export class LimsView extends ItemView {
       const row = container.createDiv({ cls: 'tn-lims-method tn-lims-flex' });
       const idInput = row.createEl('input', { attr: { type: 'text', placeholder: 'id (напр. comb_length_1)' }, cls: 'tn-lims-input' });
       idInput.value = attr.id;
-      idInput.addEventListener('change', () => { attr.id = idInput.value.trim(); });
+      idInput.addEventListener('change', () => { attr.id = idInput.value.trim(); onChange(); });
       const nameInput = row.createEl('input', { attr: { type: 'text', placeholder: 'Название' }, cls: 'tn-lims-input' });
       nameInput.value = attr.name;
       nameInput.addEventListener('change', () => { attr.name = nameInput.value.trim(); });
@@ -1408,7 +1420,7 @@ export class LimsView extends ItemView {
       suggestIdBtn.setAttribute('title', 'Предложить id по названию (или найти уже существующий атрибут)');
       suggestIdBtn.addEventListener('click', (e) => {
         e.preventDefault();
-        void this.suggestAttributeId(idInput, nameInput, attr, methodId, attrs, suggestIdBtn);
+        void this.suggestAttributeId(idInput, nameInput, attr, methodId, attrs, suggestIdBtn).then(() => onChange());
       });
       const subSupBtn = row.createEl('button', { text: 'x²', cls: 'tn-btn tn-btn-ghost' });
       subSupBtn.setAttribute('title', 'Вставить надстрочный/подстрочный символ в название (напр. CO₂, м³)');
@@ -1448,7 +1460,7 @@ export class LimsView extends ItemView {
         formulaInput.value = attr.formula || '';
         formulaInput.addEventListener('change', () => { attr.formula = formulaInput.value; });
         const aiBtn = row.createEl('button', { text: '🤖 ИИ', cls: 'tn-btn tn-btn-ghost' });
-        aiBtn.addEventListener('click', () => this.openAiFormulaAssist(row, attrs, determinableIndicators, formulaInput));
+        aiBtn.addEventListener('click', () => this.openAiFormulaAssist(row, attrs, determinableIndicators, formulaInput, attr));
       } else if (attr.fill_method === 'classification') {
         row.createSpan({ cls: 'tn-lims-meta', text: 'значение пишет правило классификации (см. блок «Правила классификации» ниже)' });
       } else if (attr.level === 'aggregated') {
@@ -1611,6 +1623,7 @@ export class LimsView extends ItemView {
     attrs: MethodAttribute[],
     determinableIndicators: string[],
     formulaInput: HTMLInputElement,
+    attr: MethodAttribute,
   ): void {
     const existingPanel = row.querySelector('.tn-lims-ai-assist');
     if (existingPanel) { existingPanel.remove(); return; }
@@ -1640,7 +1653,14 @@ export class LimsView extends ItemView {
       }
     });
     insertBtn.addEventListener('click', () => {
+      // Раньше это меняло только видимый текст поля (formulaInput.value) — не
+      // сам attr.formula, который читает валидация/сохранение (он обновляется
+      // только по DOM-событию 'change', а после программной вставки такое
+      // событие не возникает без блюра/повторного фокуса поля). Внешне формула
+      // выглядела вставленной, но «Сохранить» отвергал атрибут как без формулы.
+      // 2026-08-22, обнаружено пользователем.
       formulaInput.value = resultArea.value;
+      attr.formula = resultArea.value;
       panel.remove();
     });
   }
@@ -2384,5 +2404,33 @@ export class LimsView extends ItemView {
   /** Editor+ (app-level, включая admin/superadmin) — испытатели/оборудование. */
   private get canEditRefs(): boolean {
     return this.myRole === 'editor' || this.myRole === 'admin' || this.myRole === 'superadmin';
+  }
+}
+
+/** Конфигуратор метода в отдельном окне (2026-08-22, по просьбе пользователя —
+ * раньше форма разворачивалась прямо под карточкой метода в списке; «Сохранить»
+ * вызывал полный renderMethods() списка, который стирал bodyEl вместе с этой
+ * инлайн-формой — окно визуально «сворачивалось», хотя данные сохранялись
+ * верно. Modal рендерится вне bodyEl, поэтому renderMethods() в фоне его больше
+ * не трогает — форма остаётся открытой сколько угодно после сохранения. */
+class MethodConfigModal extends Modal {
+  private view: LimsView;
+  private methodId: number;
+
+  constructor(view: LimsView, methodId: number) {
+    super(view.app);
+    this.view = view;
+    this.methodId = methodId;
+    this.modalEl.addClass('tn-lims-config-modal');
+  }
+
+  onOpen(): void {
+    const method = this.view.plugin.methods.find(m => m.id === this.methodId);
+    this.titleEl.setText(method ? `Конфигурация метода: ${method.code} — ${method.name || 'без названия'}` : 'Конфигурация метода');
+    this.view.renderMethodConfigForm(this.contentEl, this.methodId);
+  }
+
+  onClose(): void {
+    this.contentEl.empty();
   }
 }
