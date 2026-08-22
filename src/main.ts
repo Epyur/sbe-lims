@@ -3,7 +3,8 @@ import { LimsSyncService } from './services/sync.service';
 import { LimsLlmAssist } from './services/llm-assist.service';
 import { LimsView, SBE_LIMS_VIEW_TYPE } from './ui/lims-view';
 import { LimsSettingsTab } from './ui/settings-tab';
-import { publishService, unpublishService } from '../../sbe-core/src/bridge';
+import { getService, publishService, unpublishService } from '../../sbe-core/src/bridge';
+import { errorMessage } from '../../sbe-core/src/utils/errors';
 import type { SbeLimsApi } from '../../sbe-core/src/types';
 import type { LabMethod } from './types/lims';
 
@@ -13,6 +14,9 @@ export interface SbeLimsSettings {
    * потребитель, см. llmModel в sbe-mailer/sbe-presentations). Без модели
    * шлюз chadgpt.ru может отвечать не тем форматом, который ждёт клиент. */
   llmModel: string;
+  /** Последняя версия, о которой опубликована новость в ЦУП (2026-08-22,
+   * см. announceUpdate ниже) — не даёт публиковать новость на каждый запуск. */
+  lastAnnouncedVersion?: string;
 }
 
 const DEFAULT_SETTINGS: SbeLimsSettings = {
@@ -45,10 +49,38 @@ export default class SbeLimsPlugin extends Plugin {
       version: this.manifest.version,
       name: this.manifest.name,
     });
+
+    if (this.settings.lastAnnouncedVersion !== this.manifest.version) {
+      void this.announceUpdateSafely(
+        'Результаты испытаний теперь показываются по смысловым разделам, а не одной ' +
+        'длинной таблицей. Можно сформировать три отдельных документа: короткую сводку, ' +
+        'выписку из протокола и полный протокол. Добавлен черновой конструктор формы для ' +
+        'лаборанта (пока только настройка, без реального ввода данных).',
+      );
+    }
   }
 
   onunload(): void {
     unpublishService('sbe-lims');
+  }
+
+  /** Публикует в ЦУП («Новости») сообщение об обновлении плагина — один раз на
+   * версию (см. правило в корневом AGENTS.md, добавлено 2026-08-22). Никогда
+   * не должно мешать загрузке плагина, если ЦУП недоступен. */
+  private async announceUpdateSafely(summary: string): Promise<void> {
+    try {
+      const apstore = await getService('sbe-apstore');
+      await apstore.announceUpdate({
+        appId: this.manifest.id,
+        appName: this.manifest.name,
+        version: this.manifest.version,
+        summary,
+      });
+      this.settings.lastAnnouncedVersion = this.manifest.version;
+      await this.saveSettings();
+    } catch (e: unknown) {
+      console.warn(`${this.manifest.name}: не удалось опубликовать новость об обновлении:`, errorMessage(e));
+    }
   }
 
   /** Загружает методы из pull (для конфигов/отображения). */

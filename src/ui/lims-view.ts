@@ -15,11 +15,13 @@ import type {
   LabObject,
   LabProject,
   LimsRequest,
-  MeasurementResult,
   MethodAttribute,
   MethodConfig,
   Operand,
-  PresentationField,
+  OperatorFormField,
+  PresentationKind,
+  PresentationSection,
+  ShortViewSection,
 } from '../types/lims';
 import { errorMessage } from '../../../sbe-core/src/utils/errors';
 import { sanitizeAttributesWithRename } from '../services/llm-assist.service';
@@ -772,14 +774,10 @@ export class LimsView extends ItemView {
       });
     }
 
-    // таблица серий
-    const results = await this.plugin.syncService.listResults(req.id);
-    const seriesRows = results.filter(r => r.method_id === req.method_id && !r.is_statistical_row);
-    if (seriesRows.length > 0) {
-      this.renderResultsTable(methodDiv, seriesRows, req.method_id);
-    } else {
-      methodDiv.createDiv({ cls: 'tn-lims-meta' }).setText('Результатов пока нет');
-    }
+    // результаты — короткий вид (секции по конфигурации метода), см. handleShortView
+    // в lab-service; общая точка группировки с read-only блоком в sbe-requests.
+    const shortViewDiv = methodDiv.createDiv();
+    await this.renderShortView(shortViewDiv, req.id);
 
     // графики
     const chartDiv = this.bodyEl.createDiv({ cls: 'tn-lims-method' });
@@ -794,61 +792,74 @@ export class LimsView extends ItemView {
       });
     }
 
-    // протокол
+    // протокол / выписка / краткий вид — ровно 3 фиксированных вида вывода
+    // (2026-08-22, по решению пользователя), каждый — HTML+DOCX тем же эндпоинтом
+    // с разным ?template=.
     const protoDiv = this.bodyEl.createDiv({ cls: 'tn-lims-method' });
-    protoDiv.createEl('h4', { text: '📄 Протокол' });
-    const protoBtn = protoDiv.createEl('button', { text: 'Сгенерировать протокол', cls: 'tn-btn tn-btn-primary' });
-    protoBtn.addEventListener('click', async () => {
-      try {
-        const proto = await this.plugin.syncService.getProtocol(req.id);
-        const modal = this.showHtmlModal(req, proto.html);
-        const docxBtn = modal.createEl('button', { text: 'Скачать DOCX', cls: 'tn-btn tn-btn-ghost' });
-        docxBtn.addEventListener('click', () => this.downloadDocx(proto.docx_base64, `protocol_${req.number_seq}_${req.number_year}.docx`));
-      } catch (e: unknown) {
-        new Notice(`Ошибка: ${errorMessage(e)}`);
-      }
-    });
+    protoDiv.createEl('h4', { text: '📄 Документы' });
+    const protoRow = protoDiv.createDiv({ cls: 'tn-lims-flex' });
+    const kinds: Array<{ kind: PresentationKind; label: string }> = [
+      { kind: 'ui', label: 'Краткий вид' },
+      { kind: 'excerpt', label: 'Выписка из протокола' },
+      { kind: 'protocol', label: 'Полный протокол' },
+    ];
+    for (const { kind, label } of kinds) {
+      const btn = protoRow.createEl('button', { text: label, cls: 'tn-btn tn-btn-primary' });
+      btn.addEventListener('click', async () => {
+        try {
+          const proto = await this.plugin.syncService.getProtocol(req.id, kind);
+          const modal = this.showHtmlModal(req, proto.html);
+          const docxBtn = modal.createEl('button', { text: 'Скачать DOCX', cls: 'tn-btn tn-btn-ghost' });
+          docxBtn.addEventListener('click', () => this.downloadDocx(proto.docx_base64, `${kind}_${req.number_seq}_${req.number_year}.docx`));
+        } catch (e: unknown) {
+          new Notice(`Ошибка: ${errorMessage(e)}`);
+        }
+      });
+    }
   }
 
-  /** Таблица серий — колонки по methods.presentation (show_in_ui, порядок/подписи),
-   * фолбэк на все найденные ключи в алфавитном порядке для методов, ещё не
-   * сконфигурированных в блоке 3. «Фотография»-атрибуты — превью, не текст. */
-  private renderResultsTable(container: HTMLElement, rows: MeasurementResult[], methodId: number): void {
-    const cfg = this.methodConfigOf(methodId);
-    const attrs = cfg.input_parameters;
-    const keys = new Set<string>();
-    for (const r of rows) for (const k of Object.keys(r.values)) keys.add(k);
-
-    const used = new Set<string>();
-    const columns: Array<{ key: string; label: string; isPhoto: boolean }> = [];
-    for (const f of cfg.presentation.fields) {
-      if (used.has(f.attribute_id)) continue;
-      used.add(f.attribute_id);
-      if (!f.show_in_ui || !keys.has(f.attribute_id)) continue;
-      const attr = attrs.find(a => a.id === f.attribute_id);
-      columns.push({ key: f.attribute_id, label: f.label || attr?.name || f.attribute_id, isPhoto: attr?.data_type === 'photo' });
+  /** Короткий вид (секции по конфигурации метода) — GET .../short-view,
+   * та же группировка, что видит редактор конфигуратора (жалоба пользователя
+   * 2026-08-22 на одну длинную сводную таблицу устранена на сервере один раз,
+   * без дублирования логики группировки на клиенте). */
+  private async renderShortView(container: HTMLElement, requestId: number): Promise<void> {
+    let sections: ShortViewSection[];
+    try {
+      sections = await this.plugin.syncService.getShortView(requestId);
+    } catch (e: unknown) {
+      container.createDiv({ cls: 'tn-lims-error' }).setText(`Ошибка загрузки результатов: ${errorMessage(e)}`);
+      return;
     }
-    const rest = Array.from(keys).filter(k => !used.has(k)).sort();
-    for (const k of rest) {
-      const attr = attrs.find(a => a.id === k);
-      columns.push({ key: k, label: attr?.name || k, isPhoto: attr?.data_type === 'photo' });
+    if (sections.length === 0) {
+      container.createDiv({ cls: 'tn-lims-meta' }).setText('Результатов пока нет');
+      return;
     }
-
-    const table = container.createEl('table', { cls: 'tn-table' });
-    const thead = table.createEl('thead').createEl('tr');
-    thead.createEl('th').setText('Серия');
-    for (const col of columns) thead.createEl('th').setText(col.label);
-    const tbody = table.createEl('tbody');
-    for (const r of rows) {
-      const tr = tbody.createEl('tr');
-      tr.createEl('td').setText(String(r.series_num));
-      for (const col of columns) {
-        const td = tr.createEl('td');
-        const val = r.values[col.key];
-        if (col.isPhoto && typeof val === 'string' && val) {
-          td.createEl('img', { attr: { src: val, alt: col.label }, cls: 'tn-lims-thumb' });
-        } else {
-          td.setText(this.fmt(val));
+    for (const sec of sections) {
+      container.createEl('h5', { text: sec.title });
+      if (sec.table) {
+        const table = container.createEl('table', { cls: 'tn-table' });
+        const thead = table.createEl('thead').createEl('tr');
+        thead.createEl('th').setText('Серия');
+        for (const col of sec.table.columns) thead.createEl('th').setText(col.label);
+        const tbody = table.createEl('tbody');
+        sec.table.rows.forEach((row, i) => {
+          const tr = tbody.createEl('tr');
+          tr.createEl('td').setText(String(i + 1));
+          row.forEach((val, j) => {
+            const td = tr.createEl('td');
+            const col = sec.table!.columns[j];
+            if (col?.is_photo && val) {
+              td.createEl('img', { attr: { src: val, alt: col.label }, cls: 'tn-lims-thumb' });
+            } else {
+              td.setText(val);
+            }
+          });
+        });
+      }
+      if (sec.summary) {
+        const ul = container.createEl('ul');
+        for (const row of sec.summary) {
+          ul.createEl('li', { text: `${row.label}: ${row.value}` });
         }
       }
     }
@@ -1088,30 +1099,74 @@ export class LimsView extends ItemView {
     const formulasPreview = form.createEl('pre', { cls: 'tn-lims-input' });
     formulasPreview.setText(JSON.stringify(cfg.formulas, null, 2));
 
-    // ---- Блок 3а: представление данных (порядок/подписи/видимость колонок в
-    // UI-таблице результатов и в протоколе) — drag-and-drop + живой предпросмотр ----
-    const presentationFields: PresentationField[] = cfg.presentation.fields
-      .filter(f => attrs.some(a => a.id === f.attribute_id))
-      .map(f => ({ ...f }));
-    // атрибуты, которых пока нет в presentation (новые/метод впервые конфигурируется
-    // в блоке 3, либо атрибуты только что загружены/сформированы) — добавляем в
-    // конец в их текущем порядке, чтобы список сразу отражал все атрибуты.
-    this.syncPresentationFieldsToAttrs(presentationFields, attrs);
-    form.createEl('h4', { text: 'Представление данных (таблица результатов и протокол)' });
-    form.createDiv({ cls: 'tn-lims-meta' }).setText('Перетащите строки, чтобы задать порядок столбцов:');
+    // ---- Блок 3а: графики (chart_configs) — структурный редактор. Идёт ПЕРЕД
+    // представлением (2026-08-22), т.к. секции представления теперь могут
+    // ссылаться на уже настроенные здесь графики. ----
+    // Нормализация на случай конфигов, сохранённых старым raw-JSON textarea
+    // (до блока 3) без части полей — иначе редактор упал бы на .map(undefined).
+    const charts: ChartConfig[] = cfg.chart_configs.map((c, i) => ({
+      id: c.id || `chart_${i}`,
+      title: c.title,
+      chart_type: c.chart_type === 'scatter' || c.chart_type === 'bar' ? c.chart_type : 'line',
+      x_column: c.x_column,
+      x_label: c.x_label,
+      y_label: c.y_label,
+      series_config: Array.isArray(c.series_config) ? c.series_config.map(s => ({ ...s })) : [],
+    }));
+    form.createEl('h4', { text: 'Графики' });
+    const chartsListEl = form.createDiv();
+    let redrawCharts: () => void;
+    redrawCharts = () => {
+      chartsListEl.empty();
+      this.renderChartRows(chartsListEl, charts, attrs, () => redrawCharts());
+    };
+    redrawCharts();
+    const addChartBtn = form.createEl('button', { text: '➕ Добавить график', cls: 'tn-btn tn-btn-ghost' });
+    addChartBtn.addEventListener('click', () => {
+      charts.push({ id: `chart_${Date.now()}`, chart_type: 'line', series_config: [] });
+      redrawCharts();
+    });
+
+    // ---- Блок 3б: представление данных — секции показателей (2026-08-22,
+    // заменили плоский список полей от 2026-08-21 — устраняет "одну длинную
+    // сводную таблицу": каждая секция даёт свою мини-таблицу/резюме/график).
+    // Ровно 3 вида вывода (Кратко/Выписка/Протокол) — по решению пользователя
+    // простые галочки на каждом поле/графике, без отдельного списка шаблонов. ----
+    const presentationSections: PresentationSection[] = cfg.presentation.sections.map(sec => ({
+      id: sec.id,
+      title: sec.title,
+      fields: sec.fields.filter(f => attrs.some(a => a.id === f.attribute_id)).map(f => ({ ...f })),
+      charts: (sec.charts || []).map(c => ({ ...c })),
+    }));
+    // атрибуты, которых пока нет ни в одной секции (новые/метод впервые
+    // конфигурируется, либо атрибуты только что загружены/сформированы) —
+    // добавляем в последнюю секцию (создаёт секцию по умолчанию, если секций нет).
+    this.syncPresentationFieldsToAttrs(presentationSections, attrs);
+    form.createEl('h4', { text: 'Представление данных (короткий вид / выписка / протокол)' });
+    form.createDiv({ cls: 'tn-lims-meta' }).setText(
+      'Секции — тематические группы показателей (своя мини-таблица/резюме/график вместо ' +
+      'одной сводной таблицы на весь метод). Три галочки на каждом поле/графике — в каком ' +
+      'из трёх видов вывода он показывается; «Резюме» — одна строка «подпись: значение» ' +
+      '(итоговый показатель/вывод), «Таблица» — колонка по сериям.',
+    );
     const presentationListEl = form.createDiv();
     const previewEl = form.createDiv();
     let redrawPresentation: () => void;
     redrawPresentation = () => {
       presentationListEl.empty();
-      this.renderPresentationRows(presentationListEl, presentationFields, attrs, () => redrawPresentation());
-      this.renderPresentationPreview(previewEl, presentationFields, attrs);
+      this.renderPresentationSections(presentationListEl, presentationSections, attrs, charts, () => redrawPresentation());
+      this.renderPresentationPreview(previewEl, presentationSections, attrs);
     };
     redrawPresentation();
     resyncPresentation = () => {
-      this.syncPresentationFieldsToAttrs(presentationFields, attrs);
+      this.syncPresentationFieldsToAttrs(presentationSections, attrs);
       redrawPresentation();
     };
+    const addSectionBtn = form.createEl('button', { text: '➕ Добавить секцию', cls: 'tn-btn tn-btn-ghost' });
+    addSectionBtn.addEventListener('click', () => {
+      presentationSections.push({ id: `sec_${Date.now()}`, title: 'Новая секция', fields: [] });
+      redrawPresentation();
+    });
 
     importBtn.addEventListener('click', async () => {
       const file = importFileInput.files?.[0];
@@ -1135,7 +1190,7 @@ export class LimsView extends ItemView {
           return;
         }
         const draftPresentation = await this.plugin.llmAssist.draftPresentation(attrs);
-        presentationFields.splice(0, presentationFields.length, ...(Array.isArray(draftPresentation.fields) ? draftPresentation.fields : []));
+        presentationSections.splice(0, presentationSections.length, ...(Array.isArray(draftPresentation.sections) ? draftPresentation.sections : []));
         redrawAttrs();
         redrawRules();
         redrawPresentation();
@@ -1172,7 +1227,7 @@ export class LimsView extends ItemView {
           return;
         }
         attrs.splice(0, attrs.length, ...attributes);
-        this.syncPresentationFieldsToAttrs(presentationFields, attrs);
+        this.syncPresentationFieldsToAttrs(presentationSections, attrs);
         redrawAttrs();
         redrawPresentation();
         jsonImportArea.value = '';
@@ -1183,37 +1238,39 @@ export class LimsView extends ItemView {
       }
     });
 
-    // ---- Блок 3б: графики (chart_configs) — структурный редактор ----
-    // Нормализация на случай конфигов, сохранённых старым raw-JSON textarea
-    // (до блока 3) без части полей — иначе редактор упал бы на .map(undefined).
-    const charts: ChartConfig[] = cfg.chart_configs.map((c, i) => ({
-      id: c.id || `chart_${i}`,
-      title: c.title,
-      chart_type: c.chart_type === 'scatter' || c.chart_type === 'bar' ? c.chart_type : 'line',
-      x_column: c.x_column,
-      x_label: c.x_label,
-      y_label: c.y_label,
-      series_config: Array.isArray(c.series_config) ? c.series_config.map(s => ({ ...s })) : [],
-    }));
-    form.createEl('h4', { text: 'Графики' });
-    const chartsListEl = form.createDiv();
-    let redrawCharts: () => void;
-    redrawCharts = () => {
-      chartsListEl.empty();
-      this.renderChartRows(chartsListEl, charts, attrs, () => redrawCharts());
+    // ---- Блок 3в: форма для испытателя — только конструктор схемы (2026-08-22).
+    // Реальный фронт ввода данных лаборантом (мобильный/веб) пока не разрабатывается —
+    // здесь описывается только, какие атрибуты он будет заполнять. ----
+    const operatorFormFields: OperatorFormField[] = cfg.operator_form.fields
+      .filter(f => attrs.some(a => a.id === f.attribute_id))
+      .map(f => ({ ...f }));
+    form.createEl('h4', { text: 'Форма для испытателя (данные эксперимента)' });
+    form.createDiv({ cls: 'tn-lims-meta' }).setText(
+      'Какие атрибуты лаборант вводит при эксперименте — конструктор схемы; сам ввод ' +
+      '(мобильный/веб-фронт для испытателя) появится позже, здесь только описание формы.',
+    );
+    const operatorFormListEl = form.createDiv();
+    const operatorFormPreviewEl = form.createDiv();
+    let redrawOperatorForm: () => void;
+    redrawOperatorForm = () => {
+      operatorFormListEl.empty();
+      this.renderOperatorFormRows(operatorFormListEl, operatorFormFields, attrs, () => redrawOperatorForm());
+      this.renderOperatorFormPreview(operatorFormPreviewEl, operatorFormFields, attrs);
     };
-    redrawCharts();
-    const addChartBtn = form.createEl('button', { text: '➕ Добавить график', cls: 'tn-btn tn-btn-ghost' });
-    addChartBtn.addEventListener('click', () => {
-      charts.push({ id: `chart_${Date.now()}`, chart_type: 'line', series_config: [] });
-      redrawCharts();
+    redrawOperatorForm();
+    const addOperatorFieldBtn = form.createEl('button', { text: '➕ Поле формы', cls: 'tn-btn tn-btn-ghost' });
+    addOperatorFieldBtn.addEventListener('click', () => {
+      const free = attrs.find(a => a.id && !operatorFormFields.some(f => f.attribute_id === a.id));
+      if (!free) { new Notice('Все атрибуты метода уже добавлены в форму испытателя'); return; }
+      operatorFormFields.push({ attribute_id: free.id, required: false });
+      redrawOperatorForm();
     });
 
     const saveBtn = form.createEl('button', { text: '💾 Сохранить', cls: 'tn-btn tn-btn-primary' });
     saveBtn.addEventListener('click', async () => {
       const labIDs = getLabIDs();
       if (labIDs.length === 0) { new Notice('Укажите хотя бы одну лабораторию'); return; }
-      const validationError = this.validateAttributesAndRules(attrs, rules) || this.validateChartsAndPresentation(charts, presentationFields, attrs);
+      const validationError = this.validateAttributesAndRules(attrs, rules) || this.validateChartsAndPresentation(charts, presentationSections, attrs);
       if (validationError) { new Notice(validationError); return; }
       const attrIds = new Set(attrs.map(a => a.id));
       const patch: Partial<MethodConfig> & { lab_ids?: number[]; description?: string; determinable_indicators?: string[] } = {
@@ -1222,7 +1279,12 @@ export class LimsView extends ItemView {
         input_parameters: attrs,
         classification: rules,
         chart_configs: charts,
-        presentation: { fields: presentationFields.filter(f => attrIds.has(f.attribute_id)) },
+        presentation: {
+          sections: presentationSections
+            .map(sec => ({ ...sec, fields: sec.fields.filter(f => attrIds.has(f.attribute_id)) }))
+            .filter(sec => sec.fields.length > 0 || (sec.charts && sec.charts.length > 0)),
+        },
+        operator_form: { fields: operatorFormFields.filter(f => attrIds.has(f.attribute_id)) },
         determinable_indicators: determinableIndicators.filter(Boolean),
       };
       try {
@@ -1236,18 +1298,239 @@ export class LimsView extends ItemView {
     });
   }
 
-  /** Рисует перетаскиваемые строки блока «Представление данных» (нативный HTML5
-   * drag-and-drop, без библиотек) — порядок элементов массива fields = порядок
-   * столбцов. onChange — полная перерисовка (после drop/удаления). */
-  private renderPresentationRows(
+  /** Секции представления (2026-08-22) — каждая своя карточка: заголовок,
+   * перетаскиваемые строки полей внутри (порядок = порядок столбцов секции),
+   * привязанные графики. Перетаскивание САМИХ секций — порядок секций в
+   * документе. onChange — полная перерисовка (после drop/переноса/удаления). */
+  private renderPresentationSections(
     container: HTMLElement,
-    fields: PresentationField[],
+    sections: PresentationSection[],
+    attrs: MethodAttribute[],
+    charts: ChartConfig[],
+    onChange: () => void,
+  ): void {
+    let dragFromSectionIdx: number | null = null;
+    sections.forEach((sec, secIdx) => {
+      const card = container.createDiv({ cls: 'tn-lims-method', attr: { draggable: 'true' } });
+      card.style.cursor = 'grab';
+      card.addEventListener('dragstart', (ev) => { dragFromSectionIdx = secIdx; ev.stopPropagation(); });
+      card.addEventListener('dragover', (ev) => { ev.preventDefault(); });
+      card.addEventListener('drop', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        if (dragFromSectionIdx === null || dragFromSectionIdx === secIdx) return;
+        const [moved] = sections.splice(dragFromSectionIdx, 1);
+        sections.splice(secIdx, 0, moved);
+        dragFromSectionIdx = null;
+        onChange();
+      });
+
+      const head = card.createDiv({ cls: 'tn-lims-flex' });
+      head.createSpan({ text: '⠿', cls: 'tn-lims-meta' });
+      const titleInput = head.createEl('input', {
+        attr: { type: 'text', placeholder: 'Название секции (напр. «Температура дымовых газов»)' },
+        cls: 'tn-lims-input',
+      });
+      titleInput.value = sec.title;
+      titleInput.addEventListener('change', () => { sec.title = titleInput.value.trim() || 'Без названия'; onChange(); });
+      const delSecBtn = head.createEl('button', { text: '✖ Удалить секцию', cls: 'tn-btn tn-btn-ghost' });
+      delSecBtn.addEventListener('click', () => {
+        if (sec.fields.length > 0 && !window.confirm(
+          `Удалить секцию «${sec.title}»? Показатели внутри (${sec.fields.length}) тоже уйдут из представления.`,
+        )) return;
+        sections.splice(secIdx, 1);
+        onChange();
+      });
+
+      const fieldsEl = card.createDiv();
+      this.renderPresentationFieldRows(fieldsEl, sec, sections, attrs, onChange);
+
+      card.createDiv({ cls: 'tn-lims-meta' }).setText('Графики секции:');
+      const chartRefsEl = card.createDiv();
+      this.renderSectionChartRefs(chartRefsEl, sec, charts, onChange);
+    });
+  }
+
+  /** Строки полей ОДНОЙ секции — перетаскивание меняет порядок внутри секции;
+   * выпадающий список «Секция» (если секций больше одной) переносит поле в
+   * другую секцию. Три галочки — видимость в каждом из трёх видов вывода. */
+  private renderPresentationFieldRows(
+    container: HTMLElement,
+    section: PresentationSection,
+    allSections: PresentationSection[],
+    attrs: MethodAttribute[],
+    onChange: () => void,
+  ): void {
+    let dragFromIdx: number | null = null;
+    section.fields.forEach((f, idx) => {
+      const attr = attrs.find(a => a.id === f.attribute_id);
+      const row = container.createDiv({ cls: 'tn-lims-flex', attr: { draggable: 'true' } });
+      row.style.cursor = 'grab';
+      row.addEventListener('dragstart', (ev) => { dragFromIdx = idx; ev.stopPropagation(); });
+      row.addEventListener('dragover', (ev) => { ev.preventDefault(); });
+      row.addEventListener('drop', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        if (dragFromIdx === null || dragFromIdx === idx) return;
+        const [moved] = section.fields.splice(dragFromIdx, 1);
+        section.fields.splice(idx, 0, moved);
+        dragFromIdx = null;
+        onChange();
+      });
+
+      row.createSpan({ text: '⠿', cls: 'tn-lims-meta' });
+      row.createSpan({ text: attr?.name || f.attribute_id });
+
+      const labelInput = row.createEl('input', {
+        attr: { type: 'text', placeholder: 'подпись (по умолчанию — название атрибута)' },
+        cls: 'tn-lims-input',
+      });
+      labelInput.value = f.label || '';
+      labelInput.addEventListener('change', () => { f.label = labelInput.value.trim() || undefined; onChange(); });
+
+      const roleSelect = row.createEl('select', { cls: 'tn-lims-select' });
+      roleSelect.createEl('option', { attr: { value: 'table' }, text: 'Таблица' });
+      roleSelect.createEl('option', { attr: { value: 'summary' }, text: 'Резюме' });
+      roleSelect.value = f.role;
+      roleSelect.addEventListener('change', () => { f.role = roleSelect.value === 'summary' ? 'summary' : 'table'; onChange(); });
+
+      const uiLabel = row.createEl('label', { cls: 'tn-lims-flex' });
+      const uiCb = uiLabel.createEl('input', { attr: { type: 'checkbox' } });
+      uiCb.checked = f.show_in_ui;
+      uiLabel.createSpan({ text: 'Кратко' });
+      uiCb.addEventListener('change', () => { f.show_in_ui = uiCb.checked; onChange(); });
+
+      const excerptLabel = row.createEl('label', { cls: 'tn-lims-flex' });
+      const excerptCb = excerptLabel.createEl('input', { attr: { type: 'checkbox' } });
+      excerptCb.checked = f.show_in_excerpt;
+      excerptLabel.createSpan({ text: 'Выписка' });
+      excerptCb.addEventListener('change', () => { f.show_in_excerpt = excerptCb.checked; onChange(); });
+
+      const protoLabel = row.createEl('label', { cls: 'tn-lims-flex' });
+      const protoCb = protoLabel.createEl('input', { attr: { type: 'checkbox' } });
+      protoCb.checked = f.show_in_protocol;
+      protoLabel.createSpan({ text: 'Протокол' });
+      protoCb.addEventListener('change', () => { f.show_in_protocol = protoCb.checked; onChange(); });
+
+      if (allSections.length > 1) {
+        const moveSelect = row.createEl('select', { cls: 'tn-lims-select' });
+        for (const s of allSections) {
+          moveSelect.createEl('option', { attr: { value: s.id }, text: s.title });
+        }
+        moveSelect.value = section.id;
+        moveSelect.addEventListener('change', () => {
+          if (moveSelect.value === section.id) return;
+          const target = allSections.find(s => s.id === moveSelect.value);
+          if (!target) return;
+          section.fields.splice(idx, 1);
+          target.fields.push(f);
+          onChange();
+        });
+      }
+    });
+  }
+
+  /** Графики, привязанные к секции — выбор из уже настроенных в блоке «Графики»
+   * (chart_configs), с тремя галочками видимости, как у полей. */
+  private renderSectionChartRefs(
+    container: HTMLElement,
+    section: PresentationSection,
+    charts: ChartConfig[],
+    onChange: () => void,
+  ): void {
+    (section.charts || []).forEach((cref, idx) => {
+      const chart = charts.find(c => c.id === cref.chart_id);
+      const row = container.createDiv({ cls: 'tn-lims-flex' });
+      row.createSpan({ text: `📈 ${chart?.title || cref.chart_id}` });
+
+      const uiLabel = row.createEl('label', { cls: 'tn-lims-flex' });
+      const uiCb = uiLabel.createEl('input', { attr: { type: 'checkbox' } });
+      uiCb.checked = cref.show_in_ui;
+      uiLabel.createSpan({ text: 'Кратко' });
+      uiCb.addEventListener('change', () => { cref.show_in_ui = uiCb.checked; onChange(); });
+
+      const excerptLabel = row.createEl('label', { cls: 'tn-lims-flex' });
+      const excerptCb = excerptLabel.createEl('input', { attr: { type: 'checkbox' } });
+      excerptCb.checked = cref.show_in_excerpt;
+      excerptLabel.createSpan({ text: 'Выписка' });
+      excerptCb.addEventListener('change', () => { cref.show_in_excerpt = excerptCb.checked; onChange(); });
+
+      const protoLabel = row.createEl('label', { cls: 'tn-lims-flex' });
+      const protoCb = protoLabel.createEl('input', { attr: { type: 'checkbox' } });
+      protoCb.checked = cref.show_in_protocol;
+      protoLabel.createSpan({ text: 'Протокол' });
+      protoCb.addEventListener('change', () => { cref.show_in_protocol = protoCb.checked; onChange(); });
+
+      const delBtn = row.createEl('button', { text: '✖', cls: 'tn-btn tn-btn-ghost' });
+      delBtn.addEventListener('click', () => { section.charts?.splice(idx, 1); onChange(); });
+    });
+
+    const addRow = container.createDiv({ cls: 'tn-lims-flex' });
+    const select = addRow.createEl('select', { cls: 'tn-lims-select' });
+    select.createEl('option', { attr: { value: '' }, text: '— выбрать график —' });
+    for (const c of charts) {
+      if ((section.charts || []).some(cr => cr.chart_id === c.id)) continue;
+      select.createEl('option', { attr: { value: c.id }, text: c.title || c.id });
+    }
+    const addBtn = addRow.createEl('button', { text: '➕ График в секцию', cls: 'tn-btn tn-btn-ghost' });
+    addBtn.addEventListener('click', () => {
+      if (!select.value) return;
+      if (!section.charts) section.charts = [];
+      section.charts.push({ chart_id: select.value, show_in_ui: true, show_in_excerpt: false, show_in_protocol: true });
+      onChange();
+    });
+  }
+
+  /** Живой предпросмотр «Кратко» по секциям (одна вымышленная строка примера —
+   * без реальных данных, только layout: мини-таблица секции + резюме-строки). */
+  private renderPresentationPreview(container: HTMLElement, sections: PresentationSection[], attrs: MethodAttribute[]): void {
+    container.empty();
+    container.createDiv({ cls: 'tn-lims-meta' }).setText('Предпросмотр «Кратко» (пример):');
+    let any = false;
+    for (const sec of sections) {
+      const tableFields = sec.fields.filter(f => f.show_in_ui && f.role === 'table');
+      const summaryFields = sec.fields.filter(f => f.show_in_ui && f.role === 'summary');
+      if (tableFields.length === 0 && summaryFields.length === 0) continue;
+      any = true;
+      container.createEl('h5', { text: sec.title });
+      if (tableFields.length > 0) {
+        const table = container.createEl('table', { cls: 'tn-table' });
+        const thead = table.createEl('thead').createEl('tr');
+        thead.createEl('th').setText('Серия');
+        for (const f of tableFields) {
+          const attr = attrs.find(a => a.id === f.attribute_id);
+          thead.createEl('th').setText(f.label || attr?.name || f.attribute_id);
+        }
+        const tr = table.createEl('tbody').createEl('tr');
+        tr.createEl('td').setText('1');
+        for (const f of tableFields) {
+          const attr = attrs.find(a => a.id === f.attribute_id);
+          tr.createEl('td').setText(attr?.data_type === 'photo' ? '[фото]' : '—');
+        }
+      }
+      if (summaryFields.length > 0) {
+        const ul = container.createEl('ul');
+        for (const f of summaryFields) {
+          const attr = attrs.find(a => a.id === f.attribute_id);
+          ul.createEl('li', { text: `${f.label || attr?.name || f.attribute_id}: —` });
+        }
+      }
+    }
+    if (!any) {
+      container.createDiv({ cls: 'tn-lims-meta' }).setText('Ничего не показывается в «Кратко» — отметьте поля галочкой «Кратко».');
+    }
+  }
+
+  /** Строки формы для испытателя (блок 3в) — тот же паттерн drag-and-drop, что
+   * представление: выбор атрибута, подпись, «обязательное», подсказка. */
+  private renderOperatorFormRows(
+    container: HTMLElement,
+    fields: OperatorFormField[],
     attrs: MethodAttribute[],
     onChange: () => void,
   ): void {
     let dragFromIdx: number | null = null;
     fields.forEach((f, idx) => {
-      const attr = attrs.find(a => a.id === f.attribute_id);
       const row = container.createDiv({ cls: 'tn-lims-method', attr: { draggable: 'true' } });
       row.style.cursor = 'grab';
       row.addEventListener('dragstart', () => { dragFromIdx = idx; });
@@ -1263,51 +1546,52 @@ export class LimsView extends ItemView {
 
       const rowFlex = row.createDiv({ cls: 'tn-lims-flex' });
       rowFlex.createSpan({ text: '⠿', cls: 'tn-lims-meta' });
-      rowFlex.createSpan({ text: attr?.name || f.attribute_id });
+      const attrSelect = rowFlex.createEl('select', { cls: 'tn-lims-select' });
+      for (const a of attrs) {
+        if (!a.id) continue;
+        attrSelect.createEl('option', { attr: { value: a.id }, text: a.name || a.id });
+      }
+      attrSelect.value = f.attribute_id;
+      attrSelect.addEventListener('change', () => { f.attribute_id = attrSelect.value; onChange(); });
+
       const labelInput = rowFlex.createEl('input', {
-        attr: { type: 'text', placeholder: 'подпись (по умолчанию — название атрибута)' },
+        attr: { type: 'text', placeholder: 'подпись для испытателя (по умолчанию — название атрибута)' },
         cls: 'tn-lims-input',
       });
       labelInput.value = f.label || '';
       labelInput.addEventListener('change', () => { f.label = labelInput.value.trim() || undefined; onChange(); });
 
-      const uiLabel = rowFlex.createEl('label', { cls: 'tn-lims-flex' });
-      const uiCb = uiLabel.createEl('input', { attr: { type: 'checkbox' } });
-      uiCb.checked = f.show_in_ui;
-      uiLabel.createSpan({ text: 'в UI' });
-      uiCb.addEventListener('change', () => { f.show_in_ui = uiCb.checked; onChange(); });
+      const reqLabel = rowFlex.createEl('label', { cls: 'tn-lims-flex' });
+      const reqCb = reqLabel.createEl('input', { attr: { type: 'checkbox' } });
+      reqCb.checked = f.required;
+      reqLabel.createSpan({ text: 'обязательное' });
+      reqCb.addEventListener('change', () => { f.required = reqCb.checked; onChange(); });
 
-      const protoLabel = rowFlex.createEl('label', { cls: 'tn-lims-flex' });
-      const protoCb = protoLabel.createEl('input', { attr: { type: 'checkbox' } });
-      protoCb.checked = f.show_in_protocol;
-      protoLabel.createSpan({ text: 'в протоколе' });
-      protoCb.addEventListener('change', () => { f.show_in_protocol = protoCb.checked; onChange(); });
+      const delBtn = rowFlex.createEl('button', { text: '✖', cls: 'tn-btn tn-btn-ghost' });
+      delBtn.addEventListener('click', () => { fields.splice(idx, 1); onChange(); });
+
+      const helpInput = row.createEl('input', {
+        attr: { type: 'text', placeholder: 'подсказка испытателю (опц.)' },
+        cls: 'tn-lims-input',
+      });
+      helpInput.value = f.help_text || '';
+      helpInput.addEventListener('change', () => { f.help_text = helpInput.value.trim() || undefined; onChange(); });
     });
   }
 
-  /** Живой предпросмотр таблицы результатов по текущему порядку/подписям/видимости
-   * (одна вымышленная строка примера — без реальных данных, только layout). */
-  private renderPresentationPreview(container: HTMLElement, fields: PresentationField[], attrs: MethodAttribute[]): void {
+  /** Read-only предпросмотр «как увидит испытатель» — поля формы отрисованы
+   * disabled, только layout. */
+  private renderOperatorFormPreview(container: HTMLElement, fields: OperatorFormField[], attrs: MethodAttribute[]): void {
     container.empty();
-    container.createDiv({ cls: 'tn-lims-meta' }).setText('Предпросмотр (пример):');
-    const visible = fields.filter(f => f.show_in_ui);
-    const table = container.createEl('table', { cls: 'tn-table' });
-    const thead = table.createEl('thead').createEl('tr');
-    thead.createEl('th').setText('Серия');
-    for (const f of visible) {
+    if (fields.length === 0) return;
+    container.createDiv({ cls: 'tn-lims-meta' }).setText('Предпросмотр — как увидит испытатель:');
+    for (const f of fields) {
       const attr = attrs.find(a => a.id === f.attribute_id);
-      thead.createEl('th').setText(f.label || attr?.name || f.attribute_id);
-    }
-    const tr = table.createEl('tbody').createEl('tr');
-    tr.createEl('td').setText('1');
-    for (const f of visible) {
-      const attr = attrs.find(a => a.id === f.attribute_id);
-      const td = tr.createEl('td');
-      if (attr?.data_type === 'photo') {
-        td.setText('[фото]');
-      } else {
-        td.setText('—');
-      }
+      const row = container.createDiv({ cls: 'tn-lims-flex' });
+      row.createSpan({ text: (f.label || attr?.name || f.attribute_id) + (f.required ? ' *' : '') });
+      const input = row.createEl('input', { attr: { type: 'text', disabled: true }, cls: 'tn-lims-input' });
+      input.placeholder = attr?.data_type === 'photo' ? '[фото]' : attr?.data_type || '';
+      if (f.help_text) row.createSpan({ text: f.help_text, cls: 'tn-lims-meta' });
     }
   }
 
@@ -1379,8 +1663,9 @@ export class LimsView extends ItemView {
     });
   }
 
-  /** Валидация графиков и представления перед сохранением. */
-  private validateChartsAndPresentation(charts: ChartConfig[], fields: PresentationField[], attrs: MethodAttribute[]): string | null {
+  /** Валидация графиков и представления (секции показателей) перед сохранением —
+   * повтор атрибута проверяется across ВСЕ секции (одно поле — ровно в одной секции). */
+  private validateChartsAndPresentation(charts: ChartConfig[], sections: PresentationSection[], attrs: MethodAttribute[]): string | null {
     const attrIds = new Set(attrs.map(a => a.id));
     for (const c of charts) {
       if (c.series_config.length === 0) return `График «${c.title || c.id}»: добавьте хотя бы один ряд`;
@@ -1389,10 +1674,13 @@ export class LimsView extends ItemView {
       }
     }
     const seen = new Set<string>();
-    for (const f of fields) {
-      if (!attrIds.has(f.attribute_id)) continue; // устаревший атрибут — молча пропускаем
-      if (seen.has(f.attribute_id)) return `Повторяющийся атрибут в представлении: ${f.attribute_id}`;
-      seen.add(f.attribute_id);
+    for (const sec of sections) {
+      if (!sec.title.trim()) return 'У каждой секции представления должно быть название';
+      for (const f of sec.fields) {
+        if (!attrIds.has(f.attribute_id)) continue; // устаревший атрибут — молча пропускаем
+        if (seen.has(f.attribute_id)) return `Повторяющийся атрибут в представлении: ${f.attribute_id}`;
+        seen.add(f.attribute_id);
+      }
     }
     return null;
   }
@@ -2263,23 +2551,34 @@ export class LimsView extends ItemView {
       classification: Array.isArray(m?.classification) ? m.classification : [],
       chart_configs: Array.isArray(m?.chart_configs) ? m.chart_configs : [],
       input_parameters: Array.isArray(m?.input_parameters) ? m.input_parameters : [],
-      presentation: m?.presentation && Array.isArray(m.presentation.fields) ? m.presentation : { fields: [] },
+      presentation: m?.presentation && Array.isArray(m.presentation.sections) ? m.presentation : { sections: [] },
+      operator_form: m?.operator_form && Array.isArray(m.operator_form.fields) ? m.operator_form : { fields: [] },
     };
   }
 
-  /** Синхронизирует presentationFields с текущим списком атрибутов "на месте" —
-   * убирает записи об удалённых атрибутах, дописывает в конец записи для новых
-   * (полная замена/загрузка атрибутов не должна оставлять представление в
-   * рассинхроне). Используется и при первом открытии формы, и после
-   * ИИ-черновика/загрузки атрибутов из JSON. */
-  private syncPresentationFieldsToAttrs(presentationFields: PresentationField[], attrs: MethodAttribute[]): void {
+  /** Синхронизирует поля представления с текущим списком атрибутов "на месте" —
+   * убирает записи об удалённых атрибутах из ВСЕХ секций, дописывает записи для
+   * новых атрибутов в последнюю секцию (создаёт секцию по умолчанию, если секций
+   * нет вовсе) — новый атрибут не должен "потеряться" из представления. Используется
+   * и при первом открытии формы, и после ИИ-черновика/загрузки атрибутов из JSON. */
+  private syncPresentationFieldsToAttrs(sections: PresentationSection[], attrs: MethodAttribute[]): void {
     const validIds = new Set(attrs.map(a => a.id));
-    for (let i = presentationFields.length - 1; i >= 0; i--) {
-      if (!validIds.has(presentationFields[i].attribute_id)) presentationFields.splice(i, 1);
+    const seen = new Set<string>();
+    for (const sec of sections) {
+      sec.fields = sec.fields.filter(f => {
+        if (!validIds.has(f.attribute_id) || seen.has(f.attribute_id)) return false;
+        seen.add(f.attribute_id);
+        return true;
+      });
     }
-    for (const a of attrs) {
-      if (!a.id || presentationFields.some(f => f.attribute_id === a.id)) continue;
-      presentationFields.push({ attribute_id: a.id, show_in_ui: true, show_in_protocol: true });
+    const newAttrs = attrs.filter(a => a.id && !seen.has(a.id));
+    if (newAttrs.length === 0) return;
+    if (sections.length === 0) {
+      sections.push({ id: `sec_${Date.now()}`, title: 'Показатели', fields: [] });
+    }
+    const last = sections[sections.length - 1];
+    for (const a of newAttrs) {
+      last.fields.push({ attribute_id: a.id, role: 'table', show_in_ui: true, show_in_excerpt: false, show_in_protocol: true });
     }
   }
 

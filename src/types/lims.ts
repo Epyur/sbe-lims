@@ -210,21 +210,65 @@ export interface ChartConfig {
   series_config: ChartSeriesConfig[];
 }
 
-/** Один столбец таблицы результатов (UI) и/или протокола — элемент
- * methods.presentation.fields; порядок элементов массива = порядок отображения
- * (конфигуратор методов, блок 3, 2026-08-21). */
+/** Вид вывода — ровно три фиксированных (2026-08-22, по решению пользователя:
+ * "ровно 3, простые галочки" вместо расширяемого списка шаблонов). Состав
+ * "выписки" не зафиксирован программно — админ метода сам решает, что и в
+ * каком виде туда включить. */
+export type PresentationKind = 'ui' | 'excerpt' | 'protocol';
+
+/** Показатель внутри секции — колонка таблицы по сериям ("table") или строка
+ * резюме "label: значение" ("summary"); порядок элементов PresentationSection.fields
+ * = порядок отображения внутри секции. Три независимых флага (было два до
+ * 2026-08-22) — админ решает видимость для каждого из трёх видов отдельно. */
 export interface PresentationField {
   attribute_id: string;
   label?: string;
+  role: 'table' | 'summary';
   show_in_ui: boolean;
+  show_in_excerpt: boolean;
   show_in_protocol: boolean;
 }
 
-/** methods.presentation — представление данных метода в UI-таблице результатов
- * и в протоколе. Атрибуты, не упомянутые в fields, показываются как раньше (все
- * ключи, без явного порядка) — обратная совместимость для нетронутых методов. */
-export interface MethodPresentation {
+/** График секции (methods.chart_configs), с той же 3-way видимостью, что и поля —
+ * рендерится внутри секции, а не общим хвостом в конце документа. */
+export interface PresentationChartRef {
+  chart_id: string;
+  show_in_ui: boolean;
+  show_in_excerpt: boolean;
+  show_in_protocol: boolean;
+}
+
+/** Тематическая группа показателей (напр. "Температура дымовых газов") — своя
+ * мини-таблица/резюме/график, а не общая сводная таблица на весь метод
+ * (2026-08-22 — устраняет жалобу "все атрибуты формируют одну длинную сводную
+ * таблицу"; эталон структуры — легаси-отчёты десктопного приложения). */
+export interface PresentationSection {
+  id: string;
+  title: string;
   fields: PresentationField[];
+  charts?: PresentationChartRef[];
+}
+
+/** methods.presentation — секции показателей. Ровно 3 вида вывода читают один
+ * и тот же набор секций, отличаясь только фильтром show_in_ui/show_in_excerpt/
+ * show_in_protocol на полях/графиках. */
+export interface MethodPresentation {
+  sections: PresentationSection[];
+}
+
+/** Один вводимый испытателем показатель эксперимента — конструктор схемы
+ * (2026-08-22). Реальный фронт ввода для лаборанта (мобильный/веб) пока не
+ * разрабатывается — здесь только описание формы. */
+export interface OperatorFormField {
+  attribute_id: string;
+  label?: string;
+  required: boolean;
+  help_text?: string;
+}
+
+/** methods.operator_form — схема формы для испытателя. */
+export interface MethodOperatorForm {
+  fields: OperatorFormField[];
 }
 
 /** Метод испытаний (справочник lab-service). Может принадлежать нескольким
@@ -243,6 +287,7 @@ export interface LabMethod {
   chart_configs: ChartConfig[];
   input_parameters: MethodAttribute[];
   presentation: MethodPresentation;
+  operator_form: MethodOperatorForm;
   created_at: string;
   updated_at: string;
 }
@@ -312,18 +357,49 @@ export interface LabMember {
   role: string;
 }
 
-/** Конфигурация метода (formulas/classification/chart_configs/input_parameters). */
+/** Конфигурация метода (formulas/classification/chart_configs/input_parameters/
+ * presentation/operator_form). */
 export interface MethodConfig {
   formulas: Array<Record<string, unknown>>;
   classification: ClassificationRule[];
   chart_configs: ChartConfig[];
   input_parameters: MethodAttribute[];
   presentation: MethodPresentation;
+  operator_form: MethodOperatorForm;
 }
 
-/** Протокол заявки. */
+/** Протокол / выписка / краткий вид заявки — HTML+DOCX, вид задаёт kind
+ * (см. PresentationKind), передаваемый в LimsSyncService.getProtocol(). */
 export interface ProtocolResponse {
   html: string;
   docx_base64: string;
   generated_at: string;
+}
+
+/** Одна строка резюме в коротком виде (GET .../short-view). */
+export interface ShortViewSummaryRow {
+  label: string;
+  value: string;
+}
+
+/** Одна колонка мини-таблицы короткого вида — is_photo: значение в rows —
+ * URL картинки (нужно рендерить <img>), а не текст. */
+export interface ShortViewColumn {
+  label: string;
+  is_photo: boolean;
+}
+
+/** Мини-таблица секции в коротком виде — те же колонки/строки, что и в
+ * протоколе, но как данные (не HTML), чтобы sbe-lims и sbe-requests могли
+ * отрендерить их каждый в своей карточке без дублирования группировки. */
+export interface ShortViewTable {
+  columns: ShortViewColumn[];
+  rows: string[][];
+}
+
+/** Одна секция короткого вида (GET /api/lab/requests/{id}/short-view). */
+export interface ShortViewSection {
+  title: string;
+  table?: ShortViewTable;
+  summary?: ShortViewSummaryRow[];
 }

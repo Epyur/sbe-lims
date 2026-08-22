@@ -46,7 +46,8 @@ SBE-плагин «ЛИМС» для сотрудников лаборатори
 | Метод | Путь | Роль | Ответ |
 |---|---|---|---|
 | GET | `/requests/{id}/chart/{cfg_id}` | viewer | PNG (рендер по `methods.chart_configs`), используется в `<img src>` |
-| POST | `/requests/{id}/protocol` | editor+ | `{html, docx_base64, generated_at}` |
+| POST | `/requests/{id}/protocol?template=ui\|excerpt\|protocol` | editor+ | `{html, docx_base64, generated_at}` (2026-08-22; без `template` — прежнее поведение, полный протокол) |
+| GET | `/requests/{id}/short-view` | viewer | `{sections: ShortViewSection[]}` (2026-08-22) — структурированный JSON (не HTML) того же группированного вида, что `template=ui`; общая точка для карточки результатов sbe-lims и read-only блока sbe-requests |
 | GET | `/dashboard?period=week\|month\|quarter\|year` | viewer | `{by_status, by_method:[{method_id,count}], total, completed_in_period, period}` — ⚠️ **HЕ используется плагином** (дашборд вынесен, 2026-08-18), эндпоинт оставлен на сервере |
 
 ### Общие (все плагины lab-service)
@@ -73,7 +74,8 @@ LabMethod{ id, code, name,
            description, determinable_indicators: string[],
            formulas: any[],  // строится сервером из input_parameters — не редактируется напрямую (2026-08-21)
            classification: ClassificationRule[], chart_configs: ChartConfig[],
-           input_parameters: MethodAttribute[], presentation: MethodPresentation,  // 2026-08-21, блок 3
+           input_parameters: MethodAttribute[], presentation: MethodPresentation,  // 2026-08-22, секции (было плоский список 2026-08-21)
+           operator_form: MethodOperatorForm,  // 2026-08-22, конструктор схемы формы для испытателя
            created_at, updated_at }
 
 // Конфигуратор методов (2026-08-21) — структурированные формы вместо raw JSON:
@@ -111,12 +113,34 @@ ClassificationRule{ branches: ClassificationBranch[], subjects: ClassificationSu
 // объективной оценке результатов испытаний) — только "выше/ниже", "больше/меньше",
 // "максимальное/минимальное" (см. AGENTS.md, раздел «Правила»).
 
-// Представление данных (presentation, блок 3) — порядок/подписи/видимость столбцов в
-// UI-таблице результатов и в протоколе; порядок элементов fields = порядок столбцов.
-PresentationField{ attribute_id: string, label?: string, show_in_ui: boolean, show_in_protocol: boolean }
-MethodPresentation{ fields: PresentationField[] }
-// Атрибуты, не упомянутые в fields, — показываются как раньше (все ключи без явного
-// порядка) — обратная совместимость для не сконфигурированных в блоке 3 методов.
+// Представление данных (presentation, 2026-08-22 — секции заменили плоский список
+// от 2026-08-21, устраняет "одну длинную сводную таблицу"). Ровно 3 вида вывода
+// (ui/excerpt/protocol) читают ОДИН и тот же набор секций, отличаясь только тремя
+// независимыми флагами видимости на каждом поле/графике — состав "выписки" НЕ
+// зафиксирован программно, админ метода решает сам.
+PresentationField{ attribute_id: string, label?: string,
+                    role: 'table'|'summary',  // колонка по сериям vs строка резюме "подпись: значение"
+                    show_in_ui: boolean, show_in_excerpt: boolean, show_in_protocol: boolean }
+PresentationChartRef{ chart_id: string, show_in_ui: boolean, show_in_excerpt: boolean, show_in_protocol: boolean }
+PresentationSection{ id: string, title: string, fields: PresentationField[], charts?: PresentationChartRef[] }
+MethodPresentation{ sections: PresentationSection[] }
+// Легаси-конфиги (плоский {"fields":[...]} от 2026-08-21) читаются как есть,
+// оборачиваются в одну секцию "Показатели" на лету — без SQL-миграции данных
+// (см. lab-service/AGENTS.md, parseMethodPresentation).
+
+// Форма для испытателя (operator_form, 2026-08-22) — только конструктор схемы: какие
+// атрибуты лаборант вводит при эксперименте. Реальный фронт ввода (мобильный/веб)
+// не разрабатывается — здесь только описание формы для будущего использования.
+OperatorFormField{ attribute_id: string, label?: string, required: boolean, help_text?: string }
+MethodOperatorForm{ fields: OperatorFormField[] }
+
+// Короткий вид (GET .../short-view, 2026-08-22) — те же секции, что и presentation
+// (отфильтрованные под template="ui"), но как ДАННЫЕ, не HTML — общая точка
+// группировки для sbe-lims и sbe-requests (не дублируют логику каждый на своём TS).
+ShortViewColumn{ label: string, is_photo: boolean }
+ShortViewTable{ columns: ShortViewColumn[], rows: string[][] }
+ShortViewSummaryRow{ label: string, value: string }
+ShortViewSection{ title: string, table?: ShortViewTable, summary?: ShortViewSummaryRow[] }
 
 // График (chart_configs) — рендерится сервером в PNG (charts.go), без внешних зависимостей.
 ChartConfig{ id: string, title?: string, chart_type: 'line'|'scatter'|'bar',
@@ -139,7 +163,8 @@ Equipment{ id, code, name, location, responsible, last_calibration, next_calibra
            status, created_at, updated_at }
 LabMember{ lab_id, email, role: 'lab_operator' | 'lab_admin' }
 MethodConfig{ formulas: any[], classification: ClassificationRule[], chart_configs: ChartConfig[],
-              input_parameters: MethodAttribute[], presentation: MethodPresentation }
+              input_parameters: MethodAttribute[], presentation: MethodPresentation,
+              operator_form: MethodOperatorForm }
 ProtocolResponse{ html, docx_base64, generated_at }
 // DashboardData удалён из клиента (2026-08-18) — см. серверный ответ /dashboard
 ```
@@ -178,12 +203,14 @@ ProtocolResponse{ html, docx_base64, generated_at }
 - `chart_configs` `[{id, chart_type: line|scatter|bar, x_column, series_config, title, x_label, y_label}]`
   — рендерится в PNG (`charts.go`, без внешних зависимостей); редактор — структурная
   форма в клиенте (было raw JSON).
-- **Порядок столбцов протокола/UI-таблицы** (2026-08-21) — из `methods.presentation.
-  fields` (см. модели выше); для методов без presentation — алфавитный порядок
-  найденных ключей (детерминированный фолбэк, раньше был случайный обход `map`
-  в Go — баг, исправлен как побочный эффект блока 3). «Фотография»-атрибуты — превью
-  `<img>` в HTML-протоколе и в UI-таблице; в DOCX — текст/ссылка (DOCX-writer не
-  встраивает изображения).
+- **Секции протокола/выписки/короткого вида** (2026-08-22) — каждая секция
+  `methods.presentation.sections` даёт свою мини-таблицу (`role="table"` поля) +
+  резюме (`role="summary"`, значение из агрегата → статистики → последней серии) +
+  график секции; для `template=protocol` несконфигурированные ключи (не упомянутые
+  ни в одной секции) добираются алфавитным хвостом "Прочие показатели" — полный
+  протокол никогда молча не теряет данные; `ui`/`excerpt` показывают только явно
+  сконфигурированное. «Фотография»-атрибуты — превью `<img>` в HTML/короткий вид;
+  в DOCX — текст/ссылка (DOCX-writer не встраивает изображения, как и раньше).
 
 ## Статусы заявки
 

@@ -14,6 +14,7 @@ import type {
   MethodPresentation,
   Operand,
   PresentationField,
+  PresentationSection,
 } from '../types/lims';
 
 const DSL_GRAMMAR = `Грамматика DSL формул lab-service (безопасный интерпретатор выражений — без eval/exec):
@@ -215,7 +216,9 @@ function sanitizeClassification(raw: unknown, renameMap: Map<string, string>): C
 
 /** Санитизация черновика представления — attribute_id, не входящие в validIds
  * (устаревшие/выдуманные ссылки), отбрасываются; атрибуты, которые ИИ не упомянул,
- * дописываются в конец (ничего из атрибутов не должно "потеряться" из представления). */
+ * дописываются в конец (ничего из атрибутов не должно "потеряться" из представления).
+ * ИИ пока не знает про role/секции/выписку (2026-08-22) — role всегда "table",
+ * show_in_excerpt всегда false (пользователь донастроит вручную в редакторе). */
 function sanitizePresentationFields(raw: unknown, validIds: Set<string>): PresentationField[] {
   const seen = new Set<string>();
   const out: PresentationField[] = [];
@@ -229,13 +232,17 @@ function sanitizePresentationFields(raw: unknown, validIds: Set<string>): Presen
       out.push({
         attribute_id,
         label: typeof r.label === 'string' && r.label.trim() ? r.label.trim() : undefined,
+        role: 'table',
         show_in_ui: r.show_in_ui !== false,
+        show_in_excerpt: false,
         show_in_protocol: r.show_in_protocol !== false,
       });
     }
   }
   for (const id of validIds) {
-    if (!seen.has(id)) out.push({ attribute_id: id, show_in_ui: true, show_in_protocol: true });
+    if (!seen.has(id)) {
+      out.push({ attribute_id: id, role: 'table', show_in_ui: true, show_in_excerpt: false, show_in_protocol: true });
+    }
   }
   return out;
 }
@@ -418,6 +425,11 @@ ${attrsList || '(атрибутов нет)'}
     const raw = await service.completeJson<{ fields?: unknown }>(
       system, 'Сформируй представление для перечисленных атрибутов.', { model: this.resolveModel() },
     );
-    return { fields: sanitizePresentationFields(raw?.fields, new Set(attributes.map(a => a.id))) };
+    const fields = sanitizePresentationFields(raw?.fields, new Set(attributes.map(a => a.id)));
+    // ИИ пока не знает про секции (2026-08-22) — весь черновик оборачивается в
+    // одну секцию "Показатели"; разбивку на тематические секции пользователь
+    // делает вручную в редакторе (отдельная, более тонкая задача на будущее).
+    const section: PresentationSection = { id: 'draft', title: 'Показатели', fields };
+    return { sections: fields.length > 0 ? [section] : [] };
   }
 }
