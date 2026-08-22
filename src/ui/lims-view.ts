@@ -596,17 +596,16 @@ export class LimsView extends ItemView {
       // Новые сверху: сперва по году номера, затем по самому номеру (2026-08-21).
       requests = [...requests].sort((a, b) => (b.number_year - a.number_year) || (b.number_seq - a.number_seq));
       this.bodyEl.empty();
-      const table = this.bodyEl.createEl('table', { cls: 'tn-table' });
-      const thead = table.createEl('thead').createEl('tr');
-      for (const h of ['Номер', 'Объект', 'Статус', 'Метод']) thead.createEl('th').setText(h);
-      const tbody = table.createEl('tbody');
       for (const r of requests) {
-        const row = tbody.createEl('tr', { cls: 'tn-lims-row' });
-        row.addEventListener('click', () => this.renderRequestDetail(r));
-        row.createEl('td').setText(r.lab_number || '—');
-        row.createEl('td').setText(r.title || `#${r.id}`);
-        row.createEl('td').setText(STATUS_LABELS[r.status] || r.status);
-        row.createEl('td').setText(this.methodName(r.method_id));
+        const card = this.bodyEl.createDiv({ cls: 'tn-lims-req-card' });
+        card.addEventListener('click', () => this.renderRequestDetail(r));
+        const head = card.createDiv({ cls: 'tn-lims-req-card-head' });
+        head.createEl('h4', { text: r.lab_number ? `№ ${r.lab_number}` : `#${r.id}` });
+        head.createSpan({ cls: 'tn-lims-req-card-status', text: STATUS_LABELS[r.status] || r.status });
+        card.createDiv({ cls: 'tn-lims-req-card-title', text: r.title || '(без названия)' });
+        const meta = card.createDiv({ cls: 'tn-lims-req-card-meta' });
+        meta.createSpan({ text: `🔬 ${this.objectName(r.object_id)}` });
+        meta.createSpan({ text: `🧪 ${this.methodName(r.method_id)}` });
       }
       if (requests.length === 0) {
         this.bodyEl.createDiv({ cls: 'tn-lims-meta tn-lims-p24' }).setText('Нет заявок.');
@@ -1052,7 +1051,7 @@ export class LimsView extends ItemView {
     const attrsListEl = form.createDiv();
     redrawAttrs = () => {
       attrsListEl.empty();
-      this.renderAttributeRows(attrsListEl, attrs, determinableIndicators, () => redrawAttrs());
+      this.renderAttributeRows(attrsListEl, attrs, methodId, determinableIndicators, () => redrawAttrs());
     };
     redrawAttrs();
     const addAttrBtn = form.createEl('button', { text: '➕ Добавить атрибут', cls: 'tn-btn tn-btn-ghost' });
@@ -1115,19 +1114,7 @@ export class LimsView extends ItemView {
         const buf = await file.arrayBuffer();
         const standardText = extractStandardText(buf, file.name);
         // атрибуты ДРУГИХ методов — для переиспользования по смыслу, не самоцитирование
-        const seenIds = new Set<string>();
-        const existingAttributes: ExistingAttributeSummary[] = [];
-        for (const m of this.plugin.methods) {
-          if (m.id === methodId) continue;
-          // methodConfigOf нормализует input_parameters — напрямую m.input_parameters
-          // трогать нельзя: сервер, с которым сейчас говорит клиент, может быть
-          // старее фронтенда (см. AGENTS.md) и вообще не отдавать это поле.
-          for (const a of this.methodConfigOf(m.id).input_parameters) {
-            if (!a.id || seenIds.has(a.id)) continue;
-            seenIds.add(a.id);
-            existingAttributes.push({ id: a.id, name: a.name, data_type: a.data_type, fill_method: a.fill_method, level: a.level });
-          }
-        }
+        const existingAttributes = this.collectExistingAttributeSummaries(methodId, []);
         const draft = await this.plugin.llmAssist.draftAttributesAndClassification(standardText, existingAttributes);
         attrs.splice(0, attrs.length, ...(Array.isArray(draft.attributes) ? draft.attributes : []));
         rules.splice(0, rules.length, ...(Array.isArray(draft.classification) ? draft.classification : []));
@@ -1405,6 +1392,7 @@ export class LimsView extends ItemView {
   private renderAttributeRows(
     container: HTMLElement,
     attrs: MethodAttribute[],
+    methodId: number,
     determinableIndicators: string[],
     onChange: () => void,
   ): void {
@@ -1416,6 +1404,15 @@ export class LimsView extends ItemView {
       const nameInput = row.createEl('input', { attr: { type: 'text', placeholder: 'Название' }, cls: 'tn-lims-input' });
       nameInput.value = attr.name;
       nameInput.addEventListener('change', () => { attr.name = nameInput.value.trim(); });
+      const suggestIdBtn = row.createEl('button', { text: '🤖', cls: 'tn-btn tn-btn-ghost' });
+      suggestIdBtn.setAttribute('title', 'Предложить id по названию (или найти уже существующий атрибут)');
+      suggestIdBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        void this.suggestAttributeId(idInput, nameInput, attr, methodId, attrs, suggestIdBtn);
+      });
+      const subSupBtn = row.createEl('button', { text: 'x²', cls: 'tn-btn tn-btn-ghost' });
+      subSupBtn.setAttribute('title', 'Вставить надстрочный/подстрочный символ в название (напр. CO₂, м³)');
+      subSupBtn.addEventListener('click', (e) => { e.preventDefault(); this.toggleSubSupPalette(row, nameInput); });
 
       const typeSelect = row.createEl('select', { cls: 'tn-lims-select' });
       const typeOptions: Array<[AttributeDataType, string]> = [
@@ -1429,6 +1426,7 @@ export class LimsView extends ItemView {
       const fillSelect = row.createEl('select', { cls: 'tn-lims-select' });
       const fillOptions: Array<[AttributeFillMethod, string]> = [
         ['manual', 'Ручной ввод'], ['instrument', 'Данные прибора'], ['calculated', 'Расчёт'],
+        ['classification', 'Правила классификации'],
       ];
       for (const [val, label] of fillOptions) fillSelect.createEl('option', { attr: { value: val }, text: label });
       fillSelect.value = attr.fill_method;
@@ -1451,6 +1449,8 @@ export class LimsView extends ItemView {
         formulaInput.addEventListener('change', () => { attr.formula = formulaInput.value; });
         const aiBtn = row.createEl('button', { text: '🤖 ИИ', cls: 'tn-btn tn-btn-ghost' });
         aiBtn.addEventListener('click', () => this.openAiFormulaAssist(row, attrs, determinableIndicators, formulaInput));
+      } else if (attr.fill_method === 'classification') {
+        row.createSpan({ cls: 'tn-lims-meta', text: 'значение пишет правило классификации (см. блок «Правила классификации» ниже)' });
       } else if (attr.level === 'aggregated') {
         row.createSpan({ text: 'по:' });
         const sourceSelect = row.createEl('select', { cls: 'tn-lims-select' });
@@ -1483,6 +1483,33 @@ export class LimsView extends ItemView {
     });
   }
 
+  /** Палитра надстрочных/подстрочных символов для человекочитаемого названия
+   * атрибута (2026-08-22) — HTML-инпут не умеет rich-text <sup>/<sub>, поэтому
+   * единственный переносимый способ (работает одинаково в UI, протоколе HTML/
+   * DOCX, везде) — литеральные юникод-символы (₀-₉/⁰-⁹ и т.п.), вставляемые в
+   * текст названия по месту курсора. Полного юникод-алфавита над-/подстрочных
+   * букв не существует — набор ограничен цифрами и несколькими буквами, чего
+   * достаточно для типичных случаев (CO₂, м³, H₂O). */
+  private toggleSubSupPalette(row: HTMLElement, target: HTMLInputElement): void {
+    const existing = row.querySelector('.tn-lims-subsup');
+    if (existing) { existing.remove(); return; }
+    const panel = row.createDiv({ cls: 'tn-lims-subsup tn-lims-flex' });
+    panel.createSpan({ cls: 'tn-lims-meta', text: 'Вставить в название:' });
+    const CHARS = ['⁰', '¹', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹', '₀', '₁', '₂', '₃', '₄', '₅', '₆', '₇', '₈', '₉'];
+    for (const ch of CHARS) {
+      const btn = panel.createEl('button', { text: ch, cls: 'tn-btn tn-btn-ghost' });
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        const start = target.selectionStart ?? target.value.length;
+        const end = target.selectionEnd ?? target.value.length;
+        target.value = target.value.slice(0, start) + ch + target.value.slice(end);
+        target.setSelectionRange(start + ch.length, start + ch.length);
+        target.focus();
+        target.dispatchEvent(new Event('change'));
+      });
+    }
+  }
+
   /** Панель синонимов атрибута (2026-08-21): альтернативные raw-имена поля из
    * legacy email-импорта (десктопная ЛИМС) — позволяет называть атрибут как удобно
    * в конфигураторе без оглядки на то, как поле называется в старых письмах;
@@ -1504,6 +1531,74 @@ export class LimsView extends ItemView {
       const list = input.value.split(',').map(s => s.trim()).filter(Boolean);
       attr.synonyms = list.length > 0 ? list : undefined;
     });
+  }
+
+  /** Сводка уже существующих атрибутов для контекста ИИ (переиспользование по
+   * смыслу вместо изобретения дублей) — атрибуты ЭТОГО метода (currentAttrs, если
+   * передан) + атрибуты ВСЕХ ДРУГИХ методов системы, без дублей id. currentAttrs
+   * не обязателен: черновик из стандарта (блок «Импортировать из стандарта»)
+   * заменяет текущие атрибуты целиком, поэтому им незачем фигурировать как
+   * «уже существующие». methodConfigOf нормализует input_parameters — напрямую
+   * m.input_parameters трогать нельзя: сервер может быть старее фронтенда (см.
+   * AGENTS.md) и вообще не отдавать это поле. */
+  private collectExistingAttributeSummaries(methodId: number, currentAttrs: MethodAttribute[]): ExistingAttributeSummary[] {
+    const seenIds = new Set<string>();
+    const out: ExistingAttributeSummary[] = [];
+    for (const a of currentAttrs) {
+      if (!a.id || seenIds.has(a.id)) continue;
+      seenIds.add(a.id);
+      out.push({ id: a.id, name: a.name, data_type: a.data_type, fill_method: a.fill_method, level: a.level });
+    }
+    for (const m of this.plugin.methods) {
+      if (m.id === methodId) continue;
+      for (const a of this.methodConfigOf(m.id).input_parameters) {
+        if (!a.id || seenIds.has(a.id)) continue;
+        seenIds.add(a.id);
+        out.push({ id: a.id, name: a.name, data_type: a.data_type, fill_method: a.fill_method, level: a.level });
+      }
+    }
+    return out;
+  }
+
+  /** Значок-помощник в строке атрибута (2026-08-22, перенесено из общей панели
+   * списка по просьбе пользователя): по уже введённому пользовательскому названию
+   * атрибута (nameInput) ищет среди уже существующих атрибутов (этого и других
+   * методов) смыслово подходящий — если нашёлся, копирует его id как есть (эффект
+   * переиспользования: та же величина под тем же id); иначе просит ИИ предложить
+   * новый id (перевод смысла на английский, не транслитерация). Меняет ТОЛЬКО
+   * idInput/attr.id — остальные поля строки пользователь заполняет сам. */
+  private async suggestAttributeId(
+    idInput: HTMLInputElement,
+    nameInput: HTMLInputElement,
+    attr: MethodAttribute,
+    methodId: number,
+    attrs: MethodAttribute[],
+    btn: HTMLButtonElement,
+  ): Promise<void> {
+    const name = nameInput.value.trim();
+    if (!name) { new Notice('Сначала введите название атрибута'); return; }
+    btn.disabled = true;
+    try {
+      const existingAttributes = this.collectExistingAttributeSummaries(methodId, attrs);
+      const { matched, drafted } = await this.plugin.llmAssist.suggestAttributesFromNames([name], existingAttributes);
+      if (matched.length > 0) {
+        const ex = matched[0].existing;
+        idInput.value = ex.id;
+        attr.id = ex.id;
+        new Notice(`Уже есть такой атрибут: «${ex.name}» (${ex.id}) — id скопирован`);
+      } else if (drafted.length > 0) {
+        idInput.value = drafted[0].id;
+        attr.id = drafted[0].id;
+        new Notice(`Предложен новый id: ${drafted[0].id}`);
+      } else {
+        new Notice('Не удалось предложить id — попробуйте переформулировать название');
+      }
+    } catch (e: unknown) {
+      console.error('ЛИМС: ошибка подбора id атрибута:', e);
+      new Notice(`Ошибка ИИ-помощника: ${errorMessage(e)}`);
+    } finally {
+      btn.disabled = false;
+    }
   }
 
   /** Мини-панель ИИ-помощника (блок 1): описание задачи от лаборанта → предложенное
@@ -1777,7 +1872,10 @@ export class LimsView extends ItemView {
       if (a.fill_method === 'calculated' && !a.formula?.trim()) {
         return `Атрибут «${a.id}»: укажите формулу (способ заполнения — «Расчёт»)`;
       }
-      if (a.fill_method !== 'calculated' && a.level === 'aggregated' && !a.aggregation) {
+      if (a.fill_method === 'classification' && !rules.some(r => r.output_name === a.id)) {
+        return `Атрибут «${a.id}»: способ заполнения «Правила классификации», но ни одно правило не пишет в этот атрибут — создайте правило с результатом «${a.id}» или смените способ заполнения`;
+      }
+      if (a.fill_method !== 'calculated' && a.fill_method !== 'classification' && a.level === 'aggregated' && !a.aggregation) {
         return `Атрибут «${a.id}»: укажите принцип агрегирования или формулу`;
       }
     }

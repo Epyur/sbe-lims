@@ -89,8 +89,11 @@ export interface LabGroup {
 export type AttributeDataType = 'text' | 'int' | 'float' | 'date' | 'time' | 'photo' | 'boolean';
 /** Знак сравнения — пороговое правило классификации (условие на строку, 2026-08-22). */
 export type ComparisonOperator = '==' | '!=' | '<' | '<=' | '>' | '>=';
-/** Способ заполнения атрибута. */
-export type AttributeFillMethod = 'manual' | 'instrument' | 'calculated';
+/** Способ заполнения атрибута. "classification" (2026-08-22) — значение пишет
+ * механизм правил классификации (applyClassification, lab-service): атрибут с
+ * этим способом заполнения ДОЛЖЕН быть output_name хотя бы одного правила
+ * классификации метода — проверяется в валидации (см. validateAttributesAndRules). */
+export type AttributeFillMethod = 'manual' | 'instrument' | 'calculated' | 'classification';
 /** Уровень атрибута: значение по каждой серии («данные эксперимента») или одно
  * значение на заявку+метод («агрегированные результаты»). */
 export type AttributeLevel = 'experiment' | 'aggregated';

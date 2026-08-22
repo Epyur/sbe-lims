@@ -40,7 +40,7 @@ export interface ExistingAttributeSummary {
 }
 
 const VALID_DATA_TYPES = new Set(['text', 'int', 'float', 'date', 'time', 'photo', 'boolean']);
-const VALID_FILL_METHODS = new Set(['manual', 'instrument', 'calculated']);
+const VALID_FILL_METHODS = new Set(['manual', 'instrument', 'calculated', 'classification']);
 const VALID_LEVELS = new Set(['experiment', 'aggregated']);
 const VALID_OPERATORS = new Set(['==', '!=', '<', '<=', '>', '>=']);
 const VALID_OPERAND_KINDS = new Set(['literal', 'attribute', 'target_indicator']);
@@ -305,10 +305,11 @@ ${attrsList || '(атрибутов пока нет)'}
 ${DSL_GRAMMAR}
 
 Формат атрибута метода (JSON):
-{"id": "лат_идентификатор", "name": "название на русском", "data_type": "text"|"int"|"float"|"date"|"time"|"boolean"|"photo", "fill_method": "manual"|"instrument"|"calculated", "level": "experiment"|"aggregated", "formula": "DSL-выражение (только если fill_method=calculated)", "aggregation": {"source": "id атрибута уровня experiment", "method": "avg"|"min"|"max"} (только если level=aggregated и своей формулы нет)}
+{"id": "лат_идентификатор", "name": "название на русском", "data_type": "text"|"int"|"float"|"date"|"time"|"boolean"|"photo", "fill_method": "manual"|"instrument"|"calculated"|"classification", "level": "experiment"|"aggregated", "formula": "DSL-выражение (только если fill_method=calculated)", "aggregation": {"source": "id атрибута уровня experiment", "method": "avg"|"min"|"max"} (только если level=aggregated и своей формулы нет)}
 Правила для id: только латиница/цифры/подчёркивание, не начинать с цифры, уникальны в пределах метода (^[A-Za-z_][A-Za-z0-9_]*$).
 id — ЭТО ПЕРЕВОД смысла на английский (или общепринятый латинский термин), а НЕ фонетическая транслитерация русских слов: "длительность пламенного горения" -> "flame_duration" (правильно), НЕ "dlit_plam_gor" (неправильно — транслитерация русских слов латиницей нечитаема и не является переводом).
 data_type="boolean" — значение true/false (в UI — Да/Нет); используй для атрибутов вида "наблюдалось/не наблюдалось", "да/нет" из текста стандарта, а не text.
+fill_method="classification" — используй ТОЛЬКО для атрибута, значение которого целиком определяет правило классификации (его id должен встречаться как output_name хотя бы одного правила в "classification" ниже) — например итоговый показатель/группа/класс, а не для промежуточных измеряемых величин.
 
 Формат правила классификации (JSON, единая модель — "Если А [знак] Б (И/ИЛИ А2 [знак] Б2 …), то результат = показатель", как в Excel IF/AND/OR):
 {"output_name": "id атрибута-результата", "aggregation_rule": "none"|"avg"|"min"|"max" (опц., по умолч. "none" — не сравнивать между сериями, брать значение текущей записи), "branches": [{"clauses": [{"left": Операнд, "operator": "<"|"<="|">"|">="|"=="|"!=", "right": Операнд}], "join": "and"|"or" (опц., по умолч. "and" — как связаны МЕЖДУ СОБОЙ несколько clauses одной ветки), "grade": "показатель"}]}
@@ -331,6 +332,55 @@ ${existingList || '(пока нет)'}
     const { attributes, renameMap } = sanitizeAttributesWithRename(raw?.attributes);
     const classification = sanitizeClassification(raw?.classification, renameMap);
     return { attributes, classification };
+  }
+
+  /** Подбор атрибутов по списку пользовательских названий/описаний (кнопка
+   * «Предложить атрибуты по описанию», блок 1): для каждой строки — либо находит
+   * смыслово подходящий уже существующий атрибут (этого или другого метода), либо
+   * предлагает новый черновик. matched — только информационно (ничего не
+   * добавляется); drafted — черновики новых атрибутов для ревью, санитизированы
+   * тем же sanitizeAttributesWithRename, что и остальные ИИ-черновики. */
+  async suggestAttributesFromNames(
+    names: string[],
+    existingAttributes: ExistingAttributeSummary[],
+  ): Promise<{ matched: Array<{ input: string; existing: ExistingAttributeSummary }>; drafted: MethodAttribute[] }> {
+    const service = await this.llm();
+    const existingList = existingAttributes
+      .map(a => `- ${a.id} (${a.name}): ${a.data_type}, заполнение ${a.fill_method}, уровень ${a.level}`)
+      .join('\n');
+    const system = `Ты помогаешь конфигуратору методов лабораторной информационной системы (ЛИМС) подобрать атрибуты по списку пользовательских названий/описаний измеряемых величин.
+
+${DSL_GRAMMAR}
+
+Формат атрибута метода (JSON):
+{"id": "лат_идентификатор", "name": "название на русском", "data_type": "text"|"int"|"float"|"date"|"time"|"boolean"|"photo", "fill_method": "manual"|"instrument"|"calculated"|"classification", "level": "experiment"|"aggregated", "formula": "DSL-выражение (только если fill_method=calculated)", "aggregation": {"source": "id атрибута уровня experiment", "method": "avg"|"min"|"max"} (только если level=aggregated и своей формулы нет)}
+Правила для id: только латиница/цифры/подчёркивание, не начинать с цифры, уникальны в пределах метода (^[A-Za-z_][A-Za-z0-9_]*$).
+id — ЭТО ПЕРЕВОД смысла на английский (или общепринятый латинский термин), а НЕ фонетическая транслитерация русских слов: "длительность пламенного горения" -> "flame_duration" (правильно), НЕ "dlit_plam_gor" (неправильно).
+
+Уже существующие атрибуты в системе (переиспользуй, если смыслово совпадает с одной из строк списка, вместо того чтобы придумывать новый):
+${existingList || '(пока нет)'}
+
+Для КАЖДОЙ строки списка реши: если она смыслово совпадает с одним из уже существующих атрибутов выше — верни его id как "existing_id"; иначе предложи НОВЫЙ атрибут как "new_attribute" по формату выше.
+
+Верни ТОЛЬКО JSON-объект: {"results": [{"input": "<строка списка как есть>", "existing_id": "id"} | {"input": "<строка списка как есть>", "new_attribute": {...}}]}, без markdown-обёртки и пояснений.`;
+
+    const raw = await service.completeJson<{ results?: unknown }>(
+      system, names.map(n => `- ${n}`).join('\n'), { model: this.resolveModel() },
+    );
+    const existingById = new Map(existingAttributes.map(a => [a.id, a]));
+    const matched: Array<{ input: string; existing: ExistingAttributeSummary }> = [];
+    const rawDrafts: unknown[] = [];
+    for (const item of Array.isArray(raw?.results) ? raw.results : []) {
+      if (!item || typeof item !== 'object') continue;
+      const r = item as Record<string, unknown>;
+      const input = typeof r.input === 'string' ? r.input : '';
+      const existingId = typeof r.existing_id === 'string' ? r.existing_id : '';
+      const match = existingId ? existingById.get(existingId) : undefined;
+      if (match) matched.push({ input, existing: match });
+      else if (r.new_attribute) rawDrafts.push(r.new_attribute);
+    }
+    const { attributes: drafted } = sanitizeAttributesWithRename(rawDrafts);
+    return { matched, drafted };
   }
 
   /** Черновик представления (порядок/подписи/видимость столбцов в UI-таблице

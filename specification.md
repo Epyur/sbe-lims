@@ -83,7 +83,7 @@ LabMethod{ id, code, name,
 MethodAttribute{ id: string,  // ^[A-Za-z_][A-Za-z0-9_]*$, уникален в пределах метода
                   name: string,
                   data_type: 'text'|'int'|'float'|'date'|'time'|'photo'|'boolean',  // boolean: true/false в БД, Да/Нет в UI (2026-08-22)
-                  fill_method: 'manual'|'instrument'|'calculated',
+                  fill_method: 'manual'|'instrument'|'calculated'|'classification',  // classification (2026-08-22): значение пишет правило классификации — id атрибута должен встречаться как output_name хотя бы одного правила (проверяется в validateAttributesAndRules)
                   level: 'experiment'|'aggregated',
                   formula?: string,  // DSL-выражение — для fill_method="calculated"
                   aggregation?: { source: string, method: 'avg'|'min'|'max' },  // level="aggregated" без своей формулы
