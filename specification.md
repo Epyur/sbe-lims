@@ -66,6 +66,13 @@ LimsRequest{ id, number_seq, number_year, title, description, object_id, project
              lab_id,  // конкретная лаба из method.lab_ids, зафиксирована при создании заявки
                        // (заменяет старую external_lab_id — упразднена 2026-08-19)
              customer_number, lab_number,
+             // Системные атрибуты (2026-08-23) — испытатель/даты/условия среды,
+             // общие для ЛЮБОГО метода; заполняются автоматически из письма-
+             // результата (email-импорт), НЕ через MethodAttribute per-method
+             // (см. AGENTS.md, «Правило: системные атрибуты»). Пусто/0, пока
+             // не пришли.
+             inventor_id, report_date, samples_in_date, exp_date,
+             amb_temp, amb_pres, amb_moist,
              files: RequestFile[], created_at, updated_at }
 
 LabMethod{ id, code, name,

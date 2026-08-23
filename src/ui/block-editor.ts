@@ -13,8 +13,12 @@ import type {
 /** Каталог системных плейсхолдеров (заявка/объект) — резолвится сервером из
  * уже загруженных данных при рендере (см. lab-service/protocol.go
  * resolveSystemPlaceholder). Список держим синхронизированным вручную с Go —
- * добавление нового системного поля требует правки в обоих местах. */
-const SYSTEM_PLACEHOLDERS: Array<{ id: string; label: string }> = [
+ * добавление нового системного поля требует правки в обоих местах (и в
+ * systemRequestFields/email_ingest.go, если поле заполняется из письма).
+ * Экспортирован — переиспользуется справкой конфигуратора методов и
+ * автоматическим разделом формы для испытателя (lims-view.ts), см.
+ * sbe-lims/AGENTS.md, "Системные атрибуты". */
+export const SYSTEM_PLACEHOLDERS: Array<{ id: string; label: string }> = [
   { id: 'title', label: 'Наименование заявки' },
   { id: 'number', label: 'Номер заявки' },
   { id: 'object_name', label: 'Материал (объект)' },
@@ -30,6 +34,16 @@ const SYSTEM_PLACEHOLDERS: Array<{ id: string; label: string }> = [
   { id: 'batch_number', label: 'Номер партии' },
   { id: 'sample_id', label: 'Идентификатор образца' },
   { id: 'thickness', label: 'Толщина образца' },
+  // Универсальные для ЛЮБОГО метода (2026-08-23) — испытатель/даты/условия среды
+  // при испытании; заполняются автоматически из письма-результата (email-импорт),
+  // не заводятся как атрибут конкретного метода (см. AGENTS.md).
+  { id: 'inventor', label: 'Испытатель (ФИО)' },
+  { id: 'report_date', label: 'Дата протокола' },
+  { id: 'samples_in_date', label: 'Дата поступления материала' },
+  { id: 'exp_date', label: 'Дата эксперимента' },
+  { id: 'amb_temp', label: 'Температура воздуха при испытании, °C' },
+  { id: 'amb_pres', label: 'Атмосферное давление при испытании, мм.рт.ст' },
+  { id: 'amb_moist', label: 'Влажность воздуха при испытании, %' },
 ];
 
 const AGG_LABELS: Record<PlaceholderAgg, string> = {

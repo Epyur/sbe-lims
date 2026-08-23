@@ -42,6 +42,17 @@ export interface LimsRequest {
   customer_number: string;
   /** Номер лаборатории: {NNN}/{yyyy}-{methodCode}. */
   lab_number: string;
+  /** Системные атрибуты (2026-08-23) — испытатель/даты/условия среды, общие для
+   * ЛЮБОГО метода; заполняются автоматически из письма-результата, не через
+   * MethodAttribute per-method (см. AGENTS.md, «Системные атрибуты»). Пусто/0,
+   * пока не пришли из email-импорта. */
+  inventor_id: number;
+  report_date: string;
+  samples_in_date: string;
+  exp_date: string;
+  amb_temp: string;
+  amb_pres: string;
+  amb_moist: string;
   files: Array<{ file_key: string; file_name: string; file_size: number; file_url: string }>;
   created_at: string;
   updated_at: string;

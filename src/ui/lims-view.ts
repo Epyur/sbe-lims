@@ -23,7 +23,7 @@ import type {
   OperatorFormField,
   PresentationKind,
 } from '../types/lims';
-import { renderBlockEditor } from './block-editor';
+import { renderBlockEditor, SYSTEM_PLACEHOLDERS } from './block-editor';
 import { errorMessage } from '../../../sbe-core/src/utils/errors';
 import { sanitizeAttributesWithRename } from '../services/llm-assist.service';
 import type { ExistingAttributeSummary } from '../services/llm-assist.service';
@@ -1041,6 +1041,18 @@ export class LimsView extends ItemView {
     // ---- Блок 1: атрибуты метода ----
     const attrs: MethodAttribute[] = cfg.input_parameters.map(a => ({ ...a }));
     form.createEl('h4', { text: 'Атрибуты метода' });
+    // Справка "Системные атрибуты" (2026-08-23) — по прямому решению пользователя:
+    // испытатель/даты/условия среды общие для ЛЮБОГО метода, заводить их отдельным
+    // атрибутом на каждом методе не нужно — заполняются автоматически (email-импорт
+    // результатов) и доступны как плейсхолдер в блочном редакторе представления И
+    // автоматически показываются в форме для испытателя (см. renderOperatorFormPreview).
+    // Один каталог на три поверхности — SYSTEM_PLACEHOLDERS (block-editor.ts).
+    const systemHint = form.createDiv({ cls: 'tn-lims-meta tn-lims-mb8' });
+    systemHint.createSpan({
+      text: 'Системные данные (партия, материал, испытатель, даты, условия среды и т.п.) ' +
+        'подставляются автоматически — не создавайте для них отдельный атрибут метода: ',
+    });
+    systemHint.createSpan({ text: SYSTEM_PLACEHOLDERS.map(s => s.label).join(', ') + '.' });
     const attrsListEl = form.createDiv();
     // onChange у строки атрибута дополнительно обновляет правила/представление/
     // форму испытателя — их выпадающие списки атрибутов собираются при рендере,
@@ -1413,9 +1425,16 @@ export class LimsView extends ItemView {
   }
 
   /** Read-only предпросмотр «как увидит испытатель» — поля формы отрисованы
-   * disabled, только layout. */
+   * disabled, только layout. Системные данные (2026-08-23) показаны ВСЕГДА, даже
+   * если метод-специфичных полей нет — испытатель получает их автоматически
+   * (заполняются из письма-результата или позже из фронта ввода), в
+   * operator_form.fields их заводить не нужно (правило: системные атрибуты
+   * автоматически попадают в форму испытателя, см. AGENTS.md). */
   private renderOperatorFormPreview(container: HTMLElement, fields: OperatorFormField[], attrs: MethodAttribute[]): void {
     container.empty();
+    container.createDiv({ cls: 'tn-lims-meta' }).setText('Системные данные (заполняются автоматически, настраивать не нужно):');
+    const sysRow = container.createDiv({ cls: 'tn-lims-flex tn-lims-mb8' });
+    sysRow.createSpan({ text: SYSTEM_PLACEHOLDERS.map(s => s.label).join(', ') + '.' });
     if (fields.length === 0) return;
     container.createDiv({ cls: 'tn-lims-meta' }).setText('Предпросмотр — как увидит испытатель:');
     for (const f of fields) {
