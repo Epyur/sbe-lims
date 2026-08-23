@@ -383,19 +383,9 @@
   display: block;
 }
 
-.tn-lims-modal {
-  border: 1px solid var(--border-default);
-  border-radius: 8px;
-  padding: 12px;
-  margin-top: 12px;
-  background: var(--background-primary);
-}
-
-.tn-lims-modal-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 8px;
+.tn-lims-protocol-modal {
+  width: 90vw;
+  max-width: 900px;
 }
 
 .tn-lims-iframe {

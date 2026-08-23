@@ -48,6 +48,14 @@ const COMPARISON_OPERATOR_OPTIONS: Array<[ComparisonOperator, string]> = [
   ['==', 'точно равно'], ['!=', 'точно не равно'],
 ];
 
+/** Стандартные варианты вывода для правил "сравнение с целевым показателем"
+ * (Operand kind="target_indicator") — 2026-08-23, по запросу пользователя:
+ * результат ветки правила классификации был жёстко ограничен списком
+ * показателей метода (determinableIndicators), что не давало написать вывод о
+ * соответствии. Предлагаются как быстрая вставка в select рядом со свободным
+ * текстовым полем (см. renderBranchRows) — не единственный допустимый вариант. */
+const COMPLIANCE_VERDICTS = ['Соответствует', 'Не соответствует', 'Не оценивается'];
+
 /** Значение из текстового поля операнда «значение» — число, если строка целиком
  * читается как число, иначе как есть (текст/«Да»-«Нет»/показатель). */
 function parseConditionLiteral(raw: string): string | number {
@@ -134,6 +142,14 @@ export class LimsView extends ItemView {
 
   private key: NavKey = 'requests';
   private labId: number | null = null;
+  // Открытая модалка протокола (2026-08-23) — раньше showHtmlModal вставляла
+  // обычный div прямо в bodyEl без какого-либо singleton-контроля: клик на
+  // "Краткий вид"/"Выписка"/"Полный протокол" несколько раз (в т.ч. по разным
+  // кнопкам подряд) плодил накладывающиеся друг на друга div'ы ("плодятся много
+  // экземпляров вывода", жалоба пользователя) — ни ESC, ни клик по фону их не
+  // закрывали, т.к. это не настоящий Modal. Теперь настоящий Modal с закрытием
+  // предыдущего перед открытием нового.
+  private openProtocolModal: ProtocolHtmlModal | null = null;
   private collapsed = false;
   private labs: Lab[] = [];
   /** Кэш объектов/проектов/групп — только для отображения деталей заявки
@@ -810,9 +826,8 @@ export class LimsView extends ItemView {
       btn.addEventListener('click', async () => {
         try {
           const proto = await this.plugin.syncService.getProtocol(req.id, kind);
-          const modal = this.showHtmlModal(req, proto.html);
-          const docxBtn = modal.createEl('button', { text: 'Скачать DOCX', cls: 'tn-btn tn-btn-ghost' });
-          docxBtn.addEventListener('click', () => this.downloadDocx(proto.docx_base64, `${kind}_${req.number_seq}_${req.number_year}.docx`));
+          this.showHtmlModal(req, proto.html, () =>
+            this.downloadDocx(proto.docx_base64, `${kind}_${req.number_seq}_${req.number_year}.docx`));
         } catch (e: unknown) {
           new Notice(`Ошибка: ${errorMessage(e)}`);
         }
@@ -1574,7 +1589,19 @@ export class LimsView extends ItemView {
       ];
       for (const [val, label] of fillOptions) fillSelect.createEl('option', { attr: { value: val }, text: label });
       fillSelect.value = attr.fill_method;
-      fillSelect.addEventListener('change', () => { attr.fill_method = fillSelect.value as AttributeFillMethod; onChange(); });
+      fillSelect.addEventListener('change', () => {
+        // Чистим поля предыдущего способа заполнения (2026-08-23) — раньше
+        // .formula/.aggregation оставались в атрибуте после переключения
+        // fill_method, просто скрытые из вида; сервер их больше не подхватывает
+        // молча (см. deriveFormulasFromAttributes, lab-service), но оставлять
+        // невидимые устаревшие данные в конфиге — источник путаницы при
+        // повторном открытии/экспорте, поэтому чистим и здесь.
+        const next = fillSelect.value as AttributeFillMethod;
+        if (next !== 'calculated') attr.formula = undefined;
+        if (next === 'calculated' || next === 'classification') attr.aggregation = undefined;
+        attr.fill_method = next;
+        onChange();
+      });
 
       const levelSelect = row.createEl('select', { cls: 'tn-lims-select' });
       const levelOptions: Array<[AttributeLevel, string]> = [
@@ -1919,11 +1946,30 @@ export class LimsView extends ItemView {
 
         const thenRow = branchBox.createDiv({ cls: 'tn-lims-flex' });
         thenRow.createSpan({ text: 'то показатель =' });
-        const gradeSelect = thenRow.createEl('select', { cls: 'tn-lims-select' });
-        gradeSelect.createEl('option', { attr: { value: '' }, text: '— показатель —' });
-        for (const g of determinableIndicators) gradeSelect.createEl('option', { attr: { value: g }, text: g });
-        gradeSelect.value = branch.grade;
-        gradeSelect.addEventListener('change', () => { branch.grade = gradeSelect.value; });
+        // Свободный ввод (2026-08-23, по прямому запросу пользователя) — раньше
+        // результат ветки был ЖЁСТКО ограничен выпадающим списком показателей
+        // метода (determinableIndicators, напр. В1/В2/В3 у ГВ) — не давало
+        // написать вывод вида "Соответствует"/"Не соответствует" для правил
+        // сравнения с целевым показателем (target_group_compliance). Текстовое
+        // поле — источник истины; select рядом — только подсказка/быстрая
+        // вставка (показатели метода + стандартные варианты соответствия),
+        // сбрасывается на placeholder после вставки.
+        const gradeInput = thenRow.createEl('input', {
+          attr: { type: 'text', placeholder: 'показатель или вывод (свободный ввод)' },
+          cls: 'tn-lims-input',
+        });
+        gradeInput.value = branch.grade;
+        gradeInput.addEventListener('change', () => { branch.grade = gradeInput.value.trim(); });
+        const gradeSelect = thenRow.createEl('select', { cls: 'tn-lims-select', attr: { title: 'быстрая вставка' } });
+        gradeSelect.createEl('option', { attr: { value: '' }, text: '— вставить —' });
+        const quickPicks = [...determinableIndicators, ...COMPLIANCE_VERDICTS.filter(v => !determinableIndicators.includes(v))];
+        for (const g of quickPicks) gradeSelect.createEl('option', { attr: { value: g }, text: g });
+        gradeSelect.addEventListener('change', () => {
+          if (!gradeSelect.value) return;
+          branch.grade = gradeSelect.value;
+          gradeInput.value = gradeSelect.value;
+          gradeSelect.value = '';
+        });
       });
     };
     redraw();
@@ -2494,15 +2540,17 @@ export class LimsView extends ItemView {
     return 'text';
   }
 
-  private showHtmlModal(req: LimsRequest, html: string): HTMLElement {
-    const modal = this.bodyEl.createDiv({ cls: 'tn-lims-modal' });
-    const head = modal.createDiv({ cls: 'tn-lims-modal-head' });
-    head.createEl('b', { text: `Протокол № ${req.lab_number || `${req.number_seq}/${req.number_year}`}` });
-    const close = head.createEl('button', { text: '✖', cls: 'tn-btn tn-btn-ghost' });
-    close.addEventListener('click', () => modal.remove());
-    const iframe = modal.createEl('iframe', { attr: { sandbox: '' }, cls: 'tn-lims-iframe' });
-    iframe.setAttr('srcdoc', html);
-    return modal;
+  /** Показывает HTML протокола/выписки/краткого вида в настоящей Obsidian Modal
+   * (2026-08-23) — раньше вставляла обычный div прямо в bodyEl без singleton-
+   * контроля, из-за чего повторные клики по кнопкам вида (или клик по нескольким
+   * подряд) плодили накладывающиеся друг на друга div'ы, не закрываемые ни ESC,
+   * ни кликом по фону ("плодятся много экземпляров вывода"). Теперь закрывает
+   * предыдущую открытую модалку протокола перед тем, как открыть новую. */
+  private showHtmlModal(req: LimsRequest, html: string, onDownloadDocx: () => void): void {
+    this.openProtocolModal?.close();
+    const modal = new ProtocolHtmlModal(this.app, req, html, onDownloadDocx);
+    this.openProtocolModal = modal;
+    modal.open();
   }
 
   private downloadDocx(base64Data: string, fileName: string): void {
@@ -2570,6 +2618,29 @@ export class LimsView extends ItemView {
 export interface MethodConfigHandle {
   isDirty(): boolean;
   save(): Promise<boolean>;
+}
+
+/** Протокол/выписка/краткий вид в настоящей Obsidian Modal (2026-08-23) —
+ * заменила plain div, вставлявшийся прямо в bodyEl без singleton-контроля (см.
+ * LimsView.showHtmlModal). onClose закрывает через встроенный механизм Modal
+ * (крестик/Esc/клик по фону), в отличие от старой ручной кнопки ✖. */
+class ProtocolHtmlModal extends Modal {
+  constructor(app: App, private req: LimsRequest, private html: string, private onDownloadDocx: () => void) {
+    super(app);
+  }
+
+  onOpen(): void {
+    this.modalEl.addClass('tn-lims-protocol-modal');
+    this.titleEl.setText(`Протокол № ${this.req.lab_number || `${this.req.number_seq}/${this.req.number_year}`}`);
+    const iframe = this.contentEl.createEl('iframe', { attr: { sandbox: '' }, cls: 'tn-lims-iframe' });
+    iframe.setAttr('srcdoc', this.html);
+    const docxBtn = this.contentEl.createEl('button', { text: 'Скачать DOCX', cls: 'tn-btn tn-btn-ghost' });
+    docxBtn.addEventListener('click', () => this.onDownloadDocx());
+  }
+
+  onClose(): void {
+    this.contentEl.empty();
+  }
 }
 
 /** Конфигуратор метода в отдельном окне (2026-08-22, по просьбе пользователя —
