@@ -216,44 +216,74 @@ export interface ChartConfig {
  * каком виде туда включить. */
 export type PresentationKind = 'ui' | 'excerpt' | 'protocol';
 
-/** Показатель внутри секции — колонка таблицы по сериям ("table") или строка
- * резюме "label: значение" ("summary"); порядок элементов PresentationSection.fields
- * = порядок отображения внутри секции. Три независимых флага (было два до
- * 2026-08-22) — админ решает видимость для каждого из трёх видов отдельно. */
-export interface PresentationField {
-  attribute_id: string;
+/** Источник плейсхолдера: "system" — заявка/объект (партия, материал, ЕКН,
+ * заказчик и т.п. — см. SYSTEM_PLACEHOLDERS в block-editor.ts), "attribute" —
+ * показатель метода. */
+export type PlaceholderSource = 'system' | 'attribute';
+
+/** Функция свёртки серий эксперимента в одно значение — обязательна для
+ * атрибута уровня "experiment", используемого ВНЕ таблицы (2026-08-23, прямое
+ * требование пользователя: динамические данные вне таблицы — только одно
+ * значение). Внутри RichNode "table" агрегация не нужна — там одна строка на
+ * серию. Для системных плейсхолдеров и атрибутов уровня "aggregated" не
+ * применяется (там значение уже единственное). */
+export type PlaceholderAgg = 'avg' | 'min' | 'max' | 'first' | 'last';
+
+/** Инлайн-узел форматированного текста — обычный текст (с necessary bold/
+ * italic) или плейсхолдер-чип. Зеркало Go InlineNode (results.go). */
+export interface InlineNode {
+  type: 'text' | 'placeholder';
+  text?: string;
+  bold?: boolean;
+  italic?: boolean;
+  source?: PlaceholderSource;
+  attribute_id?: string;
+  agg?: PlaceholderAgg;
+}
+
+/** Один столбец динамической таблицы (RichNode "table") — одна строка на
+ * серию эксперимента, без агрегации. kind="series_no" — номер серии (1,2,3...)
+ * как обычная колонка (раньше жёстко prepend-илась сервером без права
+ * пользователя её убрать/переместить/переименовать, 2026-08-23). */
+export interface TableColumn {
+  kind?: 'attribute' | 'series_no';
+  attribute_id?: string;
   label?: string;
-  role: 'table' | 'summary';
-  show_in_ui: boolean;
-  show_in_excerpt: boolean;
-  show_in_protocol: boolean;
 }
 
-/** График секции (methods.chart_configs), с той же 3-way видимостью, что и поля —
- * рендерится внутри секции, а не общим хвостом в конце документа. */
-export interface PresentationChartRef {
-  chart_id: string;
-  show_in_ui: boolean;
-  show_in_excerpt: boolean;
-  show_in_protocol: boolean;
+/** Один блочный узел форматированного текста внутри DocumentBlock. */
+export interface RichNode {
+  type: 'paragraph' | 'heading' | 'bullet_list' | 'table';
+  level?: 2 | 3 | 4;
+  children?: InlineNode[];
+  items?: InlineNode[][];
+  columns?: TableColumn[];
 }
 
-/** Тематическая группа показателей (напр. "Температура дымовых газов") — своя
- * мини-таблица/резюме/график, а не общая сводная таблица на весь метод
- * (2026-08-22 — устраняет жалобу "все атрибуты формируют одну длинную сводную
- * таблицу"; эталон структуры — легаси-отчёты десктопного приложения). */
-export interface PresentationSection {
+/** Один блок документа (напр. "Общая информация", "Результаты измерения
+ * температуры") — форматированный текст с плейсхолдерами, собранный в
+ * визуальном редакторе (2026-08-23, block-editor.ts). Заменяет секции полей
+ * от 2026-08-22 — пользователь явно отверг модель "показать/скрыть атрибут"
+ * как не подходящую для документа с реквизитами/описаниями/юридическим
+ * футером (см. AGENTS.md). Видимость — ровно 3 фиксированных вида вывода
+ * (не расширяемый список шаблонов, по решению пользователя), на уровне
+ * ВСЕГО блока (не на уровне отдельных узлов внутри) — если для другого вида
+ * нужен другой текст, это отдельный блок с другими галочками. */
+export interface DocumentBlock {
   id: string;
   title: string;
-  fields: PresentationField[];
-  charts?: PresentationChartRef[];
+  content: RichNode[];
+  chart_id?: string;
+  show_in_ui: boolean;
+  show_in_excerpt: boolean;
+  show_in_protocol: boolean;
 }
 
-/** methods.presentation — секции показателей. Ровно 3 вида вывода читают один
- * и тот же набор секций, отличаясь только фильтром show_in_ui/show_in_excerpt/
- * show_in_protocol на полях/графиках. */
+/** methods.presentation — блоки форматированного текста. Ровно 3 вида
+ * вывода читают один и тот же список блоков, отличаясь только фильтром
+ * show_in_ui/show_in_excerpt/show_in_protocol на блоке. */
 export interface MethodPresentation {
-  sections: PresentationSection[];
+  blocks: DocumentBlock[];
 }
 
 /** Один вводимый испытателем показатель эксперимента — конструктор схемы
@@ -376,30 +406,3 @@ export interface ProtocolResponse {
   generated_at: string;
 }
 
-/** Одна строка резюме в коротком виде (GET .../short-view). */
-export interface ShortViewSummaryRow {
-  label: string;
-  value: string;
-}
-
-/** Одна колонка мини-таблицы короткого вида — is_photo: значение в rows —
- * URL картинки (нужно рендерить <img>), а не текст. */
-export interface ShortViewColumn {
-  label: string;
-  is_photo: boolean;
-}
-
-/** Мини-таблица секции в коротком виде — те же колонки/строки, что и в
- * протоколе, но как данные (не HTML), чтобы sbe-lims и sbe-requests могли
- * отрендерить их каждый в своей карточке без дублирования группировки. */
-export interface ShortViewTable {
-  columns: ShortViewColumn[];
-  rows: string[][];
-}
-
-/** Одна секция короткого вида (GET /api/lab/requests/{id}/short-view). */
-export interface ShortViewSection {
-  title: string;
-  table?: ShortViewTable;
-  summary?: ShortViewSummaryRow[];
-}

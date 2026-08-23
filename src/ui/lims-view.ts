@@ -1,4 +1,5 @@
 import { ItemView, Modal, Notice, WorkspaceLeaf } from 'obsidian';
+import type { App } from 'obsidian';
 import type SbeLimsPlugin from '../main';
 import type {
   AttributeDataType,
@@ -7,6 +8,7 @@ import type {
   ChartConfig,
   ClassificationRule,
   ComparisonOperator,
+  DocumentBlock,
   Equipment,
   Inventor,
   Lab,
@@ -20,9 +22,8 @@ import type {
   Operand,
   OperatorFormField,
   PresentationKind,
-  PresentationSection,
-  ShortViewSection,
 } from '../types/lims';
+import { renderBlockEditor } from './block-editor';
 import { errorMessage } from '../../../sbe-core/src/utils/errors';
 import { sanitizeAttributesWithRename } from '../services/llm-assist.service';
 import type { ExistingAttributeSummary } from '../services/llm-assist.service';
@@ -774,8 +775,9 @@ export class LimsView extends ItemView {
       });
     }
 
-    // результаты — короткий вид (секции по конфигурации метода), см. handleShortView
-    // в lab-service; общая точка группировки с read-only блоком в sbe-requests.
+    // результаты — краткий вид (блоки метода, вид "ui"), тот же эндпоинт, что
+    // и остальные виды вывода, но format=html — не тратим время на DOCX только
+    // для предпросмотра в карточке заявки.
     const shortViewDiv = methodDiv.createDiv();
     await this.renderShortView(shortViewDiv, req.id);
 
@@ -818,50 +820,21 @@ export class LimsView extends ItemView {
     }
   }
 
-  /** Короткий вид (секции по конфигурации метода) — GET .../short-view,
-   * та же группировка, что видит редактор конфигуратора (жалоба пользователя
-   * 2026-08-22 на одну длинную сводную таблицу устранена на сервере один раз,
-   * без дублирования логики группировки на клиенте). */
+  /** Краткий вид результатов — блоки метода с show_in_ui, отрисованные
+   * сервером (protocol.go, kind="ui", format=html — без сборки DOCX). HTML
+   * приходит готовым (плейсхолдеры уже резолвлены), клиент просто вставляет
+   * его в контейнер — не дублирует рендер форматированного текста на TS. */
   private async renderShortView(container: HTMLElement, requestId: number): Promise<void> {
-    let sections: ShortViewSection[];
     try {
-      sections = await this.plugin.syncService.getShortView(requestId);
+      const proto = await this.plugin.syncService.getProtocol(requestId, 'ui', 'html');
+      // proto.html — целый документ (свой <style> с глобальными селекторами
+      // напр. body{...}) — вставлять его напрямую в живой DOM плагина нельзя
+      // (протёк бы на весь Obsidian); берём только содержимое <body>.
+      const doc = new DOMParser().parseFromString(proto.html, 'text/html');
+      container.empty();
+      container.innerHTML = doc.body.innerHTML;
     } catch (e: unknown) {
       container.createDiv({ cls: 'tn-lims-error' }).setText(`Ошибка загрузки результатов: ${errorMessage(e)}`);
-      return;
-    }
-    if (sections.length === 0) {
-      container.createDiv({ cls: 'tn-lims-meta' }).setText('Результатов пока нет');
-      return;
-    }
-    for (const sec of sections) {
-      container.createEl('h5', { text: sec.title });
-      if (sec.table) {
-        const table = container.createEl('table', { cls: 'tn-table' });
-        const thead = table.createEl('thead').createEl('tr');
-        thead.createEl('th').setText('Серия');
-        for (const col of sec.table.columns) thead.createEl('th').setText(col.label);
-        const tbody = table.createEl('tbody');
-        sec.table.rows.forEach((row, i) => {
-          const tr = tbody.createEl('tr');
-          tr.createEl('td').setText(String(i + 1));
-          row.forEach((val, j) => {
-            const td = tr.createEl('td');
-            const col = sec.table!.columns[j];
-            if (col?.is_photo && val) {
-              td.createEl('img', { attr: { src: val, alt: col.label }, cls: 'tn-lims-thumb' });
-            } else {
-              td.setText(val);
-            }
-          });
-        });
-      }
-      if (sec.summary) {
-        const ul = container.createEl('ul');
-        for (const row of sec.summary) {
-          ul.createEl('li', { text: `${row.label}: ${row.value}` });
-        }
-      }
     }
   }
 
@@ -972,22 +945,27 @@ export class LimsView extends ItemView {
    * классификации — структурные редакторы; chart_configs — пока JSON-текстареа
    * (WYSIWYG-конструктор — отдельная фаза); formulas вычисляется сервером из
    * атрибутов при каждом сохранении (deriveFormulasFromAttributes, lab-service) —
-   * здесь только просмотр, редактирование напрямую не имеет смысла. */
-  renderMethodConfigForm(container: HTMLElement, methodId: number): void {
+   * здесь только просмотр, редактирование напрямую не имеет смысла.
+   *
+   * Возвращает {isDirty, save} — используется MethodConfigModal.close() для
+   * защиты от потери несохранённых правок при случайном закрытии окна. */
+  renderMethodConfigForm(container: HTMLElement, methodId: number): MethodConfigHandle {
     const cfg = this.methodConfigOf(methodId);
     const method = this.plugin.methods.find(m => m.id === methodId);
     const determinableIndicators: string[] = [...(method?.determinable_indicators || [])];
     // Форвард-объявления: редакторы атрибутов/правил читают determinableIndicators
     // для списков-опций показателя — при редактировании показателей (см. ниже)
-    // их нужно перерисовать вместе со списком показателей. resyncPresentation —
-    // блок 3 (представление) должен узнавать о новых/удалённых атрибутах сразу
-    // (2026-08-22, по замечанию пользователя: раньше новый атрибут появлялся в
-    // списке столбцов протокола только после «Сохранить» + повторного открытия
-    // конфигуратора — presentationFields не пересинхронизировались при добавлении/
-    // удалении атрибута в этом же сеансе редактирования).
+    // их нужно перерисовать вместе со списком показателей.
+    // redrawBlocks/redrawOperatorForm форвард-объявлены здесь по той же причине,
+    // что и redrawAttrs/redrawRules — их сборки предикатов "какой атрибут можно
+    // выбрать" построены на момент рендера, а не лениво; без пересборки после
+    // любого изменения attrs новый/переименованный атрибут был бы недоступен в
+    // правилах классификации/представлении/форме испытателя до закрытия и
+    // повторного открытия конфигуратора (прямая жалоба пользователя, 2026-08-23).
     let redrawAttrs: () => void = () => {};
     let redrawRules: () => void = () => {};
-    let resyncPresentation: () => void = () => {};
+    let redrawBlocks: () => void = () => {};
+    let redrawOperatorForm: () => void = () => {};
     const form = container.createDiv({ cls: 'tn-lims-series-form' });
 
     form.createDiv({ cls: 'tn-lims-meta' }).setText('Описание:');
@@ -1064,23 +1042,40 @@ export class LimsView extends ItemView {
     const attrs: MethodAttribute[] = cfg.input_parameters.map(a => ({ ...a }));
     form.createEl('h4', { text: 'Атрибуты метода' });
     const attrsListEl = form.createDiv();
+    // onChange у строки атрибута дополнительно обновляет правила/представление/
+    // форму испытателя — их выпадающие списки атрибутов собираются при рендере,
+    // не лениво, поэтому переименование/добавление/удаление атрибута иначе не
+    // видно там до перезакрытия конфигуратора.
+    const onAttrsChanged = (): void => { redrawAttrs(); redrawRules(); redrawBlocks(); redrawOperatorForm(); };
     redrawAttrs = () => {
       attrsListEl.empty();
-      this.renderAttributeRows(attrsListEl, attrs, methodId, determinableIndicators, () => {
-        resyncPresentation();
-        redrawAttrs();
-      });
+      this.renderAttributeRows(attrsListEl, attrs, methodId, determinableIndicators, onAttrsChanged);
     };
     redrawAttrs();
     const addAttrBtn = form.createEl('button', { text: '➕ Добавить атрибут', cls: 'tn-btn tn-btn-ghost' });
     addAttrBtn.addEventListener('click', () => {
       attrs.push({ id: '', name: '', data_type: 'text', fill_method: 'manual', level: 'experiment' });
-      resyncPresentation();
-      redrawAttrs();
+      onAttrsChanged();
     });
 
     // ---- Блок 2: правила классификации ----
-    const rules: ClassificationRule[] = cfg.classification.map(r => ({ ...r }));
+    // branches/subjects/grade/clauses/compare_to могут отсутствовать или быть
+    // некорректными у правил, сохранённых до текущей модели (v1/v2 этой же
+    // сессии) — без этой нормализации renderBranchRows/renderSubjectRows падают
+    // на .forEach/.trim() у undefined и всё окно конфигуратора не открывается
+    // ни для одного метода (см. баг у метода "ГВ", 2026-08-23).
+    const rules: ClassificationRule[] = cfg.classification.map(r => ({
+      ...r,
+      branches: (r.branches || []).map(b => ({
+        ...b,
+        grade: b.grade || '',
+        clauses: (b.clauses || []).map(c => ({
+          ...c,
+          compare_to: c.compare_to && c.compare_to.kind ? c.compare_to : { kind: 'literal', value: '' },
+        })),
+      })),
+      subjects: r.subjects || [],
+    }));
     form.createEl('h4', { text: 'Правила классификации' });
     const rulesListEl = form.createDiv();
     redrawRules = () => {
@@ -1127,45 +1122,30 @@ export class LimsView extends ItemView {
       redrawCharts();
     });
 
-    // ---- Блок 3б: представление данных — секции показателей (2026-08-22,
-    // заменили плоский список полей от 2026-08-21 — устраняет "одну длинную
-    // сводную таблицу": каждая секция даёт свою мини-таблицу/резюме/график).
-    // Ровно 3 вида вывода (Кратко/Выписка/Протокол) — по решению пользователя
-    // простые галочки на каждом поле/графике, без отдельного списка шаблонов. ----
-    const presentationSections: PresentationSection[] = cfg.presentation.sections.map(sec => ({
-      id: sec.id,
-      title: sec.title,
-      fields: sec.fields.filter(f => attrs.some(a => a.id === f.attribute_id)).map(f => ({ ...f })),
-      charts: (sec.charts || []).map(c => ({ ...c })),
-    }));
-    // атрибуты, которых пока нет ни в одной секции (новые/метод впервые
-    // конфигурируется, либо атрибуты только что загружены/сформированы) —
-    // добавляем в последнюю секцию (создаёт секцию по умолчанию, если секций нет).
-    this.syncPresentationFieldsToAttrs(presentationSections, attrs);
+    // ---- Блок 3б: представление данных — блоки форматированного текста
+    // (2026-08-23, визуальный редактор с плейсхолдерами — заменил секции
+    // полей от 2026-08-22, отвергнутые пользователем как неподходящая модель
+    // для документа с реквизитами/описаниями/юридическим футером). Ровно 3
+    // вида вывода (Кратко/Выписка/Протокол) — по решению пользователя простые
+    // галочки на каждом блоке, без отдельного списка шаблонов. ----
+    const blocks: DocumentBlock[] = cfg.presentation.blocks.map(b => ({ ...b, content: b.content.map(n => ({ ...n })) }));
     form.createEl('h4', { text: 'Представление данных (короткий вид / выписка / протокол)' });
     form.createDiv({ cls: 'tn-lims-meta' }).setText(
-      'Секции — тематические группы показателей (своя мини-таблица/резюме/график вместо ' +
-      'одной сводной таблицы на весь метод). Три галочки на каждом поле/графике — в каком ' +
-      'из трёх видов вывода он показывается; «Резюме» — одна строка «подпись: значение» ' +
-      '(итоговый показатель/вывод), «Таблица» — колонка по сериям.',
+      'Блоки — форматированный текст с плейсхолдерами (системными — партия/материал/ЕКН и ' +
+      'т.п., атрибутами метода). Динамические данные (несколько серий) — только в таблице; ' +
+      'вне таблицы атрибут эксперимента сворачивается до одного значения (среднее/мин/макс/ ' +
+      'первая/последняя серия). Три галочки на каждом блоке — в каком из трёх видов вывода он показывается.',
     );
-    const presentationListEl = form.createDiv();
-    const previewEl = form.createDiv();
-    let redrawPresentation: () => void;
-    redrawPresentation = () => {
-      presentationListEl.empty();
-      this.renderPresentationSections(presentationListEl, presentationSections, attrs, charts, () => redrawPresentation());
-      this.renderPresentationPreview(previewEl, presentationSections, attrs);
+    const blocksListEl = form.createDiv();
+    redrawBlocks = () => {
+      blocksListEl.empty();
+      this.renderBlocksList(blocksListEl, blocks, attrs, charts);
     };
-    redrawPresentation();
-    resyncPresentation = () => {
-      this.syncPresentationFieldsToAttrs(presentationSections, attrs);
-      redrawPresentation();
-    };
-    const addSectionBtn = form.createEl('button', { text: '➕ Добавить секцию', cls: 'tn-btn tn-btn-ghost' });
-    addSectionBtn.addEventListener('click', () => {
-      presentationSections.push({ id: `sec_${Date.now()}`, title: 'Новая секция', fields: [] });
-      redrawPresentation();
+    redrawBlocks();
+    const addBlockBtn = form.createEl('button', { text: '➕ Добавить блок', cls: 'tn-btn tn-btn-ghost' });
+    addBlockBtn.addEventListener('click', () => {
+      blocks.push({ id: `blk_${Date.now()}`, title: 'Новый блок', content: [], show_in_ui: true, show_in_excerpt: false, show_in_protocol: true });
+      redrawBlocks();
     });
 
     importBtn.addEventListener('click', async () => {
@@ -1189,11 +1169,9 @@ export class LimsView extends ItemView {
           new Notice('ИИ не смог сформировать ни одного атрибута из этого файла — проверьте, что это текстовый .rtf/.txt со стандартом, и что модель LLM настроена в настройках плагина');
           return;
         }
-        const draftPresentation = await this.plugin.llmAssist.draftPresentation(attrs);
-        presentationSections.splice(0, presentationSections.length, ...(Array.isArray(draftPresentation.sections) ? draftPresentation.sections : []));
-        redrawAttrs();
-        redrawRules();
-        redrawPresentation();
+        // Представление (блоки форматированного текста) ИИ не черновит —
+        // пользователь строит блоки протокола вручную в редакторе ниже.
+        onAttrsChanged();
         new Notice('Проект сформирован — проверьте, особенно значения с пометкой «ТРЕБУЕТ ПРОВЕРКИ», перед сохранением');
       } catch (e: unknown) {
         // без явного console.error ошибка была видна только в Notice (текст без
@@ -1227,9 +1205,7 @@ export class LimsView extends ItemView {
           return;
         }
         attrs.splice(0, attrs.length, ...attributes);
-        this.syncPresentationFieldsToAttrs(presentationSections, attrs);
-        redrawAttrs();
-        redrawPresentation();
+        onAttrsChanged();
         jsonImportArea.value = '';
         new Notice(`Загружено атрибутов: ${attributes.length} — проверьте перед сохранением`);
       } catch (e: unknown) {
@@ -1251,7 +1227,6 @@ export class LimsView extends ItemView {
     );
     const operatorFormListEl = form.createDiv();
     const operatorFormPreviewEl = form.createDiv();
-    let redrawOperatorForm: () => void;
     redrawOperatorForm = () => {
       operatorFormListEl.empty();
       this.renderOperatorFormRows(operatorFormListEl, operatorFormFields, attrs, () => redrawOperatorForm());
@@ -1266,259 +1241,117 @@ export class LimsView extends ItemView {
       redrawOperatorForm();
     });
 
-    const saveBtn = form.createEl('button', { text: '💾 Сохранить', cls: 'tn-btn tn-btn-primary' });
-    saveBtn.addEventListener('click', async () => {
-      const labIDs = getLabIDs();
-      if (labIDs.length === 0) { new Notice('Укажите хотя бы одну лабораторию'); return; }
-      const validationError = this.validateAttributesAndRules(attrs, rules) || this.validateChartsAndPresentation(charts, presentationSections, attrs);
-      if (validationError) { new Notice(validationError); return; }
+    // buildPatch/performSave вынесены в переиспользуемые замыкания — их же
+    // использует проверка несохранённых изменений при закрытии окна
+    // (MethodConfigModal.close, 2026-08-23 — прямой запрос пользователя: не
+    // было защиты от потери правок при случайном закрытии конфигуратора).
+    const buildPatch = (): Partial<MethodConfig> & { lab_ids?: number[]; description?: string; determinable_indicators?: string[] } => {
       const attrIds = new Set(attrs.map(a => a.id));
-      const patch: Partial<MethodConfig> & { lab_ids?: number[]; description?: string; determinable_indicators?: string[] } = {
-        lab_ids: labIDs,
+      return {
+        lab_ids: getLabIDs(),
         description: description.value.trim(),
         input_parameters: attrs,
         classification: rules,
         chart_configs: charts,
-        presentation: {
-          sections: presentationSections
-            .map(sec => ({ ...sec, fields: sec.fields.filter(f => attrIds.has(f.attribute_id)) }))
-            .filter(sec => sec.fields.length > 0 || (sec.charts && sec.charts.length > 0)),
-        },
+        presentation: { blocks },
         operator_form: { fields: operatorFormFields.filter(f => attrIds.has(f.attribute_id)) },
         determinable_indicators: determinableIndicators.filter(Boolean),
       };
+    };
+    // Снимок "как сохранено" — сравнение с текущим buildPatch() определяет
+    // isDirty(); обновляется на текущее состояние после каждого удачного
+    // сохранения (иначе сразу после «Сохранить» окно продолжило бы считаться
+    // "с несохранёнными изменениями" и спрашивало бы повторно при закрытии).
+    let savedSnapshot = JSON.stringify(buildPatch());
+    const performSave = async (): Promise<boolean> => {
+      const labIDs = getLabIDs();
+      if (labIDs.length === 0) { new Notice('Укажите хотя бы одну лабораторию'); return false; }
+      const validationError = this.validateAttributesAndRules(attrs, rules) || this.validateCharts(charts);
+      if (validationError) { new Notice(validationError); return false; }
       try {
-        await this.plugin.syncService.updateMethodConfig(methodId, patch);
+        await this.plugin.syncService.updateMethodConfig(methodId, buildPatch());
         await this.plugin.refreshMethods();
         new Notice('Конфиг метода обновлён');
         await this.renderMethods();
+        savedSnapshot = JSON.stringify(buildPatch());
+        return true;
       } catch (e: unknown) {
         new Notice(`Ошибка: ${errorMessage(e)}`);
+        return false;
       }
-    });
+    };
+
+    const saveBtn = form.createEl('button', { text: '💾 Сохранить', cls: 'tn-btn tn-btn-primary' });
+    saveBtn.addEventListener('click', () => { void performSave(); });
+
+    return {
+      isDirty: () => JSON.stringify(buildPatch()) !== savedSnapshot,
+      save: performSave,
+    };
   }
 
-  /** Секции представления (2026-08-22) — каждая своя карточка: заголовок,
-   * перетаскиваемые строки полей внутри (порядок = порядок столбцов секции),
-   * привязанные графики. Перетаскивание САМИХ секций — порядок секций в
-   * документе. onChange — полная перерисовка (после drop/переноса/удаления). */
-  private renderPresentationSections(
-    container: HTMLElement,
-    sections: PresentationSection[],
-    attrs: MethodAttribute[],
-    charts: ChartConfig[],
-    onChange: () => void,
-  ): void {
-    let dragFromSectionIdx: number | null = null;
-    sections.forEach((sec, secIdx) => {
+  /** Список блоков документа (2026-08-23) — каждый блок своя карточка:
+   * заголовок (для списка, не печатается), три галочки видимости, редактор
+   * содержимого (block-editor.ts — визуальный, с чипами-плейсхолдерами),
+   * привязанный график. Перетаскивание — порядок блоков в документе. */
+  private renderBlocksList(container: HTMLElement, blocks: DocumentBlock[], attrs: MethodAttribute[], charts: ChartConfig[]): void {
+    let dragFromIdx: number | null = null;
+    const redraw = (): void => {
+      container.empty();
+      this.renderBlocksList(container, blocks, attrs, charts);
+    };
+    blocks.forEach((block, idx) => {
       const card = container.createDiv({ cls: 'tn-lims-method', attr: { draggable: 'true' } });
       card.style.cursor = 'grab';
-      card.addEventListener('dragstart', (ev) => { dragFromSectionIdx = secIdx; ev.stopPropagation(); });
-      card.addEventListener('dragover', (ev) => { ev.preventDefault(); });
+      card.addEventListener('dragstart', (ev) => { dragFromIdx = idx; ev.stopPropagation(); });
+      card.addEventListener('dragover', (ev) => ev.preventDefault());
       card.addEventListener('drop', (ev) => {
         ev.preventDefault();
         ev.stopPropagation();
-        if (dragFromSectionIdx === null || dragFromSectionIdx === secIdx) return;
-        const [moved] = sections.splice(dragFromSectionIdx, 1);
-        sections.splice(secIdx, 0, moved);
-        dragFromSectionIdx = null;
-        onChange();
+        if (dragFromIdx === null || dragFromIdx === idx) return;
+        const [moved] = blocks.splice(dragFromIdx, 1);
+        blocks.splice(idx, 0, moved);
+        dragFromIdx = null;
+        redraw();
       });
 
       const head = card.createDiv({ cls: 'tn-lims-flex' });
       head.createSpan({ text: '⠿', cls: 'tn-lims-meta' });
       const titleInput = head.createEl('input', {
-        attr: { type: 'text', placeholder: 'Название секции (напр. «Температура дымовых газов»)' },
+        attr: { type: 'text', placeholder: 'Название блока (напр. «Общая информация»)' },
         cls: 'tn-lims-input',
       });
-      titleInput.value = sec.title;
-      titleInput.addEventListener('change', () => { sec.title = titleInput.value.trim() || 'Без названия'; onChange(); });
-      const delSecBtn = head.createEl('button', { text: '✖ Удалить секцию', cls: 'tn-btn tn-btn-ghost' });
-      delSecBtn.addEventListener('click', () => {
-        if (sec.fields.length > 0 && !window.confirm(
-          `Удалить секцию «${sec.title}»? Показатели внутри (${sec.fields.length}) тоже уйдут из представления.`,
-        )) return;
-        sections.splice(secIdx, 1);
-        onChange();
-      });
+      titleInput.value = block.title;
+      titleInput.addEventListener('change', () => { block.title = titleInput.value.trim() || 'Без названия'; });
 
-      const fieldsEl = card.createDiv();
-      this.renderPresentationFieldRows(fieldsEl, sec, sections, attrs, onChange);
-
-      card.createDiv({ cls: 'tn-lims-meta' }).setText('Графики секции:');
-      const chartRefsEl = card.createDiv();
-      this.renderSectionChartRefs(chartRefsEl, sec, charts, onChange);
-    });
-  }
-
-  /** Строки полей ОДНОЙ секции — перетаскивание меняет порядок внутри секции;
-   * выпадающий список «Секция» (если секций больше одной) переносит поле в
-   * другую секцию. Три галочки — видимость в каждом из трёх видов вывода. */
-  private renderPresentationFieldRows(
-    container: HTMLElement,
-    section: PresentationSection,
-    allSections: PresentationSection[],
-    attrs: MethodAttribute[],
-    onChange: () => void,
-  ): void {
-    let dragFromIdx: number | null = null;
-    section.fields.forEach((f, idx) => {
-      const attr = attrs.find(a => a.id === f.attribute_id);
-      const row = container.createDiv({ cls: 'tn-lims-flex', attr: { draggable: 'true' } });
-      row.style.cursor = 'grab';
-      row.addEventListener('dragstart', (ev) => { dragFromIdx = idx; ev.stopPropagation(); });
-      row.addEventListener('dragover', (ev) => { ev.preventDefault(); });
-      row.addEventListener('drop', (ev) => {
-        ev.preventDefault();
-        ev.stopPropagation();
-        if (dragFromIdx === null || dragFromIdx === idx) return;
-        const [moved] = section.fields.splice(dragFromIdx, 1);
-        section.fields.splice(idx, 0, moved);
-        dragFromIdx = null;
-        onChange();
-      });
-
-      row.createSpan({ text: '⠿', cls: 'tn-lims-meta' });
-      row.createSpan({ text: attr?.name || f.attribute_id });
-
-      const labelInput = row.createEl('input', {
-        attr: { type: 'text', placeholder: 'подпись (по умолчанию — название атрибута)' },
-        cls: 'tn-lims-input',
-      });
-      labelInput.value = f.label || '';
-      labelInput.addEventListener('change', () => { f.label = labelInput.value.trim() || undefined; onChange(); });
-
-      const roleSelect = row.createEl('select', { cls: 'tn-lims-select' });
-      roleSelect.createEl('option', { attr: { value: 'table' }, text: 'Таблица' });
-      roleSelect.createEl('option', { attr: { value: 'summary' }, text: 'Резюме' });
-      roleSelect.value = f.role;
-      roleSelect.addEventListener('change', () => { f.role = roleSelect.value === 'summary' ? 'summary' : 'table'; onChange(); });
-
-      const uiLabel = row.createEl('label', { cls: 'tn-lims-flex' });
+      const uiLabel = head.createEl('label', { cls: 'tn-lims-flex' });
       const uiCb = uiLabel.createEl('input', { attr: { type: 'checkbox' } });
-      uiCb.checked = f.show_in_ui;
+      uiCb.checked = block.show_in_ui;
       uiLabel.createSpan({ text: 'Кратко' });
-      uiCb.addEventListener('change', () => { f.show_in_ui = uiCb.checked; onChange(); });
+      uiCb.addEventListener('change', () => { block.show_in_ui = uiCb.checked; });
 
-      const excerptLabel = row.createEl('label', { cls: 'tn-lims-flex' });
+      const excerptLabel = head.createEl('label', { cls: 'tn-lims-flex' });
       const excerptCb = excerptLabel.createEl('input', { attr: { type: 'checkbox' } });
-      excerptCb.checked = f.show_in_excerpt;
+      excerptCb.checked = block.show_in_excerpt;
       excerptLabel.createSpan({ text: 'Выписка' });
-      excerptCb.addEventListener('change', () => { f.show_in_excerpt = excerptCb.checked; onChange(); });
+      excerptCb.addEventListener('change', () => { block.show_in_excerpt = excerptCb.checked; });
 
-      const protoLabel = row.createEl('label', { cls: 'tn-lims-flex' });
+      const protoLabel = head.createEl('label', { cls: 'tn-lims-flex' });
       const protoCb = protoLabel.createEl('input', { attr: { type: 'checkbox' } });
-      protoCb.checked = f.show_in_protocol;
+      protoCb.checked = block.show_in_protocol;
       protoLabel.createSpan({ text: 'Протокол' });
-      protoCb.addEventListener('change', () => { f.show_in_protocol = protoCb.checked; onChange(); });
+      protoCb.addEventListener('change', () => { block.show_in_protocol = protoCb.checked; });
 
-      if (allSections.length > 1) {
-        const moveSelect = row.createEl('select', { cls: 'tn-lims-select' });
-        for (const s of allSections) {
-          moveSelect.createEl('option', { attr: { value: s.id }, text: s.title });
-        }
-        moveSelect.value = section.id;
-        moveSelect.addEventListener('change', () => {
-          if (moveSelect.value === section.id) return;
-          const target = allSections.find(s => s.id === moveSelect.value);
-          if (!target) return;
-          section.fields.splice(idx, 1);
-          target.fields.push(f);
-          onChange();
-        });
-      }
+      const delBtn = head.createEl('button', { text: '✖ Удалить блок', cls: 'tn-btn tn-btn-ghost' });
+      delBtn.addEventListener('click', () => {
+        if (block.content.length > 0 && !window.confirm(`Удалить блок «${block.title}»?`)) return;
+        blocks.splice(idx, 1);
+        redraw();
+      });
+
+      const bodyEl = card.createDiv();
+      renderBlockEditor(bodyEl, block, { app: this.app, attrs, charts }, redraw);
     });
-  }
-
-  /** Графики, привязанные к секции — выбор из уже настроенных в блоке «Графики»
-   * (chart_configs), с тремя галочками видимости, как у полей. */
-  private renderSectionChartRefs(
-    container: HTMLElement,
-    section: PresentationSection,
-    charts: ChartConfig[],
-    onChange: () => void,
-  ): void {
-    (section.charts || []).forEach((cref, idx) => {
-      const chart = charts.find(c => c.id === cref.chart_id);
-      const row = container.createDiv({ cls: 'tn-lims-flex' });
-      row.createSpan({ text: `📈 ${chart?.title || cref.chart_id}` });
-
-      const uiLabel = row.createEl('label', { cls: 'tn-lims-flex' });
-      const uiCb = uiLabel.createEl('input', { attr: { type: 'checkbox' } });
-      uiCb.checked = cref.show_in_ui;
-      uiLabel.createSpan({ text: 'Кратко' });
-      uiCb.addEventListener('change', () => { cref.show_in_ui = uiCb.checked; onChange(); });
-
-      const excerptLabel = row.createEl('label', { cls: 'tn-lims-flex' });
-      const excerptCb = excerptLabel.createEl('input', { attr: { type: 'checkbox' } });
-      excerptCb.checked = cref.show_in_excerpt;
-      excerptLabel.createSpan({ text: 'Выписка' });
-      excerptCb.addEventListener('change', () => { cref.show_in_excerpt = excerptCb.checked; onChange(); });
-
-      const protoLabel = row.createEl('label', { cls: 'tn-lims-flex' });
-      const protoCb = protoLabel.createEl('input', { attr: { type: 'checkbox' } });
-      protoCb.checked = cref.show_in_protocol;
-      protoLabel.createSpan({ text: 'Протокол' });
-      protoCb.addEventListener('change', () => { cref.show_in_protocol = protoCb.checked; onChange(); });
-
-      const delBtn = row.createEl('button', { text: '✖', cls: 'tn-btn tn-btn-ghost' });
-      delBtn.addEventListener('click', () => { section.charts?.splice(idx, 1); onChange(); });
-    });
-
-    const addRow = container.createDiv({ cls: 'tn-lims-flex' });
-    const select = addRow.createEl('select', { cls: 'tn-lims-select' });
-    select.createEl('option', { attr: { value: '' }, text: '— выбрать график —' });
-    for (const c of charts) {
-      if ((section.charts || []).some(cr => cr.chart_id === c.id)) continue;
-      select.createEl('option', { attr: { value: c.id }, text: c.title || c.id });
-    }
-    const addBtn = addRow.createEl('button', { text: '➕ График в секцию', cls: 'tn-btn tn-btn-ghost' });
-    addBtn.addEventListener('click', () => {
-      if (!select.value) return;
-      if (!section.charts) section.charts = [];
-      section.charts.push({ chart_id: select.value, show_in_ui: true, show_in_excerpt: false, show_in_protocol: true });
-      onChange();
-    });
-  }
-
-  /** Живой предпросмотр «Кратко» по секциям (одна вымышленная строка примера —
-   * без реальных данных, только layout: мини-таблица секции + резюме-строки). */
-  private renderPresentationPreview(container: HTMLElement, sections: PresentationSection[], attrs: MethodAttribute[]): void {
-    container.empty();
-    container.createDiv({ cls: 'tn-lims-meta' }).setText('Предпросмотр «Кратко» (пример):');
-    let any = false;
-    for (const sec of sections) {
-      const tableFields = sec.fields.filter(f => f.show_in_ui && f.role === 'table');
-      const summaryFields = sec.fields.filter(f => f.show_in_ui && f.role === 'summary');
-      if (tableFields.length === 0 && summaryFields.length === 0) continue;
-      any = true;
-      container.createEl('h5', { text: sec.title });
-      if (tableFields.length > 0) {
-        const table = container.createEl('table', { cls: 'tn-table' });
-        const thead = table.createEl('thead').createEl('tr');
-        thead.createEl('th').setText('Серия');
-        for (const f of tableFields) {
-          const attr = attrs.find(a => a.id === f.attribute_id);
-          thead.createEl('th').setText(f.label || attr?.name || f.attribute_id);
-        }
-        const tr = table.createEl('tbody').createEl('tr');
-        tr.createEl('td').setText('1');
-        for (const f of tableFields) {
-          const attr = attrs.find(a => a.id === f.attribute_id);
-          tr.createEl('td').setText(attr?.data_type === 'photo' ? '[фото]' : '—');
-        }
-      }
-      if (summaryFields.length > 0) {
-        const ul = container.createEl('ul');
-        for (const f of summaryFields) {
-          const attr = attrs.find(a => a.id === f.attribute_id);
-          ul.createEl('li', { text: `${f.label || attr?.name || f.attribute_id}: —` });
-        }
-      }
-    }
-    if (!any) {
-      container.createDiv({ cls: 'tn-lims-meta' }).setText('Ничего не показывается в «Кратко» — отметьте поля галочкой «Кратко».');
-    }
   }
 
   /** Строки формы для испытателя (блок 3в) — тот же паттерн drag-and-drop, что
@@ -1663,23 +1496,15 @@ export class LimsView extends ItemView {
     });
   }
 
-  /** Валидация графиков и представления (секции показателей) перед сохранением —
-   * повтор атрибута проверяется across ВСЕ секции (одно поле — ровно в одной секции). */
-  private validateChartsAndPresentation(charts: ChartConfig[], sections: PresentationSection[], attrs: MethodAttribute[]): string | null {
-    const attrIds = new Set(attrs.map(a => a.id));
+  /** Валидация графиков перед сохранением. Представление (блоки форматированного
+   * текста) не валидируется структурно — это свободный текст, устаревшая ссылка
+   * на атрибут в плейсхолдере просто резолвится в пустую строку при рендере,
+   * не является ошибкой сохранения. */
+  private validateCharts(charts: ChartConfig[]): string | null {
     for (const c of charts) {
       if (c.series_config.length === 0) return `График «${c.title || c.id}»: добавьте хотя бы один ряд`;
       for (const sc of c.series_config) {
         if (!sc.source_param.trim()) return `График «${c.title || c.id}»: укажите источник для каждого ряда`;
-      }
-    }
-    const seen = new Set<string>();
-    for (const sec of sections) {
-      if (!sec.title.trim()) return 'У каждой секции представления должно быть название';
-      for (const f of sec.fields) {
-        if (!attrIds.has(f.attribute_id)) continue; // устаревший атрибут — молча пропускаем
-        if (seen.has(f.attribute_id)) return `Повторяющийся атрибут в представлении: ${f.attribute_id}`;
-        seen.add(f.attribute_id);
       }
     }
     return null;
@@ -2044,6 +1869,14 @@ export class LimsView extends ItemView {
             for (const [val, label] of COMPARISON_OPERATOR_OPTIONS) opSelect.createEl('option', { attr: { value: val }, text: label });
             opSelect.value = clause.operator;
             opSelect.addEventListener('change', () => { clause.operator = opSelect.value as ComparisonOperator; });
+            // Защита от повреждённых/устаревших данных: у метода "ГВ" нашлось
+            // условие без compare_to (или с некорректным kind), что валило весь
+            // рендер конфигуратора (Cannot read properties of undefined (reading
+            // 'kind')) — самоисправляем на литерал по умолчанию, чтобы окно
+            // открывалось, а не падало целиком из-за одного повреждённого правила.
+            if (!clause.compare_to || !clause.compare_to.kind) {
+              clause.compare_to = { kind: 'literal', value: '' };
+            }
             this.renderOperandEditor(clauseRow, clause.compare_to, attrs);
             const delClauseBtn = clauseRow.createEl('button', { text: '✖', cls: 'tn-btn tn-btn-ghost' });
             delClauseBtn.addEventListener('click', () => { clauses.splice(ci, 1); redraw(); });
@@ -2216,7 +2049,10 @@ export class LimsView extends ItemView {
       for (const branch of r.branches) {
         if (!branch.grade.trim()) return 'У каждой ветки правила классификации укажите показатель';
         for (const clause of branch.clauses || []) {
-          if (clause.compare_to.kind === 'attribute' && !ids.has(clause.compare_to.id)) {
+          // compare_to может быть не задан у повреждённых/устаревших данных
+          // (см. renderOperandEditor) — к моменту сохранения renderBranchRows
+          // уже самоисправил их в памяти, но не полагаемся на порядок вызовов.
+          if (clause.compare_to?.kind === 'attribute' && !ids.has(clause.compare_to.id)) {
             return `Условие правила классификации ссылается на несуществующий атрибут «${clause.compare_to.id}»`;
           }
         }
@@ -2551,35 +2387,9 @@ export class LimsView extends ItemView {
       classification: Array.isArray(m?.classification) ? m.classification : [],
       chart_configs: Array.isArray(m?.chart_configs) ? m.chart_configs : [],
       input_parameters: Array.isArray(m?.input_parameters) ? m.input_parameters : [],
-      presentation: m?.presentation && Array.isArray(m.presentation.sections) ? m.presentation : { sections: [] },
+      presentation: m?.presentation && Array.isArray(m.presentation.blocks) ? m.presentation : { blocks: [] },
       operator_form: m?.operator_form && Array.isArray(m.operator_form.fields) ? m.operator_form : { fields: [] },
     };
-  }
-
-  /** Синхронизирует поля представления с текущим списком атрибутов "на месте" —
-   * убирает записи об удалённых атрибутах из ВСЕХ секций, дописывает записи для
-   * новых атрибутов в последнюю секцию (создаёт секцию по умолчанию, если секций
-   * нет вовсе) — новый атрибут не должен "потеряться" из представления. Используется
-   * и при первом открытии формы, и после ИИ-черновика/загрузки атрибутов из JSON. */
-  private syncPresentationFieldsToAttrs(sections: PresentationSection[], attrs: MethodAttribute[]): void {
-    const validIds = new Set(attrs.map(a => a.id));
-    const seen = new Set<string>();
-    for (const sec of sections) {
-      sec.fields = sec.fields.filter(f => {
-        if (!validIds.has(f.attribute_id) || seen.has(f.attribute_id)) return false;
-        seen.add(f.attribute_id);
-        return true;
-      });
-    }
-    const newAttrs = attrs.filter(a => a.id && !seen.has(a.id));
-    if (newAttrs.length === 0) return;
-    if (sections.length === 0) {
-      sections.push({ id: `sec_${Date.now()}`, title: 'Показатели', fields: [] });
-    }
-    const last = sections[sections.length - 1];
-    for (const a of newAttrs) {
-      last.fields.push({ attribute_id: a.id, role: 'table', show_in_ui: true, show_in_excerpt: false, show_in_protocol: true });
-    }
   }
 
   /** Достаёт массив "сырых" атрибутов из вставленного JSON — три распознаваемых
@@ -2735,6 +2545,14 @@ export class LimsView extends ItemView {
   }
 }
 
+/** Возвращается renderMethodConfigForm — MethodConfigModal.close() использует
+ * это для защиты от потери несохранённых правок при случайном закрытии окна
+ * (крестик/Esc/клик вне модалки — все идут через close(), см. ниже). */
+export interface MethodConfigHandle {
+  isDirty(): boolean;
+  save(): Promise<boolean>;
+}
+
 /** Конфигуратор метода в отдельном окне (2026-08-22, по просьбе пользователя —
  * раньше форма разворачивалась прямо под карточкой метода в списке; «Сохранить»
  * вызывал полный renderMethods() списка, который стирал bodyEl вместе с этой
@@ -2744,6 +2562,7 @@ export class LimsView extends ItemView {
 class MethodConfigModal extends Modal {
   private view: LimsView;
   private methodId: number;
+  private handle: MethodConfigHandle | null = null;
 
   constructor(view: LimsView, methodId: number) {
     super(view.app);
@@ -2755,7 +2574,54 @@ class MethodConfigModal extends Modal {
   onOpen(): void {
     const method = this.view.plugin.methods.find(m => m.id === this.methodId);
     this.titleEl.setText(method ? `Конфигурация метода: ${method.code} — ${method.name || 'без названия'}` : 'Конфигурация метода');
-    this.view.renderMethodConfigForm(this.contentEl, this.methodId);
+    this.handle = this.view.renderMethodConfigForm(this.contentEl, this.methodId);
+  }
+
+  /** Перехватывает ЛЮБОЕ закрытие (крестик/Esc/клик вне модалки — Obsidian
+   * прогоняет их все через close()) — без этого правки терялись без
+   * предупреждения при случайном закрытии (прямой запрос пользователя,
+   * 2026-08-23: "нет защиты от выхода без сохранения, нужно сделать"). */
+  close(): void {
+    if (this.handle?.isDirty()) {
+      new UnsavedChangesModal(
+        this.app,
+        () => { void this.handle!.save().then(ok => { if (ok) super.close(); }); },
+        () => super.close(),
+      ).open();
+      return;
+    }
+    super.close();
+  }
+
+  onClose(): void {
+    this.contentEl.empty();
+  }
+}
+
+/** Три варианта при попытке закрыть конфигуратор метода с несохранёнными
+ * правками (2026-08-23) — сохранить/закрыть без сохранения/остаться. */
+class UnsavedChangesModal extends Modal {
+  private onSave: () => void;
+  private onDiscard: () => void;
+
+  constructor(app: App, onSave: () => void, onDiscard: () => void) {
+    super(app);
+    this.onSave = onSave;
+    this.onDiscard = onDiscard;
+  }
+
+  onOpen(): void {
+    this.titleEl.setText('Есть несохранённые изменения');
+    this.contentEl.createDiv({ cls: 'tn-lims-meta' }).setText(
+      'Сохранить изменения в конфигурации метода перед закрытием?',
+    );
+    const row = this.contentEl.createDiv({ cls: 'tn-lims-flex tn-lims-mt8' });
+    const saveBtn = row.createEl('button', { text: '💾 Сохранить и закрыть', cls: 'tn-btn tn-btn-primary' });
+    saveBtn.addEventListener('click', () => { this.close(); this.onSave(); });
+    const discardBtn = row.createEl('button', { text: 'Закрыть без сохранения', cls: 'tn-btn tn-btn-ghost' });
+    discardBtn.addEventListener('click', () => { this.close(); this.onDiscard(); });
+    const cancelBtn = row.createEl('button', { text: 'Отмена', cls: 'tn-btn tn-btn-ghost' });
+    cancelBtn.addEventListener('click', () => this.close());
   }
 
   onClose(): void {

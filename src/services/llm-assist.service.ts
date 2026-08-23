@@ -11,10 +11,7 @@ import type {
   ClassificationRule,
   ComparisonOperator,
   MethodAttribute,
-  MethodPresentation,
   Operand,
-  PresentationField,
-  PresentationSection,
 } from '../types/lims';
 
 const DSL_GRAMMAR = `Грамматика DSL формул lab-service (безопасный интерпретатор выражений — без eval/exec):
@@ -214,39 +211,6 @@ function sanitizeClassification(raw: unknown, renameMap: Map<string, string>): C
   return out;
 }
 
-/** Санитизация черновика представления — attribute_id, не входящие в validIds
- * (устаревшие/выдуманные ссылки), отбрасываются; атрибуты, которые ИИ не упомянул,
- * дописываются в конец (ничего из атрибутов не должно "потеряться" из представления).
- * ИИ пока не знает про role/секции/выписку (2026-08-22) — role всегда "table",
- * show_in_excerpt всегда false (пользователь донастроит вручную в редакторе). */
-function sanitizePresentationFields(raw: unknown, validIds: Set<string>): PresentationField[] {
-  const seen = new Set<string>();
-  const out: PresentationField[] = [];
-  if (Array.isArray(raw)) {
-    for (const item of raw) {
-      if (!item || typeof item !== 'object') continue;
-      const r = item as Record<string, unknown>;
-      const attribute_id = typeof r.attribute_id === 'string' ? r.attribute_id.trim() : '';
-      if (!attribute_id || !validIds.has(attribute_id) || seen.has(attribute_id)) continue;
-      seen.add(attribute_id);
-      out.push({
-        attribute_id,
-        label: typeof r.label === 'string' && r.label.trim() ? r.label.trim() : undefined,
-        role: 'table',
-        show_in_ui: r.show_in_ui !== false,
-        show_in_excerpt: false,
-        show_in_protocol: r.show_in_protocol !== false,
-      });
-    }
-  }
-  for (const id of validIds) {
-    if (!seen.has(id)) {
-      out.push({ attribute_id: id, role: 'table', show_in_ui: true, show_in_excerpt: false, show_in_protocol: true });
-    }
-  }
-  return out;
-}
-
 /** ИИ-помощник в написании формул конфигуратора методов (блок 1), а также в
  * черновике конфигурации метода целиком из текста стандарта. Прямой вызов
  * sbe-llm (простой stateless-шлюз) — без sbe-agent, тот не вызывается как сервис. */
@@ -402,34 +366,9 @@ ${existingList || '(пока нет)'}
     return { matched, drafted };
   }
 
-  /** Черновик представления (порядок/подписи/видимость столбцов в UI-таблице
-   * результатов и в протоколе) по уже сформированному черновику атрибутов —
-   * низкий риск (нет числовых значений), поэтому отдельный, более дешёвый вызов. */
-  async draftPresentation(attributes: MethodAttribute[]): Promise<MethodPresentation> {
-    const service = await this.llm();
-    const attrsList = attributes
-      .map(a => `- ${a.id} (${a.name}): ${a.data_type}, уровень ${a.level === 'aggregated' ? 'агрегированные результаты' : 'данные эксперимента'}`)
-      .join('\n');
-    const system = `Ты настраиваешь представление данных метода испытаний: порядок и подписи столбцов в таблице результатов (UI) и в протоколе испытаний.
-
-Формат поля представления (JSON): {"attribute_id": "id атрибута", "label": "подпись столбца (опц.)", "show_in_ui": true|false, "show_in_protocol": true|false}.
-Порядок элементов массива — порядок столбцов слева-направо.
-
-Атрибуты метода:
-${attrsList || '(атрибутов нет)'}
-
-По умолчанию показывай все атрибуты и в UI, и в протоколе, в логичном порядке: сначала данные эксперимента в порядке измерения, затем расчётные показатели, затем агрегированные/итоговые показатели и классификация.
-
-Верни ТОЛЬКО JSON-объект: {"fields": [...]}, без markdown-обёртки и пояснений.`;
-
-    const raw = await service.completeJson<{ fields?: unknown }>(
-      system, 'Сформируй представление для перечисленных атрибутов.', { model: this.resolveModel() },
-    );
-    const fields = sanitizePresentationFields(raw?.fields, new Set(attributes.map(a => a.id)));
-    // ИИ пока не знает про секции (2026-08-22) — весь черновик оборачивается в
-    // одну секцию "Показатели"; разбивку на тематические секции пользователь
-    // делает вручную в редакторе (отдельная, более тонкая задача на будущее).
-    const section: PresentationSection = { id: 'draft', title: 'Показатели', fields };
-    return { sections: fields.length > 0 ? [section] : [] };
-  }
+  // draftPresentation убран (2026-08-23) — с переходом на блочный редактор
+  // форматированного текста с плейсхолдерами ИИ не может разумно спроектировать
+  // документ (реквизиты/описания/юридический футер вперемешку с чипами) —
+  // пользователь строит блоки протокола только вручную. Черновик атрибутов и
+  // классификации (draftAttributesAndClassification выше) не затронут.
 }

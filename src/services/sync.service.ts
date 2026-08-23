@@ -15,7 +15,6 @@ import type {
   MethodConfig,
   PresentationKind,
   ProtocolResponse,
-  ShortViewSection,
 } from '../types/lims';
 
 /** Клиент lab-service для ЛИМС через JWT из ЦУП. */
@@ -409,11 +408,17 @@ export class LimsSyncService {
   }
 
   /** kind — вид вывода: "ui" (краткий), "excerpt" (выписка) или "protocol"
-   * (полный, по умолчанию — совпадает со старым поведением без выбора). */
-  async getProtocol(requestId: number, kind: PresentationKind = 'protocol'): Promise<ProtocolResponse> {
+   * (полный, по умолчанию — совпадает со старым поведением без выбора).
+   * format="html" — не тратить время на сборку DOCX (для карточки
+   * результатов/предпросмотра, docx_base64 в ответе будет пустой строкой). */
+  async getProtocol(
+    requestId: number,
+    kind: PresentationKind = 'protocol',
+    format: 'html' | 'full' = 'full',
+  ): Promise<ProtocolResponse> {
     const token = await this.getToken();
     const res = await this.request({
-      url: `${this.baseUrl}/api/lab/requests/${requestId}/protocol?template=${kind}`,
+      url: `${this.baseUrl}/api/lab/requests/${requestId}/protocol?template=${kind}&format=${format}`,
       method: 'POST',
       headers: { Authorization: `Bearer ${token}` },
     });
@@ -423,25 +428,6 @@ export class LimsSyncService {
     } catch (e: unknown) {
       console.warn('ЛИМС: не JSON в ответе protocol:', errorMessage(e));
       throw new Error('Сервер вернул не JSON при генерации протокола');
-    }
-  }
-
-  /** Короткий вид (секции, сгруппированные по конфигурации методa) — общая
-   * точка для карточки результатов ЛИМС и read-only блока в sbe-requests. */
-  async getShortView(requestId: number): Promise<ShortViewSection[]> {
-    const token = await this.getToken();
-    const res = await this.request({
-      url: `${this.baseUrl}/api/lab/requests/${requestId}/short-view`,
-      method: 'GET',
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    this.assertOk(res);
-    try {
-      const parsed = JSON.parse(res.text) as { sections?: ShortViewSection[] };
-      return parsed.sections ?? [];
-    } catch (e: unknown) {
-      console.warn('ЛИМС: не JSON в ответе short-view:', errorMessage(e));
-      throw new Error('Сервер вернул не JSON для короткого вида');
     }
   }
 

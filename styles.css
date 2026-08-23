@@ -921,3 +921,31 @@
   flex: 1 1 100%;
   width: 100%;
 }
+
+/* Блочный редактор представления (2026-08-23) — плейсхолдер-чип внутри
+ * форматированного текста + строка contenteditable, на которой он живёт. */
+.tn-lims-chip {
+  display: inline-block;
+  background: var(--tn-brand);
+  color: #fff;
+  border-radius: 4px;
+  padding: 0 6px;
+  margin: 0 1px;
+  font-size: 0.9em;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.tn-lims-rich-line {
+  border: 1px solid var(--tn-border);
+  border-radius: var(--tn-radius);
+  padding: 6px 8px;
+  min-height: 1.6em;
+  background: var(--tn-card);
+  margin-bottom: 6px;
+}
+
+.tn-lims-rich-line:focus {
+  outline: 2px solid var(--tn-brand);
+  outline-offset: -1px;
+}
