@@ -1,6 +1,16 @@
 package main
 
-import "testing"
+import (
+	"encoding/base64"
+	"strings"
+	"testing"
+)
+
+// buildMimeMessage — собирает сырое RFC822-сообщение из строк (CRLF, как в реальной
+// почте) для тестов extractMailTextAndAttachments — без похода в сеть/IMAP.
+func buildMimeMessage(lines ...string) []byte {
+	return []byte(strings.Join(lines, "\r\n"))
+}
 
 // Проверяет canonicalFieldNames/knownRawFields на реальных наборах raw-ключей писем
 // (Comb/Flam/FlamProp, см. json_attr.md и scripts/check_keys.js) — не полную логику
@@ -145,4 +155,212 @@ func TestSystemRequestFieldsCoversUniversalConcepts(t *testing.T) {
 			t.Errorf("%q — метод-специфичное содержание, не должно быть в systemRequestFields", canon)
 		}
 	}
+}
+
+// 2026-08-24: раньше письмо-вложение (реальное фото) читалось и тихо отбрасывалось на
+// этом же проходе MIME (никакого default-case не было) — email_ingest.go хранил только
+// yandex-ссылку из JSON, которая, как выяснилось, недоступна анонимно. Проверяем, что
+// вложение теперь действительно извлекается, а разбор текста/JSON не пострадал.
+func TestExtractMailTextAndAttachmentsCapturesAttachment(t *testing.T) {
+	photoBytes := []byte("fake-jpeg-bytes")
+	raw := buildMimeMessage(
+		`From: lab@example.com`,
+		`To: lab@example.com`,
+		`Content-Type: multipart/mixed; boundary="B1"`,
+		``,
+		`--B1`,
+		`Content-Type: text/plain; charset=utf-8`,
+		``,
+		`{"ID":"1","type":"result","photo_before":""}`,
+		`--B1`,
+		`Content-Type: image/jpeg; name="photo.jpg"`,
+		`Content-Disposition: attachment; filename="photo.jpg"`,
+		`Content-Transfer-Encoding: base64`,
+		``,
+		base64.StdEncoding.EncodeToString(photoBytes),
+		`--B1--`,
+		``,
+	)
+
+	text, attachments, err := extractMailTextAndAttachments(raw)
+	if err != nil {
+		t.Fatalf("extractMailTextAndAttachments: %v", err)
+	}
+	if !strings.Contains(text, `"ID":"1"`) {
+		t.Errorf("text extraction regressed: got %q", text)
+	}
+	if len(attachments) != 1 {
+		t.Fatalf("got %d attachments, want 1", len(attachments))
+	}
+	a := attachments[0]
+	if a.Filename != "photo.jpg" {
+		t.Errorf("Filename = %q, want %q", a.Filename, "photo.jpg")
+	}
+	if a.ContentType != "image/jpeg" {
+		t.Errorf("ContentType = %q, want %q", a.ContentType, "image/jpeg")
+	}
+	if string(a.Data) != string(photoBytes) {
+		t.Errorf("Data = %q, want %q (base64 decode of attachment failed)", a.Data, photoBytes)
+	}
+}
+
+// Вложение внутри вложенного multipart (multipart/mixed > multipart/related для текста,
+// сестринская часть — вложение на верхнем уровне) должно пробрасываться наверх, а не
+// теряться на рекурсии.
+func TestExtractMailTextAndAttachmentsNestedMultipart(t *testing.T) {
+	raw := buildMimeMessage(
+		`Content-Type: multipart/mixed; boundary="OUTER"`,
+		``,
+		`--OUTER`,
+		`Content-Type: multipart/related; boundary="INNER"`,
+		``,
+		`--INNER`,
+		`Content-Type: text/plain; charset=utf-8`,
+		``,
+		`{"ID":"2"}`,
+		`--INNER--`,
+		`--OUTER`,
+		`Content-Type: application/octet-stream; name="report.jpg"`,
+		`Content-Disposition: attachment; filename="report.jpg"`,
+		``,
+		`raw-bytes-no-encoding`,
+		`--OUTER--`,
+		``,
+	)
+
+	text, attachments, err := extractMailTextAndAttachments(raw)
+	if err != nil {
+		t.Fatalf("extractMailTextAndAttachments: %v", err)
+	}
+	if !strings.Contains(text, `"ID":"2"`) {
+		t.Errorf("nested text extraction regressed: got %q", text)
+	}
+	if len(attachments) != 1 || attachments[0].Filename != "report.jpg" {
+		t.Fatalf("got %+v, want exactly one attachment named report.jpg", attachments)
+	}
+}
+
+// Часть без имени файла (ни Content-Disposition, ни Content-Type name=) — не текст,
+// значит не JSON-полезная нагрузка, но и не опознаваемое вложение — не сохраняем (не
+// гадаем об имени).
+func TestExtractMailTextAndAttachmentsUnnamedPartIgnored(t *testing.T) {
+	raw := buildMimeMessage(
+		`Content-Type: multipart/mixed; boundary="B1"`,
+		``,
+		`--B1`,
+		`Content-Type: text/plain`,
+		``,
+		`{"ID":"3"}`,
+		`--B1`,
+		`Content-Type: application/octet-stream`,
+		``,
+		`no-name-no-disposition`,
+		`--B1--`,
+		``,
+	)
+
+	_, attachments, err := extractMailTextAndAttachments(raw)
+	if err != nil {
+		t.Fatalf("extractMailTextAndAttachments: %v", err)
+	}
+	if len(attachments) != 0 {
+		t.Errorf("got %d attachments, want 0 (unnamed part must be ignored)", len(attachments))
+	}
+}
+
+// Реальная ссылка из письма Comb этой сессии (см. AGENTS.md "фото в протоколе") — конечный
+// сегмент пути должен совпасть с тем, что реально пришло вложением.
+func TestExtractYandexFormsFilename(t *testing.T) {
+	cases := []struct {
+		url      string
+		wantName string
+		wantOK   bool
+	}{
+		{
+			"https://forms.yandex.ru/cloud/files?path=%2F4488571%2F6a8c1a2f902902b1f7c9d9a4_17875666329476692133998677536992.jpg",
+			"6a8c1a2f902902b1f7c9d9a4_17875666329476692133998677536992.jpg", true,
+		},
+		{"", "", false},
+		{"не-url", "", false},
+		{"https://forms.yandex.ru/cloud/files?other=1", "", false},
+	}
+	for _, c := range cases {
+		name, ok := extractYandexFormsFilename(c.url)
+		if name != c.wantName || ok != c.wantOK {
+			t.Errorf("extractYandexFormsFilename(%q) = (%q, %v), want (%q, %v)", c.url, name, ok, c.wantName, c.wantOK)
+		}
+	}
+}
+
+func TestMatchAttachmentByFilename(t *testing.T) {
+	attachments := []mailAttachment{
+		{Filename: "a.jpg", Data: []byte("A")},
+		{Filename: "b.jpg", Data: []byte("B")},
+		{Filename: "dup.jpg", Data: []byte("C1")},
+		{Filename: "dup.jpg", Data: []byte("C2")},
+	}
+	if got, ok := matchAttachmentByFilename("a.jpg", attachments); !ok || string(got.Data) != "A" {
+		t.Errorf("exact match: got (%+v, %v), want (a.jpg/A, true)", got, ok)
+	}
+	if _, ok := matchAttachmentByFilename("missing.jpg", attachments); ok {
+		t.Errorf("no match should return false")
+	}
+	if _, ok := matchAttachmentByFilename("dup.jpg", attachments); ok {
+		t.Errorf("ambiguous match (2 attachments, same name) should return false, not guess")
+	}
+}
+
+// Регресс на реальных данных (external_id=698, живой прогон fetch-mail-photos,
+// 2026-08-24): вложение письма несёт ОРИГИНАЛЬНОЕ имя файла, а ссылка в JSON — то же имя с
+// добавленным Яндексом хеш-префиксом "<hex>_<имя>". Точное совпадение здесь ложно
+// провалилось бы — нужен хвостовой матч.
+func TestMatchAttachmentByFilenameYandexHashPrefix(t *testing.T) {
+	attachments := []mailAttachment{
+		{Filename: "17875666329476692133998677536992.jpg", Data: []byte("BEFORE")},
+		{Filename: "178756959825993379636321324362.jpg", Data: []byte("AFTER")},
+	}
+	got, ok := matchAttachmentByFilename("6a8c1a2f902902b1f7c9d9a4_17875666329476692133998677536992.jpg", attachments)
+	if !ok || string(got.Data) != "BEFORE" {
+		t.Fatalf("got (%+v, %v), want the BEFORE attachment matched via suffix", got, ok)
+	}
+	got, ok = matchAttachmentByFilename("6a8c25c3493639ac32d46748_178756959825993379636321324362.jpg", attachments)
+	if !ok || string(got.Data) != "AFTER" {
+		t.Fatalf("got (%+v, %v), want the AFTER attachment matched via suffix", got, ok)
+	}
+}
+
+func TestMatchPhotoFields(t *testing.T) {
+	beforeURL := "https://forms.yandex.ru/cloud/files?path=%2Fx%2Fbefore.jpg"
+	afterURL := "https://forms.yandex.ru/cloud/files?path=%2Fx%2Fafter.jpg"
+	attachments := []mailAttachment{
+		{Filename: "before.jpg", Data: []byte("BEFORE")},
+		{Filename: "after.jpg", Data: []byte("AFTER")},
+	}
+
+	t.Run("both fields match", func(t *testing.T) {
+		payload := map[string]any{"photo_before": beforeURL, "photo_after": afterURL}
+		got := matchPhotoFields(payload, attachments)
+		if len(got) != 2 || string(got["photo_before"].Data) != "BEFORE" || string(got["photo_after"].Data) != "AFTER" {
+			t.Errorf("got %+v", got)
+		}
+	})
+
+	t.Run("empty field absent from result", func(t *testing.T) {
+		payload := map[string]any{"photo_before": beforeURL, "photo_after": ""}
+		got := matchPhotoFields(payload, attachments)
+		if _, ok := got["photo_after"]; ok {
+			t.Errorf("photo_after was empty in payload, must not appear in result")
+		}
+		if _, ok := got["photo_before"]; !ok {
+			t.Errorf("photo_before should have matched")
+		}
+	})
+
+	t.Run("no attachments at all, no panic", func(t *testing.T) {
+		payload := map[string]any{"photo_before": beforeURL, "photo_after": afterURL}
+		got := matchPhotoFields(payload, nil)
+		if len(got) != 0 {
+			t.Errorf("got %+v, want empty (no attachments to match against)", got)
+		}
+	})
 }

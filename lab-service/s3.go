@@ -101,6 +101,32 @@ func (s *S3Store) Put(ctx context.Context, key string, data []byte) (int64, stri
 	return int64(len(data)), fmt.Sprintf("%s/%s", s.publicBase, key), nil
 }
 
+// Link выпускает временную подписанную (presigned) ссылку на объект — бакет sbe-doc НЕ
+// публичный (прямой s.publicBase+key отдаёт 403, подтверждено прямым HTTP-тестом,
+// 2026-08-24, см. AGENTS.md "фото в протоколе"), но presigned-ссылка на GET (НЕ на HEAD —
+// у этого Ceph-гейтвея presigned HEAD почему-то 403, GET подтверждённо отдаёт 200 с
+// верным Content-Type) работает. rclone у этого бэкенда ограничивает срок максимум 1
+// неделей ("Reducing expiry to 1w") — вызывающая сторона (handleFileRedirect) выпускает
+// свежую ссылку на КАЖДЫЙ запрос, поэтому сама ссылка никогда не хранится дольше своего
+// использования.
+func (s *S3Store) Link(ctx context.Context, key string, expiry time.Duration) (string, error) {
+	cmd := s.rcloneArgs("link", "--expire", expiry.String(), s.remote(key))
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("rclone link: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	// rclone печатает NOTICE-строки (лог) вперемешку с самой ссылкой в
+	// CombinedOutput — ищем строку, которая реально начинается с "http", а не
+	// полагаемся на то, что ссылка обязательно последняя.
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "http") {
+			return line, nil
+		}
+	}
+	return "", fmt.Errorf("rclone link: no URL in output: %s", strings.TrimSpace(string(out)))
+}
+
 // Get скачивает файл из S3 и возвращает содержимое.
 func (s *S3Store) Get(ctx context.Context, key string) ([]byte, error) {
 	tmp, err := os.CreateTemp("", "rclone-download-*")

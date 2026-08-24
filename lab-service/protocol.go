@@ -7,7 +7,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
+	"image"
+	_ "image/jpeg" // регистрирует декодер для image.DecodeConfig (пропорции фото в DOCX)
+	_ "image/png"
+	"log"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -53,6 +58,12 @@ type placeholderCtx struct {
 	series          []map[string]any
 	stats           map[string]any
 	agg             map[string]any
+	// photoRegistry — только при рендере DOCX (2026-08-24, см. docxPhotoRegistry): при
+	// рендере HTML остаётся nil, фото-атрибуты рендерятся прямой ссылкой (renderTableHTML/
+	// renderInlineHTML), сеть не нужна. Общий на ВЕСЬ протокол объект (передаётся всем
+	// методам одного документа), а не по одному на метод — иначе relationship id/имена
+	// media-файлов пересеклись бы между методами.
+	photoRegistry *docxPhotoRegistry
 }
 
 // showInKind — какой из трёх флагов блока проверять для запрошенного вида
@@ -512,6 +523,15 @@ func headingSizeHalfPoints(level int) string {
 func renderInlineDocxRuns(ctx *placeholderCtx, nodes []InlineNode, headingLevel int) string {
 	var b strings.Builder
 	for _, n := range nodes {
+		// Плейсхолдер атрибута data_type="photo" вне таблицы (2026-08-24) — та же логика,
+		// что уже в renderInlineHTML: значение — ссылка на фото, вставляем как реальную
+		// картинку (<w:drawing>), а не как текст ссылки.
+		if n.Type == "placeholder" && n.Source == "attribute" && ctx.attrsByID[n.AttributeID].DataType == "photo" {
+			if drawing := ctx.photoRegistry.register(resolvePlaceholder(ctx, n)); drawing != "" {
+				b.WriteString(drawing)
+			}
+			continue
+		}
 		text := n.Text
 		if n.Type == "placeholder" {
 			text = resolvePlaceholder(ctx, n)
@@ -562,11 +582,21 @@ func renderTableDocx(ctx *placeholderCtx, columns []TableColumn) string {
 	for i, sv := range ctx.series {
 		b.WriteString(`<w:tr>`)
 		for _, c := range columns {
-			val := fmtVal(sv[c.AttributeID])
 			if c.Kind == "series_no" {
-				val = strconv.Itoa(i + 1)
+				fmt.Fprintf(&b, `<w:tc>%s</w:tc>`, docxCenteredParagraph("", strconv.Itoa(i+1)))
+				continue
 			}
-			fmt.Fprintf(&b, `<w:tc>%s</w:tc>`, docxCenteredParagraph("", val))
+			if ctx.attrsByID[c.AttributeID].DataType == "photo" {
+				if url, ok := sv[c.AttributeID].(string); ok {
+					if drawing := ctx.photoRegistry.register(url); drawing != "" {
+						fmt.Fprintf(&b, `<w:tc><w:p><w:pPr><w:jc w:val="center"/></w:pPr>%s</w:p></w:tc>`, drawing)
+						continue
+					}
+				}
+				b.WriteString(`<w:tc><w:p/></w:tc>`)
+				continue
+			}
+			fmt.Fprintf(&b, `<w:tc>%s</w:tc>`, docxCenteredParagraph("", fmtVal(sv[c.AttributeID])))
 		}
 		b.WriteString(`</w:tr>`)
 	}
@@ -627,8 +657,120 @@ func renderNodeDocx(ctx *placeholderCtx, n RichNode) string {
 	}
 }
 
-// DOCX-writer не встраивает изображения (нет media-частей/relationships) —
-// график секции, как и фото внутри таблиц, в DOCX только текстовой пометкой.
+// docxImage — одно изображение, которое войдёт в итоговый .docx как word/media/*
+// (2026-08-24, см. AGENTS.md "фото в протоколе" — до этого фикса DOCX фото не
+// встраивал вовсе, только текстовую пометку).
+type docxImage struct {
+	relID       string
+	mediaName   string
+	contentType string
+	data        []byte
+}
+
+const emuPerInch = 914400
+
+// docxPhotoRegistry собирает фото-вложения, встречающиеся при рендере DOCX одного
+// протокола (общий на все методы документа — relationship id/имена media-файлов не
+// должны пересекаться между методами). register вызывается из renderTableDocx/
+// renderInlineDocxRuns при встрече атрибута data_type="photo".
+type docxPhotoRegistry struct {
+	ctx    context.Context
+	s3     *S3Store
+	images []docxImage
+}
+
+// register скачивает фото по значению атрибута (ссылка вида .../api/lab/file-redirect?
+// key=... — см. files.go uploadFileBytes) и возвращает готовый <w:drawing> XML для
+// вставки в run. "" — если значение пустое/не удалось разобрать ключ/не удалось
+// скачать (фото просто не появится в этом месте документа, остальной рендер не рвётся).
+func (reg *docxPhotoRegistry) register(rawURL string) string {
+	if reg == nil || strings.TrimSpace(rawURL) == "" {
+		return ""
+	}
+	key, ok := fileRedirectKey(rawURL)
+	if !ok {
+		return ""
+	}
+	data, err := reg.s3.Get(reg.ctx, key)
+	if err != nil {
+		log.Printf("docx photo: s3 get %q: %v", key, err)
+		return ""
+	}
+	ext, contentType := "jpg", "image/jpeg"
+	if strings.HasSuffix(strings.ToLower(key), ".png") {
+		ext, contentType = "png", "image/png"
+	}
+	idx := len(reg.images) + 1
+	relID := fmt.Sprintf("rIdPhoto%d", idx)
+	img := docxImage{
+		relID:       relID,
+		mediaName:   fmt.Sprintf("image%d.%s", idx, ext),
+		contentType: contentType,
+		data:        data,
+	}
+	reg.images = append(reg.images, img)
+	cx, cy := docxImageExtent(data)
+	return docxDrawingXML(relID, cx, cy)
+}
+
+// fileRedirectKey достаёт S3-ключ из ссылки вида ".../api/lab/file-redirect?key=..." —
+// та же ссылка, что хранится в values/measurement_results (uploadFileBytes, files.go).
+func fileRedirectKey(rawURL string) (string, bool) {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return "", false
+	}
+	key := u.Query().Get("key")
+	if key == "" {
+		return "", false
+	}
+	return key, true
+}
+
+// docxImageExtent — размер картинки в EMU (1 дюйм = 914400 EMU) в квадратной рамке
+// максимум 2х2 дюйма, с сохранением пропорций (тот же принцип, что max-width/max-height
+// в HTML-рендере той же фото-ячейки, см. renderTableHTML) — если размеры прочитать не
+// удалось, отдаём квадрат по умолчанию, не рвём документ.
+func docxImageExtent(data []byte) (cx, cy int64) {
+	const maxBox = int64(emuPerInch * 2)
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil || cfg.Width <= 0 || cfg.Height <= 0 {
+		return maxBox, maxBox
+	}
+	w, h := float64(cfg.Width), float64(cfg.Height)
+	scale := float64(maxBox) / w
+	if hScale := float64(maxBox) / h; hScale < scale {
+		scale = hScale
+	}
+	return int64(w * scale), int64(h * scale)
+}
+
+// docxDrawingXML — <w:r><w:drawing>...</w:drawing></w:r> с встроенным изображением по
+// relationship id. Пространства имён wp/a/pic/r объявлены прямо на использующих их
+// элементах (не в корневом <w:document>, чтобы не трогать остальной, уже стабильный,
+// generator) — валидно для OOXML, в отличие от HTML там разрешено объявлять namespace
+// на любом элементе, не только на корне.
+func docxDrawingXML(relID string, cx, cy int64) string {
+	return fmt.Sprintf(
+		`<w:r><w:drawing>`+
+			`<wp:inline distT="0" distB="0" distL="0" distR="0" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing">`+
+			`<wp:extent cx="%d" cy="%d"/>`+
+			`<wp:docPr id="0" name="Photo"/>`+
+			`<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">`+
+			`<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">`+
+			`<pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">`+
+			`<pic:nvPicPr><pic:cNvPr id="0" name="Photo"/><pic:cNvPicPr/></pic:nvPicPr>`+
+			`<pic:blipFill><a:blip xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="%s"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>`+
+			`<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="%d" cy="%d"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>`+
+			`</pic:pic></a:graphicData></a:graphic>`+
+			`</wp:inline></w:drawing></w:r>`,
+		cx, cy, relID, cx, cy)
+}
+
+// DOCX-writer раньше не встраивал изображения вовсе (нет media-частей/relationships) —
+// график секции по-прежнему только текстовой пометкой (не запрошено — фото, не графики,
+// см. AGENTS.md "фото в протоколе", 2026-08-24); фото внутри таблиц/инлайн — теперь
+// реальные <w:drawing>, см. docxPhotoRegistry.
 func renderBlockChartDocx(doc *strings.Builder, m protocolMethod, chartID string) {
 	if chartID == "" {
 		return
@@ -645,7 +787,17 @@ func renderBlockChartDocx(doc *strings.Builder, m protocolMethod, chartID string
 		xmlEscape(fmt.Sprintf("[График: %s — см. HTML-версию]", title)))
 }
 
-func protocolDocx(p *protocolData, kind string) ([]byte, error) {
+func (s *Server) protocolDocx(ctx context.Context, p *protocolData, kind string) ([]byte, error) {
+	// photoRegistry общий на весь документ (2026-08-24) — назначается КАЖДОМУ методу
+	// протокола ДО рендера, иначе фото первого метода получили бы rIdPhoto1/image1, а
+	// фото второго метода — те же id, если бы у каждого была своя нумерация.
+	photoRegistry := &docxPhotoRegistry{ctx: ctx, s3: s.s3}
+	for i := range p.Methods {
+		if p.Methods[i].Ctx != nil {
+			p.Methods[i].Ctx.photoRegistry = photoRegistry
+		}
+	}
+
 	var doc strings.Builder
 	doc.WriteString(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>`)
 	doc.WriteString(`<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">`)
@@ -678,14 +830,27 @@ func protocolDocx(p *protocolData, kind string) ([]byte, error) {
 	if _, err := w.Write([]byte(doc.String())); err != nil {
 		return nil, err
 	}
-	ct, err := zw.Create("[Content_Types].xml")
+	ctFile, err := zw.Create("[Content_Types].xml")
 	if err != nil {
 		return nil, err
 	}
-	ct.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>` +
+	// Extension-дефолты для встреченных типов фото (2026-08-24) — без этого Word не
+	// знает, как открывать части word/media/*.jpg|png (см. docxPhotoRegistry).
+	var extraContentTypes strings.Builder
+	seenExt := map[string]bool{}
+	for _, img := range photoRegistry.images {
+		ext := strings.TrimPrefix(img.mediaName[strings.LastIndex(img.mediaName, "."):], ".")
+		if seenExt[ext] {
+			continue
+		}
+		seenExt[ext] = true
+		fmt.Fprintf(&extraContentTypes, `<Default Extension="%s" ContentType="%s"/>`, ext, img.contentType)
+	}
+	ctFile.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>` +
 		`<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">` +
 		`<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>` +
 		`<Default Extension="xml" ContentType="application/xml"/>` +
+		extraContentTypes.String() +
 		`<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>` +
 		`</Types>`))
 	// _rels/.rels (2026-08-24) — ОБЯЗАТЕЛЬНАЯ часть пакета OPC/OOXML: без неё
@@ -704,17 +869,37 @@ func protocolDocx(p *protocolData, kind string) ([]byte, error) {
 		`</Relationships>`)); err != nil {
 		return nil, err
 	}
-	// word/_rels/document.xml.rels — у document.xml нет внешних ссылок
-	// (изображений/styles.xml/numbering.xml — сознательно не реализованы), но
-	// пустой rels-файл части — общепринятая практика, некоторые читалки его
-	// ожидают даже при отсутствии реальных связей.
+	// word/_rels/document.xml.rels — раньше всегда пустой (styles.xml/numbering.xml
+	// сознательно не реализованы), теперь — по одной связи на каждое встреченное фото
+	// (см. docxPhotoRegistry.register, r:embed в docxDrawingXML ссылается именно на
+	// эти Id). Пустой rels-файл части — общепринятая практика, читалки его ждут даже
+	// при отсутствии реальных связей, поэтому пишем его всегда, фото или нет.
+	var photoRels strings.Builder
+	for _, img := range photoRegistry.images {
+		fmt.Fprintf(&photoRels, `<Relationship Id="%s" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/%s"/>`,
+			img.relID, img.mediaName)
+	}
 	docRels, err := zw.Create("word/_rels/document.xml.rels")
 	if err != nil {
 		return nil, err
 	}
 	if _, err := docRels.Write([]byte(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
-		`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>`)); err != nil {
+		`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+		photoRels.String() +
+		`</Relationships>`)); err != nil {
 		return nil, err
+	}
+	// word/media/* — сами байты фото (2026-08-24) — без этой части relationship выше
+	// ссылался бы в никуда, Word отказался бы открыть документ как повреждённый (тот
+	// же класс ошибки, что уже был описан для _rels/.rels выше).
+	for _, img := range photoRegistry.images {
+		mediaPart, err := zw.Create("word/media/" + img.mediaName)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := mediaPart.Write(img.data); err != nil {
+			return nil, err
+		}
 	}
 	if err := zw.Close(); err != nil {
 		return nil, err
@@ -900,7 +1085,7 @@ func (s *Server) handleProtocol(w http.ResponseWriter, r *http.Request) {
 		"generated_at": time.Now().UTC().Format(time.RFC3339),
 	}
 	if formatFromQuery(r) != "html" {
-		docxBytes, err := protocolDocx(p, kind)
+		docxBytes, err := s.protocolDocx(r.Context(), p, kind)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "docx: " + err.Error()})
 			return

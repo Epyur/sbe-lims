@@ -70,6 +70,16 @@ func main() {
 		return
 	}
 
+	// Одноразовый режим восстановления фото уже принятой заявки (2026-08-24, см.
+	// mail_fetch_by_id.go runFetchMailPhotos) — НЕ вызывает processMessage/saveResultSeries
+	// (fetch-mail не идемпотентен), только печатает получившиеся URL для ручного SQL-патча.
+	if len(os.Args) > 1 && os.Args[1] == "fetch-mail-photos" {
+		fetchCtx, fetchCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer fetchCancel()
+		runFetchMailPhotos(fetchCtx, s, os.Args[2:])
+		return
+	}
+
 	if err := s.migrate(ctx); err != nil {
 		log.Fatalf("migrate: %v", err)
 	}
@@ -130,6 +140,10 @@ func main() {
 	// Файлы (S3 через rclone)
 	mux.HandleFunc("POST /api/lab/file", s.requirePerm("editor")(s.handleUploadFile))
 	mux.HandleFunc("GET /api/lab/file", s.requirePerm("viewer")(s.handleDownloadFile))
+	// Без requirePerm (2026-08-24, см. files.go handleFileRedirect) — <img src> в HTML
+	// протокола/выписки не может приложить Authorization-заголовок; защита — случайность
+	// ключа объекта, не JWT.
+	mux.HandleFunc("GET /api/lab/file-redirect", s.handleFileRedirect)
 
 	// Права доступа
 	mux.HandleFunc("GET /api/lab/permissions/me", s.requirePerm("viewer")(s.handleMyPermission))
@@ -403,6 +417,10 @@ func (s *Server) migrate(ctx context.Context) error {
 			attempts INT NOT NULL DEFAULT 0,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 		)`,
+		// Вложения письма (фото), буферизованного до появления заявки (2026-08-24) — без
+		// этой колонки retryPendingResults применял бы такое письмо уже без фото (см.
+		// AGENTS.md "фото в протоколе"). '[]' — письма, буферизованные до этого фикса.
+		`ALTER TABLE email_ingest_pending_results ADD COLUMN IF NOT EXISTS attachments JSONB NOT NULL DEFAULT '[]'`,
 		// Метод теперь может принадлежать НЕСКОЛЬКИМ лабораториям (по требованию
 		// пользователя, 2026-08-19) — старая колонка methods.lab_id (1:1) больше не
 		// пишется новым кодом, но НЕ удаляется (как request_methods в декомпозиции

@@ -3,6 +3,7 @@ package main
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"encoding/xml"
 	"io"
 	"strings"
@@ -268,7 +269,9 @@ func TestProtocolDocxIsValidOOXMLPackage(t *testing.T) {
 		}},
 		Ctx: &placeholderCtx{req: req, series: []map[string]any{{}}},
 	}}}
-	data, err := protocolDocx(p, "protocol")
+	// s3 не используется этим фикстуром (нет data_type="photo" колонок/плейсхолдеров) —
+	// nil-Server safe, docxPhotoRegistry.register сюда просто не дойдёт.
+	data, err := (&Server{}).protocolDocx(context.Background(), p, "protocol")
 	if err != nil {
 		t.Fatalf("protocolDocx: %v", err)
 	}
@@ -317,6 +320,53 @@ func keysOf(m map[string][]byte) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// 2026-08-24: значение фото-атрибута — ссылка на handleFileRedirect (files.go
+// uploadFileBytes), не прямой S3-адрес (бакет не публичный) — docxPhotoRegistry должен
+// извлекать из неё S3-ключ, чтобы скачать байты напрямую через S3Store.Get.
+func TestFileRedirectKey(t *testing.T) {
+	cases := []struct {
+		url     string
+		wantKey string
+		wantOK  bool
+	}{
+		{"https://epyur.fvds.ru/api/lab/file-redirect?key=lab%2Fabc%2Fmain-photo.jpg", "lab/abc/main-photo.jpg", true},
+		{"", "", false},
+		{"не-url", "", false},
+		{"https://epyur.fvds.ru/api/lab/file-redirect?other=1", "", false},
+	}
+	for _, c := range cases {
+		key, ok := fileRedirectKey(c.url)
+		if key != c.wantKey || ok != c.wantOK {
+			t.Errorf("fileRedirectKey(%q) = (%q, %v), want (%q, %v)", c.url, key, ok, c.wantKey, c.wantOK)
+		}
+	}
+}
+
+// Пропорции фото в DOCX (2026-08-24) — квадратная рамка максимум 2х2 дюйма, но реальный
+// прямоугольник должен сохранять исходное соотношение сторон, а не растягиваться в
+// квадрат (иначе фото в протоколе выглядит искажённым).
+func TestDocxImageExtentPreservesAspectRatio(t *testing.T) {
+	// 1x1 png (валидный минимальный PNG) — DecodeConfig должен прочитать 1x1 без ошибки.
+	onePxPNG := []byte{
+		0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+		0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
+		0x89, 0x00, 0x00, 0x00, 0x0a, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x00, 0x01, 0x00, 0x00,
+		0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae,
+		0x42, 0x60, 0x82,
+	}
+	cx, cy := docxImageExtent(onePxPNG)
+	if cx != int64(emuPerInch*2) || cy != int64(emuPerInch*2) {
+		t.Errorf("1x1 (квадрат) должен заполнить всю рамку 2x2in: cx=%d cy=%d, want %d/%d", cx, cy, emuPerInch*2, emuPerInch*2)
+	}
+
+	// Нераспознанные байты — не удалось прочитать размеры, отдаём квадрат по умолчанию,
+	// не паникуем и не возвращаем 0x0 (Word отказался бы открывать нулевой <wp:extent>).
+	cx, cy = docxImageExtent([]byte("not an image"))
+	if cx <= 0 || cy <= 0 {
+		t.Errorf("нераспознанные байты должны дать безопасный fallback, не 0: cx=%d cy=%d", cx, cy)
+	}
 }
 
 func TestProtocolHTMLTableCentered(t *testing.T) {

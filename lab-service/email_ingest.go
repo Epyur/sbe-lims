@@ -14,7 +14,9 @@ import (
 	"mime/multipart"
 	"mime/quotedprintable"
 	"net/mail"
+	"net/url"
 	"os"
+	"path"
 	"regexp"
 	"strconv"
 	"strings"
@@ -204,7 +206,7 @@ func (s *Server) runIngestCycle(ctx context.Context, cfg *emailIngestConfig) err
 			log.Printf("email ingest: folder %s: %v", folder, err)
 		}
 	}
-	s.retryPendingResults(ctx)
+	s.retryPendingResults(ctx, cfg)
 	return nil
 }
 
@@ -287,7 +289,7 @@ func (s *Server) processMessage(ctx context.Context, folder string, cfg *emailIn
 		log.Printf("email ingest: %s: read body: %v", folder, err)
 		return
 	}
-	text, err := extractMailText(raw)
+	text, attachments, err := extractMailTextAndAttachments(raw)
 	if err != nil {
 		s.recordProcessed(ctx, dedupKey, folder, "error", nil, 0, "extract text: "+err.Error())
 		return
@@ -308,7 +310,7 @@ func (s *Server) processMessage(ctx context.Context, folder string, cfg *emailIn
 			s.recordProcessed(ctx, dedupKey, folder, "skipped_signal", payload, 0, "")
 			return
 		}
-		s.applyResultEmail(ctx, cfg, dedupKey, folder, payload)
+		s.applyResultEmail(ctx, cfg, dedupKey, folder, payload, attachments)
 	default:
 		s.recordProcessed(ctx, dedupKey, folder, "error", payload, 0, fmt.Sprintf("unknown type %q", typ))
 	}
@@ -499,7 +501,7 @@ func mapEmailPriority(raw string) string {
 // ---- applyResultEmail (папки Comb/Flam/FlamProp) ----
 
 func (s *Server) applyResultEmail(ctx context.Context, cfg *emailIngestConfig,
-	dedupKey, folder string, payload map[string]any) {
+	dedupKey, folder string, payload map[string]any, attachments []mailAttachment) {
 	externalID := idToString(payload["ID"])
 	if externalID == "" {
 		s.recordProcessed(ctx, dedupKey, folder, "error", payload, 0, "missing ID field")
@@ -518,7 +520,7 @@ func (s *Server) applyResultEmail(ctx context.Context, cfg *emailIngestConfig,
 	if errors.Is(err, pgx.ErrNoRows) {
 		// заявка ещё не пришла (или не придёт) — буферизуем, retryPendingResults
 		// подхватит её в одном из следующих циклов (см. спеку).
-		s.enqueuePendingResult(ctx, externalID, methodID, payload)
+		s.enqueuePendingResult(ctx, externalID, methodID, payload, attachments)
 		s.recordProcessed(ctx, dedupKey, folder, "result", payload, 0, "pending: request not found yet")
 		return
 	}
@@ -527,7 +529,7 @@ func (s *Server) applyResultEmail(ctx context.Context, cfg *emailIngestConfig,
 		return
 	}
 
-	if err := s.applyResultPayload(ctx, requestID, methodID, payload); err != nil {
+	if err := s.applyResultPayload(ctx, requestID, methodID, payload, cfg, attachments); err != nil {
 		s.recordProcessed(ctx, dedupKey, folder, "error", payload, requestID, "apply result: "+err.Error())
 		return
 	}
@@ -571,7 +573,8 @@ var systemRequestFields = map[string]bool{
 	"amb_temp": true, "amb_pres": true, "amb_moist": true,
 }
 
-func (s *Server) applyResultPayload(ctx context.Context, requestID, methodID int64, payload map[string]any) error {
+func (s *Server) applyResultPayload(ctx context.Context, requestID, methodID int64, payload map[string]any,
+	cfg *emailIngestConfig, attachments []mailAttachment) error {
 	// synonyms настроены в конфигураторе метода (per-атрибут, см. MethodAttribute.
 	// Synonyms) — проверяются раньше глобальных canonicalFieldNames/knownRawFields,
 	// поскольку это осознанная настройка конкретного атрибута конкретного метода.
@@ -589,11 +592,22 @@ func (s *Server) applyResultPayload(ctx context.Context, requestID, methodID int
 	if err != nil {
 		declaredAttrs = nil // не критично — см. ниже, при nil фильтр не применяется
 	}
+	// photoURLs — фото-вложения письма, сопоставленные с photo_before/photo_after и
+	// загруженные в наше объектное хранилище (2026-08-24) — заменяют яндекс-ссылку
+	// из payload (недоступна анонимно) везде, где она использовалась бы ниже.
+	photoURLs := s.resolvePhotoAttachments(ctx, cfg, requestID, payload, attachments)
 	values := map[string]any{}
 	sysFields := map[string]any{}
 	for k, v := range payload {
 		if resultMetaFields[k] {
 			continue
+		}
+		if k == "photo_before" || k == "photo_after" {
+			url, ok := photoURLs[k]
+			if !ok {
+				continue // вложение не сопоставилось/не загрузилось — не пишем мёртвую ссылку
+			}
+			v = url
 		}
 		key, known := resolveResultKey(k, synonyms)
 		if !known {
@@ -613,8 +627,8 @@ func (s *Server) applyResultPayload(ctx context.Context, requestID, methodID int
 			log.Printf("email ingest: request %d: не удалось записать системные поля: %v", requestID, err)
 		}
 	}
-	photoBefore := stringField(payload, "photo_before")
-	photoAfter := stringField(payload, "photo_after")
+	photoBefore := photoURLs["photo_before"]
+	photoAfter := photoURLs["photo_after"]
 	_, _, err = s.saveResultSeries(ctx, requestID, methodID, 0, 0, values, photoBefore, photoAfter)
 	return err
 }
@@ -657,15 +671,24 @@ func (s *Server) applyRequestSystemFields(ctx context.Context, requestID int64, 
 	return err
 }
 
-func (s *Server) enqueuePendingResult(ctx context.Context, externalID string, methodID int64, payload map[string]any) {
+func (s *Server) enqueuePendingResult(ctx context.Context, externalID string, methodID int64,
+	payload map[string]any, attachments []mailAttachment) {
 	payloadJSON, err := json.Marshal(payload)
 	if err != nil {
 		log.Printf("email ingest: marshal pending payload: %v", err)
 		return
 	}
+	// attachments сериализуются вместе с payload (2026-08-24) — иначе фото письма-
+	// результата, пришедшего раньше самой заявки, терялись бы к моменту retryPendingResults
+	// (Data []byte кодируется encoding/json как base64 автоматически).
+	attachmentsJSON, err := json.Marshal(attachments)
+	if err != nil {
+		log.Printf("email ingest: marshal pending attachments: %v", err)
+		attachmentsJSON = []byte("[]")
+	}
 	if _, err := s.pool.Exec(ctx, `
-INSERT INTO email_ingest_pending_results (external_id, method_id, payload)
-VALUES ($1, $2, $3::jsonb)`, externalID, methodID, string(payloadJSON)); err != nil {
+INSERT INTO email_ingest_pending_results (external_id, method_id, payload, attachments)
+VALUES ($1, $2, $3::jsonb, $4::jsonb)`, externalID, methodID, string(payloadJSON), string(attachmentsJSON)); err != nil {
 		log.Printf("email ingest: enqueue pending result: %v", err)
 	}
 }
@@ -674,31 +697,35 @@ VALUES ($1, $2, $3::jsonb)`, externalID, methodID, string(payloadJSON)); err != 
 // attempts растёт при каждой неудаче; после pendingResultMaxAttempts строка не удаляется
 // (данные не теряются), но предупреждение логируется только на переходе через порог —
 // не на каждом цикле.
-func (s *Server) retryPendingResults(ctx context.Context) {
+func (s *Server) retryPendingResults(ctx context.Context, cfg *emailIngestConfig) {
 	rows, err := s.pool.Query(ctx, `
-SELECT id, external_id, method_id, payload, attempts FROM email_ingest_pending_results ORDER BY id`)
+SELECT id, external_id, method_id, payload, attachments, attempts FROM email_ingest_pending_results ORDER BY id`)
 	if err != nil {
 		log.Printf("email ingest: load pending: %v", err)
 		return
 	}
 	type pendingRow struct {
-		id         int64
-		externalID string
-		methodID   int64
-		payload    map[string]any
-		attempts   int
+		id          int64
+		externalID  string
+		methodID    int64
+		payload     map[string]any
+		attachments []mailAttachment
+		attempts    int
 	}
 	var pending []pendingRow
 	for rows.Next() {
 		var p pendingRow
-		var raw []byte
-		if err := rows.Scan(&p.id, &p.externalID, &p.methodID, &raw, &p.attempts); err != nil {
+		var raw, attRaw []byte
+		if err := rows.Scan(&p.id, &p.externalID, &p.methodID, &raw, &attRaw, &p.attempts); err != nil {
 			log.Printf("email ingest: pending scan: %v", err)
 			continue
 		}
 		p.payload = map[string]any{}
 		if len(raw) > 0 {
 			_ = json.Unmarshal(raw, &p.payload)
+		}
+		if len(attRaw) > 0 {
+			_ = json.Unmarshal(attRaw, &p.attachments)
 		}
 		pending = append(pending, p)
 	}
@@ -727,7 +754,7 @@ SELECT id, external_id, method_id, payload, attempts FROM email_ingest_pending_r
 			log.Printf("email ingest: pending lookup external_id=%s: %v", p.externalID, err)
 			continue
 		}
-		if err := s.applyResultPayload(ctx, requestID, p.methodID, p.payload); err != nil {
+		if err := s.applyResultPayload(ctx, requestID, p.methodID, p.payload, cfg, p.attachments); err != nil {
 			log.Printf("email ingest: apply pending result external_id=%s: %v", p.externalID, err)
 			continue
 		}
@@ -746,41 +773,65 @@ SELECT id, external_id, method_id, payload, attempts FROM email_ingest_pending_r
 // иначе text/html с очисткой тегов), с явным декодированием заявленной кодировки
 // (письма трекера/форм бывают windows-1251, не только utf-8).
 func extractMailText(raw []byte) (string, error) {
+	text, _, err := extractMailCore(raw)
+	return text, err
+}
+
+// mailAttachment — вложение письма, извлечённое при разборе MIME (2026-08-24): реальное
+// фото приходит как вложение письма, а не по яндекс-ссылке в JSON (photo_before/
+// photo_after) — та ссылка недоступна анонимно (302 -> auth.cloud.yandex.ru/oauth,
+// подтверждено прямым HTTP-тестом), см. AGENTS.md "фото в протоколе".
+type mailAttachment struct {
+	Filename    string
+	ContentType string
+	Data        []byte
+}
+
+// extractMailTextAndAttachments — тот же разбор, что extractMailText, плюс вложения
+// письма — нужно applyResultEmail/applyResultPayload для photo_before/photo_after.
+// extractMailText остаётся отдельной тонкой обёрткой для мест, где вложения не нужны
+// (peekPayload).
+func extractMailTextAndAttachments(raw []byte) (string, []mailAttachment, error) {
+	return extractMailCore(raw)
+}
+
+func extractMailCore(raw []byte) (string, []mailAttachment, error) {
 	msg, err := mail.ReadMessage(bytes.NewReader(raw))
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	mediaType, params, err := mime.ParseMediaType(msg.Header.Get("Content-Type"))
 	if err != nil {
 		mediaType, params = "text/plain", map[string]string{}
 	}
 	if strings.HasPrefix(mediaType, "multipart/") {
-		return extractMultipart(msg.Body, params["boundary"])
+		return extractMultipartCore(msg.Body, params["boundary"])
 	}
 	body, err := io.ReadAll(msg.Body)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	text := decodePart(body, msg.Header.Get("Content-Transfer-Encoding"), params["charset"])
 	if mediaType == "text/html" {
 		text = stripHTML(text)
 	}
-	return text, nil
+	return text, nil, nil
 }
 
-func extractMultipart(r io.Reader, boundary string) (string, error) {
+func extractMultipartCore(r io.Reader, boundary string) (string, []mailAttachment, error) {
 	if boundary == "" {
-		return "", errors.New("multipart without boundary")
+		return "", nil, errors.New("multipart without boundary")
 	}
 	mr := multipart.NewReader(r, boundary)
 	var plain, htmlText string
+	var attachments []mailAttachment
 	for {
 		part, err := mr.NextPart()
 		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 		mt, params, perr := mime.ParseMediaType(part.Header.Get("Content-Type"))
 		if perr != nil {
@@ -788,8 +839,11 @@ func extractMultipart(r io.Reader, boundary string) (string, error) {
 			params = map[string]string{}
 		}
 		if strings.HasPrefix(mt, "multipart/") {
-			if nested, err := extractMultipart(part, params["boundary"]); err == nil && plain == "" {
-				plain = nested
+			if nestedText, nestedAtt, err := extractMultipartCore(part, params["boundary"]); err == nil {
+				if plain == "" {
+					plain = nestedText
+				}
+				attachments = append(attachments, nestedAtt...)
 			}
 			continue
 		}
@@ -797,30 +851,45 @@ func extractMultipart(r io.Reader, boundary string) (string, error) {
 		if err != nil {
 			continue
 		}
-		text := decodePart(data, part.Header.Get("Content-Transfer-Encoding"), params["charset"])
 		switch mt {
 		case "text/plain":
 			if plain == "" {
-				plain = text
+				plain = decodePart(data, part.Header.Get("Content-Transfer-Encoding"), params["charset"])
 			}
 		case "text/html":
 			if htmlText == "" {
-				htmlText = text
+				htmlText = decodePart(data, part.Header.Get("Content-Transfer-Encoding"), params["charset"])
+			}
+		default:
+			// Вложение (фото и т.п.) — раньше тихо отбрасывалось здесь (2026-08-24: реальный
+			// баг, из-за которого photo_before/photo_after никогда не доходили до протокола
+			// как валидные картинки — см. AGENTS.md). charset тут не при чём (не текст) —
+			// снимаем только Content-Transfer-Encoding.
+			if filename := part.FileName(); filename != "" {
+				attachments = append(attachments, mailAttachment{
+					Filename:    filename,
+					ContentType: mt,
+					Data:        decodeTransferEncoding(data, part.Header.Get("Content-Transfer-Encoding")),
+				})
 			}
 		}
 	}
-	if plain != "" {
-		return plain, nil
+	text := plain
+	var textErr error
+	if text == "" {
+		if htmlText != "" {
+			text = stripHTML(htmlText)
+		} else {
+			textErr = errors.New("no text part found")
+		}
 	}
-	if htmlText != "" {
-		return stripHTML(htmlText), nil
-	}
-	return "", errors.New("no text part found")
+	return text, attachments, textErr
 }
 
-// decodePart снимает Content-Transfer-Encoding и приводит к UTF-8 по заявленной
-// кодировке (по умолчанию — как есть, считается utf-8).
-func decodePart(data []byte, transferEncoding, charset string) string {
+// decodeTransferEncoding снимает Content-Transfer-Encoding (base64/quoted-printable) без
+// интерпретации charset — общий первый шаг decodePart, нужен отдельно для бинарных вложений
+// (charset-декодирование недопустимо для не-текстовых байт, 2026-08-24).
+func decodeTransferEncoding(data []byte, transferEncoding string) []byte {
 	switch strings.ToLower(strings.TrimSpace(transferEncoding)) {
 	case "base64":
 		clean := strings.Map(func(r rune) rune {
@@ -830,13 +899,20 @@ func decodePart(data []byte, transferEncoding, charset string) string {
 			return r
 		}, string(data))
 		if decoded, err := base64.StdEncoding.DecodeString(clean); err == nil {
-			data = decoded
+			return decoded
 		}
 	case "quoted-printable":
 		if decoded, err := io.ReadAll(quotedprintable.NewReader(bytes.NewReader(data))); err == nil {
-			data = decoded
+			return decoded
 		}
 	}
+	return data
+}
+
+// decodePart снимает Content-Transfer-Encoding и приводит к UTF-8 по заявленной
+// кодировке (по умолчанию — как есть, считается utf-8).
+func decodePart(data []byte, transferEncoding, charset string) string {
+	data = decodeTransferEncoding(data, transferEncoding)
 	switch strings.ToLower(strings.TrimSpace(charset)) {
 	case "windows-1251", "cp1251", "cp-1251":
 		if out, err := charmap.Windows1251.NewDecoder().Bytes(data); err == nil {
@@ -869,6 +945,96 @@ func extractJSON(text string) (map[string]any, bool) {
 		return nil, false
 	}
 	return payload, true
+}
+
+// ---- Сопоставление фото-вложений (2026-08-24) ----
+
+// extractYandexFormsFilename достаёт имя файла из ссылки вида
+// "https://forms.yandex.ru/cloud/files?path=%2F<id>%2F<name>.jpg" (значение payload
+// photo_before/photo_after) — query-параметр "path" URL-декодируется автоматически
+// url.Query(), берётся последний "/"-сегмент. Пустая строка/не URL/нет path= -> false.
+func extractYandexFormsFilename(rawURL string) (string, bool) {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
+		return "", false
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", false
+	}
+	p := u.Query().Get("path")
+	if p == "" {
+		return "", false
+	}
+	name := path.Base(p)
+	if name == "" || name == "." || name == "/" {
+		return "", false
+	}
+	return name, true
+}
+
+// matchAttachmentByFilename ищет РОВНО ОДНО вложение, чьё имя файла является ХВОСТОМ
+// urlFilename — не точным совпадением: подтверждено на реальном письме (external_id=698,
+// см. AGENTS.md "фото в протоколе"), что Яндекс.Формы при заливке в cloud-хранилище
+// добавляет свой хеш-префикс к оригинальному имени файла ("<24-символьный hex>_
+// <оригинальное-имя-вложения>"), а само письмо несёт вложение под оригинальным именем
+// без префикса. 0 или больше одного совпадения — false, не гадаем (та же дисциплина, что
+// resolveResultKey — не подставляем случайное значение при неопределённости).
+func matchAttachmentByFilename(urlFilename string, attachments []mailAttachment) (mailAttachment, bool) {
+	var found mailAttachment
+	count := 0
+	for _, a := range attachments {
+		if strings.HasSuffix(urlFilename, a.Filename) {
+			found = a
+			count++
+		}
+	}
+	if count != 1 {
+		return mailAttachment{}, false
+	}
+	return found, true
+}
+
+// matchPhotoFields сопоставляет photo_before/photo_after payload-а с вложениями письма —
+// по имени файла (см. matchAttachmentByFilename — хвост, не точное совпадение;
+// подтверждено на реальном письме external_id=698, 2026-08-24). Поле отсутствует в
+// результате, если оно пустое в payload, ссылку не удалось разобрать, или совпадение
+// неоднозначно.
+func matchPhotoFields(payload map[string]any, attachments []mailAttachment) map[string]mailAttachment {
+	out := map[string]mailAttachment{}
+	for _, field := range []string{"photo_before", "photo_after"} {
+		filename, ok := extractYandexFormsFilename(stringField(payload, field))
+		if !ok {
+			continue
+		}
+		att, ok := matchAttachmentByFilename(filename, attachments)
+		if !ok {
+			log.Printf("email ingest: %s: имя файла %q из ссылки не совпало ровно с одним вложением письма", field, filename)
+			continue
+		}
+		out[field] = att
+	}
+	return out
+}
+
+// resolvePhotoAttachments сопоставляет photo_before/photo_after с вложениями письма
+// (matchPhotoFields) и грузит совпавшие в объектное хранилище (uploadFileBytes, files.go) —
+// яндекс-ссылка недоступна анонимно, см. mailAttachment. requestID может быть 0 (заявка
+// ещё не найдена, письмо буферизуется в email_ingest_pending_results) — тогда файл всё
+// равно грузится (uploadFileBytes просто не привязывает его к заявке в таблице files).
+func (s *Server) resolvePhotoAttachments(ctx context.Context, cfg *emailIngestConfig,
+	requestID int64, payload map[string]any, attachments []mailAttachment) map[string]string {
+	matched := matchPhotoFields(payload, attachments)
+	out := map[string]string{}
+	for field, att := range matched {
+		url, err := s.uploadFileBytes(ctx, requestID, att.Filename, att.Data, cfg.login)
+		if err != nil {
+			log.Printf("email ingest: upload photo attachment %q (%s): %v", att.Filename, field, err)
+			continue
+		}
+		out[field] = url
+	}
+	return out
 }
 
 // ---- Мелкие хелперы разбора payload ----
