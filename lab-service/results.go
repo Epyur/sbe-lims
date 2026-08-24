@@ -1057,11 +1057,18 @@ RETURNING id`,
 	return id, seriesNum, nil
 }
 
+// nextSeriesNum — следующий свободный номер РЕАЛЬНОЙ серии (is_statistical_row
+// исключены, 2026-08-24): иначе стат-строка (см. recomputeStatistics) временно
+// занимает "следующий" слот, следующая настоящая серия получает номер ЕЩЁ
+// дальше, и при третьей+ серии recomputeStatistics повторно пытается занять
+// тот же слот, что уже забрала настоящая серия — "duplicate key value violates
+// unique constraint uq_meas_req_method_series" (обнаружено на реальном письме,
+// request 1352/671 — 3 письма-результата подряд).
 func (s *Server) nextSeriesNum(ctx context.Context, requestID, methodID int64) (int, error) {
 	var n int
 	err := s.pool.QueryRow(ctx, `
 SELECT COALESCE(MAX(series_num), 0) + 1 FROM measurement_results
-WHERE request_id = $1 AND method_id = $2`, requestID, methodID).Scan(&n)
+WHERE request_id = $1 AND method_id = $2 AND is_statistical_row = false`, requestID, methodID).Scan(&n)
 	return n, err
 }
 
@@ -1085,7 +1092,13 @@ DELETE FROM measurement_results WHERE request_id = $1 AND method_id = $2 AND is_
 		requestID, methodID); err != nil {
 		return err
 	}
-	seriesNum := len(series) + 1
+	// nextSeriesNum (не len(series)+1) — гарантированно свободный слот ПОСЛЕ
+	// максимального номера настоящей серии, даже если она не начинается с 1
+	// или имеет разрывы (2026-08-24, см. комментарий у nextSeriesNum).
+	seriesNum, err := s.nextSeriesNum(ctx, requestID, methodID)
+	if err != nil {
+		return err
+	}
 	_, err = s.pool.Exec(ctx, `
 INSERT INTO measurement_results (request_id, method_id, series_num, values, is_statistical_row,
 	calculation_type, source_series_count, source_series_range)

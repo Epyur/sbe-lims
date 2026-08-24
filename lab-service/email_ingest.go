@@ -36,10 +36,17 @@ var emailIngestFolders = []string{"LPITrack", "Comb", "Flam", "FlamProp"}
 const pendingResultMaxAttempts = 20
 
 // resultMetaFields — поля письма-результата, не относящиеся к values серии
-// (маршрутизация/метаданные); всё остальное передаётся в values как есть.
+// (маршрутизация/метаданные); всё остальное передаётся в values (при условии,
+// что резолвится в объявленный атрибут метода — см. loadAttributeIDSet).
+// photo_before/photo_after ЗДЕСЬ не перечислены (до 2026-08-24 были) — уходят
+// в values через тот же synonyms-механизм, что и любое другое поле, поэтому
+// попадают в протокол как атрибут data_type="photo" (если у метода настроен
+// синоним на photo_before_test/photo_after_test и т.п.); applyResultPayload
+// ОТДЕЛЬНО, до этого фильтра, всё равно кладёт их в измеренные photo_before/
+// photo_after колонки measurement_results — тот путь не меняется.
 var resultMetaFields = map[string]bool{
 	"type": true, "method": true, "ID": true, "series_num": true,
-	"aim_indicator": true, "computing": true, "photo_before": true, "photo_after": true,
+	"aim_indicator": true, "computing": true,
 }
 
 // canonicalFieldNames — раз опечатки и разнобой имён полей в реальных письмах
@@ -72,6 +79,12 @@ var knownRawFields = map[string]bool{
 	"calibration_flux_csi": true, "calibration_flux_firelab": true,
 	"calibration_flux_lpi": true, "calibration_flux_vniipo": true,
 	"amb_temp": true, "amb_pres": true, "amb_moist": true, "place": true,
+	// photo_before/photo_after (2026-08-24) — уже канонические raw-имена;
+	// метод-специфичный целевой атрибут (data_type="photo") настраивается через
+	// Synonyms на этом атрибуте (см. loadAttributeSynonymMap) — если для метода
+	// синоним не настроен, applyResultPayload отбрасывает эти два поля тем же
+	// declaredAttrs-фильтром, что и любое незаведённое поле (не ошибка).
+	"photo_before": true, "photo_after": true,
 }
 
 type emailIngestConfig struct {
@@ -90,6 +103,16 @@ func loadEmailIngestConfig() (*emailIngestConfig, bool) {
 	if strings.ToLower(strings.TrimSpace(os.Getenv("LAB_MAIL_ENABLED"))) != "true" {
 		return nil, false
 	}
+	return loadEmailIngestConfigCore()
+}
+
+// loadEmailIngestConfigCore — та же разбор LAB_MAIL_* переменных, что и
+// loadEmailIngestConfig, БЕЗ проверки LAB_MAIL_ENABLED (2026-08-24) — нужна
+// точечному режиму fetch-mail (mail_fetch_by_id.go): это явный одноразовый
+// запуск командой оператора, не постоянный фоновый воркер, поэтому "выключатель"
+// воркера (ENABLED) к нему не относится — учётные данные и метод-карта должны
+// быть доступны независимо от того, включён ли постоянный опрос почты.
+func loadEmailIngestConfigCore() (*emailIngestConfig, bool) {
 	cfg := &emailIngestConfig{
 		imapServer: strings.TrimSpace(os.Getenv("LAB_MAIL_IMAP_SERVER")),
 		login:      strings.TrimSpace(os.Getenv("LAB_MAIL_LOGIN")),
@@ -556,6 +579,16 @@ func (s *Server) applyResultPayload(ctx context.Context, requestID, methodID int
 	if err != nil {
 		synonyms = nil // атрибуты метода могли быть ещё не настроены — не критично
 	}
+	// declaredAttrs — только то, что реально заведено в input_parameters метода
+	// (2026-08-24): письмо может нести поля, которые метод сознательно не
+	// заводит (напр. calibration_* у РП — решение пользователя "все что связано
+	// с калибровкой не заводи... вводим только прямые измерения и расчеты") —
+	// такие поля не должны оседать в values, даже если resolveResultKey их
+	// узнаёт как canonicalFieldNames/knownRawFields.
+	declaredAttrs, err := s.loadAttributeIDSet(ctx, methodID)
+	if err != nil {
+		declaredAttrs = nil // не критично — см. ниже, при nil фильтр не применяется
+	}
 	values := map[string]any{}
 	sysFields := map[string]any{}
 	for k, v := range payload {
@@ -569,6 +602,9 @@ func (s *Server) applyResultPayload(ctx context.Context, requestID, methodID int
 		if systemRequestFields[key] {
 			sysFields[key] = v
 			continue
+		}
+		if declaredAttrs != nil && !declaredAttrs[key] {
+			continue // не заведено в input_parameters этого метода — не сохраняем
 		}
 		values[key] = v
 	}

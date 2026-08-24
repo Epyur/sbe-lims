@@ -291,6 +291,16 @@ func resolvePlaceholder(ctx *placeholderCtx, n InlineNode) string {
 func renderInlineHTML(ctx *placeholderCtx, nodes []InlineNode) string {
 	var b strings.Builder
 	for _, n := range nodes {
+		// Плейсхолдер атрибута data_type="photo" вне таблицы (2026-08-24) — та же
+		// логика, что уже была в renderTableHTML для ячеек: значение — URL фото,
+		// показываем как <img>, а не как убегающий escaped-текст ссылки (иначе
+		// вместо фото в отчёте печатается голый URL — путали пользователя).
+		if n.Type == "placeholder" && n.Source == "attribute" && ctx.attrsByID[n.AttributeID].DataType == "photo" {
+			if url := resolvePlaceholder(ctx, n); url != "" {
+				fmt.Fprintf(&b, `<img src="%s" style="max-width:200px;max-height:200px">`, html.EscapeString(url))
+			}
+			continue
+		}
 		text := n.Text
 		if n.Type == "placeholder" {
 			text = resolvePlaceholder(ctx, n)

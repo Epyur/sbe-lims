@@ -634,6 +634,31 @@ func (s *Server) loadAttributeSynonymMap(ctx context.Context, methodID int64) (m
 	return out, nil
 }
 
+// loadAttributeIDSet возвращает множество ID атрибутов, объявленных в
+// methods.input_parameters — используется email_ingest.go/applyResultPayload
+// (2026-08-24), чтобы принимать из письма-результата ТОЛЬКО то, что реально
+// заведено в конфигураторе метода: письмо может содержать поля, которые метод
+// сознательно не заводит (напр. calibration_* у РП — по решению пользователя
+// "все что связано с калибровкой не заводи... вводим только прямые измерения
+// и расчеты"), и такие поля не должны попадать в values, даже если
+// resolveResultKey их узнаёт как canonicalFieldNames/knownRawFields.
+func (s *Server) loadAttributeIDSet(ctx context.Context, methodID int64) (map[string]bool, error) {
+	var raw []byte
+	if err := s.pool.QueryRow(ctx,
+		`SELECT input_parameters FROM methods WHERE id = $1`, methodID).Scan(&raw); err != nil {
+		return nil, err
+	}
+	var attrs []MethodAttribute
+	if len(raw) > 0 && string(raw) != "[]" {
+		_ = json.Unmarshal(raw, &attrs)
+	}
+	out := make(map[string]bool, len(attrs))
+	for _, a := range attrs {
+		out[a.ID] = true
+	}
+	return out, nil
+}
+
 // deriveFormulasFromAttributes строит methods.formulas ЦЕЛИКОМ из
 // input_parameters — единственный источник истины для формул, привязанных к
 // конкретному атрибуту (по target_parameter == attribute.id). Вызывается

@@ -59,6 +59,17 @@ func main() {
 		return
 	}
 
+	// Постоянный CLI-режим: точечная выгрузка почты по ID (2026-08-24, см.
+	// mail_fetch_by_id.go) — 30-секундный ctx выше рассчитан на инициализацию
+	// пула, для IMAP-выгрузки нескольких сотен писем даём отдельный, более
+	// щедрый таймаут.
+	if len(os.Args) > 1 && os.Args[1] == "fetch-mail" {
+		fetchCtx, fetchCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer fetchCancel()
+		runFetchMailByID(fetchCtx, s, os.Args[2:])
+		return
+	}
+
 	if err := s.migrate(ctx); err != nil {
 		log.Fatalf("migrate: %v", err)
 	}
