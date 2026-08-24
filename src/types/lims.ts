@@ -53,6 +53,13 @@ export interface LimsRequest {
   amb_temp: string;
   amb_pres: string;
   amb_moist: string;
+  /** Kanban-доска «Очередь лаборатории»: email испытателя (lab_members.email,
+   * lab_operator/lab_admin лабы заявки) — назначает руководитель лабы, либо
+   * испытатель забирает СЕБЕ неназначенную заявку из "new". Пусто — не назначено. */
+  assigned_to: string;
+  /** Момент перехода в status="completed" (не updated_at) — основа окна показа
+   * в колонке "Завершённые" канбан-доски (10 рабочих дней). Пусто — не завершена. */
+  completed_at: string;
   files: Array<{ file_key: string; file_name: string; file_size: number; file_url: string }>;
   created_at: string;
   updated_at: string;
@@ -241,12 +248,16 @@ export type PlaceholderSource = 'system' | 'attribute';
 export type PlaceholderAgg = 'avg' | 'min' | 'max' | 'first' | 'last';
 
 /** Инлайн-узел форматированного текста — обычный текст (с necessary bold/
- * italic) или плейсхолдер-чип. Зеркало Go InlineNode (results.go). */
+ * italic/sup/sub) или плейсхолдер-чип. Зеркало Go InlineNode (results.go).
+ * sup/sub — верхний/нижний индекс (2026-08-24, по запросу пользователя),
+ * взаимоисключающие — UI не должен выставлять оба одновременно. */
 export interface InlineNode {
   type: 'text' | 'placeholder';
   text?: string;
   bold?: boolean;
   italic?: boolean;
+  sup?: boolean;
+  sub?: boolean;
   source?: PlaceholderSource;
   attribute_id?: string;
   agg?: PlaceholderAgg;
@@ -262,13 +273,23 @@ export interface TableColumn {
   label?: string;
 }
 
-/** Один блочный узел форматированного текста внутри DocumentBlock. */
+/** Один блочный узел форматированного текста внутри DocumentBlock.
+ * align (2026-08-24) — выравнивание, применимо к paragraph/heading (не к
+ * bullet_list/table/static_table — у списка свой маркер, у таблиц своя
+ * структура). "static_table" (2026-08-24) — таблица, введённая пользователем
+ * вручную (визуальный конструктор), в отличие от "table" (данные серий,
+ * авто-заполняемые ячейки, столбцы из TableColumn) — здесь и структура
+ * (строки/столбцы), и содержимое каждой ячейки задаются руками; `rows` —
+ * строка → колонка → inline-содержимое ячейки (та же модель, что абзац —
+ * ячейки сразу получают bold/italic/индексы/плейсхолдеры без отдельной логики). */
 export interface RichNode {
-  type: 'paragraph' | 'heading' | 'bullet_list' | 'table';
+  type: 'paragraph' | 'heading' | 'bullet_list' | 'table' | 'static_table';
   level?: 2 | 3 | 4;
+  align?: 'center' | 'right' | 'justify';
   children?: InlineNode[];
   items?: InlineNode[][];
   columns?: TableColumn[];
+  rows?: InlineNode[][][];
 }
 
 /** Один блок документа (напр. "Общая информация", "Результаты измерения

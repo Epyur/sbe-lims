@@ -24,7 +24,9 @@ import type {
   PresentationKind,
 } from '../types/lims';
 import { renderBlockEditor, SYSTEM_PLACEHOLDERS } from './block-editor';
+import { toggleSubSupPalette } from './subsup';
 import { errorMessage } from '../../../sbe-core/src/utils/errors';
+import { downloadBase64File } from '../../../sbe-core/src/utils/download';
 import { sanitizeAttributesWithRename } from '../services/llm-assist.service';
 import type { ExistingAttributeSummary } from '../services/llm-assist.service';
 import { extractStandardText } from '../services/rtf-to-text';
@@ -55,6 +57,42 @@ const COMPARISON_OPERATOR_OPTIONS: Array<[ComparisonOperator, string]> = [
  * соответствии. Предлагаются как быстрая вставка в select рядом со свободным
  * текстовым полем (см. renderBranchRows) — не единственный допустимый вариант. */
 const COMPLIANCE_VERDICTS = ['Соответствует', 'Не соответствует', 'Не оценивается'];
+
+/** Полный номер заявки (2026-08-24, по прямому запросу пользователя — везде
+ * должен фигурировать полный номер, "с кодом проекта, лаборатории, метода",
+ * не сокращённый вид). `customer_number` ({projectCode}-{NNN}/{yyyy}-{labCode}-
+ * {methodCode}) — единственная форма со ВСЕМИ тремя кодами; `lab_number` не
+ * содержит код проекта. Короткий seq/year и #id — только fallback для ещё не
+ * пронумерованной сервером заявки. Модульная функция (не метод LimsView) —
+ * нужна и в ProtocolHtmlModal, отдельном классе этого файла. */
+function fullRequestNumber(req: LimsRequest): string {
+  return req.customer_number || req.lab_number
+    || (req.number_seq > 0 ? `${req.number_seq}/${req.number_year}` : `#${req.id}`);
+}
+
+/** Kanban-доска «Очередь лаборатории»: заявка в колонке "Завершённые" видна
+ * ровно 10 РАБОЧИХ дней (Пн–Пт) от completed_at, затем пропадает из канбана
+ * (сама заявка/статус не трогается — она всё ещё видна на плоской странице
+ * «Результаты»). Пустой completed_at — завершена до этой миграции, данных для
+ * отсчёта нет, показываем всегда. Календаря праздников в проекте нигде нет —
+ * не изобретаем, считаем только по дням недели. */
+function withinCompletedWindow(completedAtIso: string, now: Date = new Date()): boolean {
+  if (!completedAtIso) return true;
+  const start = new Date(completedAtIso);
+  if (Number.isNaN(start.getTime())) return true;
+  const cursor = new Date(start);
+  cursor.setHours(0, 0, 0, 0);
+  const today = new Date(now);
+  today.setHours(0, 0, 0, 0);
+  let elapsed = 0;
+  while (cursor.getTime() < today.getTime()) {
+    cursor.setDate(cursor.getDate() + 1);
+    const dow = cursor.getDay();
+    if (dow !== 0 && dow !== 6) elapsed++;
+    if (elapsed >= 10) return false;
+  }
+  return true;
+}
 
 /** Значение из текстового поля операнда «значение» — число, если строка целиком
  * читается как число, иначе как есть (текст/«Да»-«Нет»/показатель). */
@@ -158,7 +196,12 @@ export class LimsView extends ItemView {
   private projects: LabProject[] = [];
   private groups: LabGroup[] = [];
   private myRole = '';
+  private myEmail = '';
   private currentRequestsFilter?: (r: LimsRequest) => boolean;
+  /** Kanban-доска «Очередь лаборатории»: заявка, которую в данный момент тащат
+   * (см. renderQueueBoard) — module-scope не подходит, т.к. вьюх может быть
+   * несколько, а обработчики drop читают именно СВОЙ инстанс. */
+  private draggedCard: LimsRequest | null = null;
 
   private bodyEl!: HTMLElement;
 
@@ -314,6 +357,7 @@ export class LimsView extends ItemView {
     try {
       const perm = await this.plugin.syncService.getMyPermission();
       this.myRole = perm.role;
+      this.myEmail = perm.email;
       const [labs, objects, projects, groups] = await Promise.all([
         this.plugin.syncService.listLabs(),
         this.plugin.syncService.listObjects(),
@@ -326,6 +370,7 @@ export class LimsView extends ItemView {
       this.groups = groups;
     } catch (e: unknown) {
       this.myRole = '';
+      this.myEmail = '';
       this.labs = [];
       this.objects = [];
       this.projects = [];
@@ -357,6 +402,7 @@ export class LimsView extends ItemView {
     try {
       const perm = await this.plugin.syncService.getMyPermission();
       this.myRole = perm.role;
+      this.myEmail = perm.email;
       const [labs, objects, projects, groups] = await Promise.all([
         this.plugin.syncService.listLabs(),
         this.plugin.syncService.listObjects(),
@@ -562,7 +608,7 @@ export class LimsView extends ItemView {
         await this.renderRequests();
         return;
       case 'queue':
-        await this.renderRequests(r => r.status === 'new' || r.status === 'received');
+        await this.renderQueueBoard();
         return;
       case 'results':
         await this.renderRequests(r => r.status === 'completed');
@@ -619,7 +665,12 @@ export class LimsView extends ItemView {
         const card = this.bodyEl.createDiv({ cls: 'tn-lims-req-card' });
         card.addEventListener('click', () => this.renderRequestDetail(r));
         const head = card.createDiv({ cls: 'tn-lims-req-card-head' });
-        head.createEl('h4', { text: r.lab_number ? `№ ${r.lab_number}` : `#${r.id}` });
+        // Списки заявок ("Все заявки"/"Очередь лаборатории", 2026-08-24, по
+        // прямому запросу пользователя — частичный откат) — единственное
+        // место, где показывается короткий "лабораторный" номер (lab_number,
+        // без кода проекта); везде остальном (деталь заявки, протокол,
+        // имя файла) — полный fullRequestNumber (customer_number).
+        head.createEl('h4', { text: `№ ${r.lab_number || fullRequestNumber(r)}` });
         head.createSpan({ cls: 'tn-lims-req-card-status', text: STATUS_LABELS[r.status] || r.status });
         card.createDiv({ cls: 'tn-lims-req-card-title', text: r.title || '(без названия)' });
         const meta = card.createDiv({ cls: 'tn-lims-req-card-meta' });
@@ -632,6 +683,180 @@ export class LimsView extends ItemView {
     } catch (e: unknown) {
       this.bodyEl.empty();
       this.bodyEl.createDiv({ cls: 'tn-lims-error' }).setText(`Ошибка: ${errorMessage(e)}`);
+    }
+  }
+
+  // ---- Kanban-доска «Очередь лаборатории» (2026-08-24) ----
+  //
+  // 4 колонки: new/received/processing/completed (маппинг подтверждён — подпись
+  // processing "🟡 В работе" буквально равна названию колонки 3). Колонки 2/3
+  // делятся на ячейки по испытателям лабы (lab_members.role IN ('lab_operator',
+  // 'lab_admin')); руководитель (canAdmin) двигает карточки свободно, испытатель —
+  // только свои уже назначенные (между своими ячейками 2⇄3, дальше в 4), либо
+  // забирает СЕБЕ неназначенную заявку прямо из колонки 1. Авторизация реально
+  // проверяется на сервере (kanban.go, canApplyKanbanMove) — клиентские предикаты
+  // ниже только скрывают то, что заведомо будет отклонено, не единственная защита.
+
+  /** Ростер лабы заявки (для деления колонок 2/3 на ячейки и для пикера в детали).
+   * Внешняя лаба не имеет своих lab_members — резолвим в parent_lab_id, как и
+   * остальной код в этом файле (см. renderSettingsLabRow). */
+  private async fetchLabRoster(labId: number): Promise<LabMember[]> {
+    const lab = this.labs.find(l => l.id === labId);
+    const resolvedId = lab?.parent_lab_id || labId;
+    try {
+      return await this.plugin.syncService.listLabMembers(resolvedId);
+    } catch (e: unknown) {
+      return []; // не участник этой лабы (403 от сервера) — контролы просто скрываются
+    }
+  }
+
+  private testersOf(roster: LabMember[]): LabMember[] {
+    return roster.filter(m => m.role === 'lab_operator' || m.role === 'lab_admin');
+  }
+
+  private myRoleIn(roster: LabMember[]): string {
+    return roster.find(m => m.email === this.myEmail)?.role || '';
+  }
+
+  private async renderQueueBoard(): Promise<void> {
+    this.bodyEl.empty();
+    if (!this.labId) {
+      this.bodyEl.createDiv({ cls: 'tn-lims-meta tn-lims-p24' }).setText('Выберите лабораторию.');
+      return;
+    }
+    this.bodyEl.createDiv({ cls: 'tn-lims-meta', text: 'Загрузка…' });
+    try {
+      const roster = await this.fetchLabRoster(this.labId);
+      const testers = this.testersOf(roster);
+      const myLabRole = this.myRoleIn(roster);
+      const isLabHead = this.canAdmin;
+      const all = await this.plugin.syncService.listRequests();
+      const requests = all.filter(r => r.lab_id === this.labId);
+      this.bodyEl.empty();
+
+      const board = this.bodyEl.createDiv({ cls: 'tn-lims-kanban' });
+      this.renderFlatKanbanColumn(board, 'Новые заявки', requests.filter(r => r.status === 'new'), 'new',
+        () => isLabHead || myLabRole !== '', // можно тащить: руководитель, либо любой испытатель (самозабор — цель проверяет ячейка колонки 2)
+        () => isLabHead,                     // дропнуть ОБРАТНО в "новые" (снять назначение) — только руководитель
+        () => '');
+      this.renderPerTesterKanbanColumn(board, 'В работу', requests.filter(r => r.status === 'received'),
+        'received', testers, isLabHead, myLabRole);
+      this.renderPerTesterKanbanColumn(board, 'В работе', requests.filter(r => r.status === 'processing'),
+        'processing', testers, isLabHead, myLabRole);
+      const completed = requests.filter(r => r.status === 'completed' && withinCompletedWindow(r.completed_at));
+      this.renderFlatKanbanColumn(board, 'Завершённые', completed, 'completed',
+        () => isLabHead, // из завершённых обратно тащит только руководитель (переоткрытие)
+        (dragged) => isLabHead || (myLabRole !== '' && dragged.assigned_to === this.myEmail), // завершить может руководитель или тот испытатель, кому назначена карточка
+        () => undefined); // исполнителя при завершении не трогаем
+    } catch (e: unknown) {
+      this.bodyEl.empty();
+      this.bodyEl.createDiv({ cls: 'tn-lims-error' }).setText(`Ошибка: ${errorMessage(e)}`);
+    }
+  }
+
+  /** Колонка без деления на ячейки (1 «Новые» и 4 «Завершённые»).
+   * @param canDrag — можно ли тащить конкретную карточку ИЗ этой колонки.
+   * @param canDrop — можно ли дропнуть ТЕКУЩУЮ перетаскиваемую карточку В эту колонку.
+   * @param assignedToOnDrop — значение assigned_to, которое нужно проставить при
+   *   дропе (`undefined` — не трогать, как для «Завершённые», где исполнитель
+   *   сохраняется для истории). */
+  private renderFlatKanbanColumn(
+    board: HTMLElement, title: string, requests: LimsRequest[], targetStatus: string,
+    canDrag: (r: LimsRequest) => boolean,
+    canDrop: (dragged: LimsRequest) => boolean,
+    assignedToOnDrop: (dragged: LimsRequest) => string | undefined,
+  ): void {
+    const col = board.createDiv({ cls: 'tn-lims-kanban-col' });
+    const head = col.createDiv({ cls: 'tn-lims-kanban-col-head' });
+    head.createSpan({ text: title });
+    head.createSpan({ cls: 'tn-lims-kanban-col-count', text: String(requests.length) });
+    const list = col.createDiv();
+    for (const r of requests) this.renderKanbanCard(list, r, canDrag(r));
+    this.makeDropZone(col, () => {
+      const dragged = this.draggedCard;
+      if (!dragged || !canDrop(dragged)) return;
+      void this.performKanbanMove(dragged, targetStatus, assignedToOnDrop(dragged)).then(() => this.renderQueueBoard());
+    });
+  }
+
+  /** Колонки 2/3 — одна ячейка на испытателя + хвостовая ячейка «Не назначено»
+   * (видна/принимает дроп только руководителю — испытатель сам никого не
+   * назначает и не видит смысла в этой ячейке). */
+  private renderPerTesterKanbanColumn(
+    board: HTMLElement, title: string, requests: LimsRequest[], targetStatus: string,
+    testers: LabMember[], isLabHead: boolean, myLabRole: string,
+  ): void {
+    const col = board.createDiv({ cls: 'tn-lims-kanban-col' });
+    const head = col.createDiv({ cls: 'tn-lims-kanban-col-head' });
+    head.createSpan({ text: title });
+    head.createSpan({ cls: 'tn-lims-kanban-col-count', text: String(requests.length) });
+
+    const canDropCell = (testerEmail: string): boolean =>
+      isLabHead || (myLabRole !== '' && testerEmail === this.myEmail);
+    const canDrag = (r: LimsRequest): boolean =>
+      isLabHead || (myLabRole !== '' && r.assigned_to === this.myEmail);
+
+    const renderCell = (label: string, testerEmail: string): void => {
+      const cell = col.createDiv({ cls: 'tn-lims-kanban-cell' });
+      cell.createDiv({ cls: 'tn-lims-kanban-cell-head', text: label });
+      for (const r of requests.filter(r => r.assigned_to === testerEmail)) {
+        this.renderKanbanCard(cell, r, canDrag(r));
+      }
+      if (canDropCell(testerEmail)) {
+        this.makeDropZone(cell, () => {
+          const dragged = this.draggedCard;
+          if (!dragged) return;
+          void this.performKanbanMove(dragged, targetStatus, testerEmail).then(() => this.renderQueueBoard());
+        });
+      }
+    };
+    for (const tester of testers) renderCell(tester.email, tester.email);
+    const unassigned = requests.filter(r => r.assigned_to === '' || !testers.some(t => t.email === r.assigned_to));
+    if (isLabHead || unassigned.length > 0) renderCell('Не назначено', '');
+  }
+
+  private renderKanbanCard(container: HTMLElement, req: LimsRequest, draggable: boolean): void {
+    const card = container.createDiv({ cls: 'tn-lims-kanban-card' });
+    if (draggable) {
+      card.setAttribute('draggable', 'true');
+      card.addEventListener('dragstart', (ev) => { this.draggedCard = req; ev.stopPropagation(); });
+      card.addEventListener('dragend', () => { this.draggedCard = null; });
+    }
+    card.createDiv({ text: `№ ${req.lab_number || fullRequestNumber(req)}` });
+    card.createDiv({ cls: 'tn-lims-meta', text: req.title || '(без названия)' });
+    card.createDiv({ cls: 'tn-lims-meta', text: this.methodName(req.method_id) });
+    card.addEventListener('click', () => void this.renderRequestDetail(req));
+  }
+
+  private makeDropZone(container: HTMLElement, onDrop: () => void): void {
+    container.addEventListener('dragover', (ev) => { ev.preventDefault(); container.classList.add('tn-lims-kanban-dropzone-over'); });
+    container.addEventListener('dragleave', () => container.classList.remove('tn-lims-kanban-dropzone-over'));
+    container.addEventListener('drop', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      container.classList.remove('tn-lims-kanban-dropzone-over');
+      onDrop();
+    });
+  }
+
+  /** Выполняет смену статуса/назначения на сервере (см. kanban.go, handleKanbanMove) —
+   * используется и перетаскиванием на доске (renderQueueBoard, дальше сама
+   * перерисовывает доску), и контролами в детали заявки (renderRequestDetail,
+   * сама перерисовывает деталь свежими данными) — поэтому НЕ решает здесь, что
+   * перерисовывать, а просто возвращает обновлённую заявку (`null` — если патч
+   * пуст или запрос отклонён/упал). */
+  private async performKanbanMove(card: LimsRequest, targetStatus: string, targetAssignedTo?: string): Promise<LimsRequest | null> {
+    const patch: { status?: string; assigned_to?: string } = {};
+    if (targetStatus !== card.status) patch.status = targetStatus;
+    if (targetAssignedTo !== undefined && targetAssignedTo !== card.assigned_to) patch.assigned_to = targetAssignedTo;
+    if (Object.keys(patch).length === 0) return null;
+    try {
+      const updated = await this.plugin.syncService.moveKanbanCard(card.id, patch);
+      new Notice('Карточка перемещена');
+      return updated;
+    } catch (e: unknown) {
+      new Notice(`Ошибка: ${errorMessage(e)}`);
+      return null;
     }
   }
 
@@ -689,7 +914,7 @@ export class LimsView extends ItemView {
     const back = this.bodyEl.createEl('button', { text: '← Назад', cls: 'tn-btn tn-btn-ghost' });
     back.addEventListener('click', () => void this.renderRequests(this.currentRequestsFilter));
 
-    this.bodyEl.createEl('h3', { text: `№ ${req.lab_number || `${req.number_seq}/${req.number_year}`} — ${req.title || 'без названия'}` });
+    this.bodyEl.createEl('h3', { text: `№ ${fullRequestNumber(req)} — ${req.title || 'без названия'}` });
 
     // Все детали заявки, как у заявителя (sbe-requests) — сразу под номером,
     // единым блоком (2026-08-21, по просьбе пользователя).
@@ -720,25 +945,54 @@ export class LimsView extends ItemView {
     meta.createDiv({ text: `📅 Создана: ${this.formatDate(req.created_at)}` });
     meta.createDiv({ text: `📅 Обновлена: ${this.formatDate(req.updated_at)}` });
     meta.createDiv({ text: `Статус: ${STATUS_LABELS[req.status] || req.status}` });
+    meta.createDiv({ text: `👷 Исполнитель: ${req.assigned_to || 'не назначен'}` });
 
     if (req.description) {
       this.bodyEl.createDiv({ cls: 'tn-lims-meta tn-lims-mb12' }).createDiv({ text: `📝 ${req.description}` });
     }
 
-    // статус
-    if (this.canEditStatus) {
+    // статус/назначение (Kanban-доска «Очередь лаборатории», 2026-08-24) — то же
+    // правило, что при перетаскивании карточки (renderQueueBoard/kanban.go):
+    // руководитель — свободно; испытатель — только свою уже назначенную заявку,
+    // либо самозабор неназначенной "новой" себе.
+    const roster = req.lab_id > 0 ? await this.fetchLabRoster(req.lab_id) : [];
+    const myLabRole = this.myRoleIn(roster);
+    if (this.canAdmin) {
       const statusSelect = this.bodyEl.createEl('select', { cls: 'tn-lims-select tn-lims-mb8' });
       for (const [v, l] of Object.entries(STATUS_LABELS)) statusSelect.createEl('option', { value: v, text: l });
       statusSelect.value = req.status;
-      statusSelect.addEventListener('change', async () => {
-        try {
-          await this.plugin.syncService.setStatus(req.id, statusSelect.value);
-          req.status = statusSelect.value;
-          new Notice('Статус обновлён');
-          void this.renderRequestDetail(req);
-        } catch (e: unknown) {
-          new Notice(`Ошибка: ${errorMessage(e)}`);
-        }
+      statusSelect.addEventListener('change', () => {
+        void this.performKanbanMove(req, statusSelect.value).then(updated => {
+          if (updated) void this.renderRequestDetail(updated);
+        });
+      });
+
+      const testerSelect = this.bodyEl.createEl('select', { cls: 'tn-lims-select tn-lims-mb12' });
+      testerSelect.createEl('option', { value: '', text: 'Не назначено' });
+      for (const t of this.testersOf(roster)) testerSelect.createEl('option', { value: t.email, text: t.email });
+      testerSelect.value = req.assigned_to;
+      testerSelect.addEventListener('change', () => {
+        void this.performKanbanMove(req, req.status, testerSelect.value).then(updated => {
+          if (updated) void this.renderRequestDetail(updated);
+        });
+      });
+    } else if (myLabRole !== '' && req.status === 'new' && req.assigned_to === '') {
+      const pickupBtn = this.bodyEl.createEl('button', { text: '📥 Взять в работу', cls: 'tn-btn tn-lims-mb12' });
+      pickupBtn.addEventListener('click', () => {
+        void this.performKanbanMove(req, 'received', this.myEmail).then(updated => {
+          if (updated) void this.renderRequestDetail(updated);
+        });
+      });
+    } else if (myLabRole !== '' && req.assigned_to === this.myEmail && req.status !== 'new' && req.status !== 'completed') {
+      const statusSelect = this.bodyEl.createEl('select', { cls: 'tn-lims-select tn-lims-mb8' });
+      for (const v of ['received', 'processing', 'completed']) {
+        statusSelect.createEl('option', { value: v, text: STATUS_LABELS[v] });
+      }
+      statusSelect.value = req.status;
+      statusSelect.addEventListener('change', () => {
+        void this.performKanbanMove(req, statusSelect.value).then(updated => {
+          if (updated) void this.renderRequestDetail(updated);
+        });
       });
     }
 
@@ -827,7 +1081,7 @@ export class LimsView extends ItemView {
         try {
           const proto = await this.plugin.syncService.getProtocol(req.id, kind);
           this.showHtmlModal(req, proto.html, () =>
-            this.downloadDocx(proto.docx_base64, `${kind}_${req.number_seq}_${req.number_year}.docx`));
+            this.downloadDocx(proto.docx_base64, `${kind}_${fullRequestNumber(req).replace(/\//g, '-')}.docx`));
         } catch (e: unknown) {
           new Notice(`Ошибка: ${errorMessage(e)}`);
         }
@@ -847,6 +1101,10 @@ export class LimsView extends ItemView {
       // (протёк бы на весь Obsidian); берём только содержимое <body>.
       const doc = new DOMParser().parseFromString(proto.html, 'text/html');
       container.empty();
+      // .tn-protocol-html (2026-08-24, sbe-core) — серверный <style> сюда не
+      // доходит (см. комментарий выше), зеркалим границы/центрирование таблиц
+      // отдельным общим классом, чтобы «Краткий вид» выглядел как в модалке.
+      container.addClass('tn-protocol-html');
       container.innerHTML = doc.body.innerHTML;
     } catch (e: unknown) {
       container.createDiv({ cls: 'tn-lims-error' }).setText(`Ошибка загрузки результатов: ${errorMessage(e)}`);
@@ -1571,7 +1829,7 @@ export class LimsView extends ItemView {
       });
       const subSupBtn = row.createEl('button', { text: 'x²', cls: 'tn-btn tn-btn-ghost' });
       subSupBtn.setAttribute('title', 'Вставить надстрочный/подстрочный символ в название (напр. CO₂, м³)');
-      subSupBtn.addEventListener('click', (e) => { e.preventDefault(); this.toggleSubSupPalette(row, nameInput); });
+      subSupBtn.addEventListener('click', (e) => { e.preventDefault(); toggleSubSupPalette(row, nameInput); });
 
       const typeSelect = row.createEl('select', { cls: 'tn-lims-select' });
       const typeOptions: Array<[AttributeDataType, string]> = [
@@ -1652,33 +1910,6 @@ export class LimsView extends ItemView {
       const delBtn = row.createEl('button', { text: '✖', cls: 'tn-btn tn-btn-ghost' });
       delBtn.addEventListener('click', () => { attrs.splice(idx, 1); onChange(); });
     });
-  }
-
-  /** Палитра надстрочных/подстрочных символов для человекочитаемого названия
-   * атрибута (2026-08-22) — HTML-инпут не умеет rich-text <sup>/<sub>, поэтому
-   * единственный переносимый способ (работает одинаково в UI, протоколе HTML/
-   * DOCX, везде) — литеральные юникод-символы (₀-₉/⁰-⁹ и т.п.), вставляемые в
-   * текст названия по месту курсора. Полного юникод-алфавита над-/подстрочных
-   * букв не существует — набор ограничен цифрами и несколькими буквами, чего
-   * достаточно для типичных случаев (CO₂, м³, H₂O). */
-  private toggleSubSupPalette(row: HTMLElement, target: HTMLInputElement): void {
-    const existing = row.querySelector('.tn-lims-subsup');
-    if (existing) { existing.remove(); return; }
-    const panel = row.createDiv({ cls: 'tn-lims-subsup tn-lims-flex' });
-    panel.createSpan({ cls: 'tn-lims-meta', text: 'Вставить в название:' });
-    const CHARS = ['⁰', '¹', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹', '₀', '₁', '₂', '₃', '₄', '₅', '₆', '₇', '₈', '₉'];
-    for (const ch of CHARS) {
-      const btn = panel.createEl('button', { text: ch, cls: 'tn-btn tn-btn-ghost' });
-      btn.addEventListener('click', (e) => {
-        e.preventDefault();
-        const start = target.selectionStart ?? target.value.length;
-        const end = target.selectionEnd ?? target.value.length;
-        target.value = target.value.slice(0, start) + ch + target.value.slice(end);
-        target.setSelectionRange(start + ch.length, start + ch.length);
-        target.focus();
-        target.dispatchEvent(new Event('change'));
-      });
-    }
   }
 
   /** Панель синонимов атрибута (2026-08-21): альтернативные raw-имена поля из
@@ -2555,15 +2786,7 @@ export class LimsView extends ItemView {
 
   private downloadDocx(base64Data: string, fileName: string): void {
     try {
-      const bin = atob(base64Data);
-      const bytes = new Uint8Array(bin.length);
-      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-      const blob = new Blob([bytes], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
-      a.download = fileName;
-      a.click();
-      URL.revokeObjectURL(a.href);
+      downloadBase64File(base64Data, fileName, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
     } catch (e: unknown) {
       new Notice(`Ошибка скачивания: ${errorMessage(e)}`);
     }
@@ -2593,15 +2816,12 @@ export class LimsView extends ItemView {
     return this.myRole !== '';
   }
 
-  private get canEditStatus(): boolean {
-    return this.myRole !== '';
-  }
-
-  /** Admin+ (app-level, включая superadmin) — методы-конфиги, сотрудники лаборатории.
-   * Точная проверка lab_admin/lab_auditor (per-lab) недоступна клиенту без нового
-   * «моя роль в этой лабе» эндпоинта (GET /lab-members сам admin-only) — оставлено
-   * на будущее; сервер всё равно валидирует через lab_members (requireLabAccess/
-   * requireLabRead), так что риска нет — только UX-огрубление. */
+  /** Admin+ (app-level, включая superadmin) — методы-конфиги, сотрудники лаборатории,
+   * и «руководитель лабы» для Kanban-доски «Очередь лаборатории» (свободное
+   * перетаскивание/назначение). Точная lab_admin/lab_auditor (per-lab) роль
+   * текущего пользователя для конкретной лабы — через fetchLabRoster/myRoleIn
+   * (2026-08-24, GET /lab-members?lab_id= теперь доступен любому участнику
+   * лабы, не только admin — см. lims_refs.go handleListLabMembers). */
   private get canAdmin(): boolean {
     return this.myRole === 'admin' || this.myRole === 'superadmin';
   }
@@ -2631,7 +2851,7 @@ class ProtocolHtmlModal extends Modal {
 
   onOpen(): void {
     this.modalEl.addClass('tn-lims-protocol-modal');
-    this.titleEl.setText(`Протокол № ${this.req.lab_number || `${this.req.number_seq}/${this.req.number_year}`}`);
+    this.titleEl.setText(`Протокол № ${fullRequestNumber(this.req)}`);
     const iframe = this.contentEl.createEl('iframe', { attr: { sandbox: '' }, cls: 'tn-lims-iframe' });
     iframe.setAttr('srcdoc', this.html);
     const docxBtn = this.contentEl.createEl('button', { text: 'Скачать DOCX', cls: 'tn-btn tn-btn-ghost' });

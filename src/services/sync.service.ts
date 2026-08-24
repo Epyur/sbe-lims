@@ -156,15 +156,25 @@ export class LimsSyncService {
   }
 
   /** Меняет статус заявки (received/processing/completed). */
-  async setStatus(requestId: number, status: string): Promise<void> {
+  /** Kanban-доска «Очередь лаборатории»: смена статуса и/или назначение испытателя
+   * (см. server_back/lab-service/kanban.go, handleKanbanMove) — единая точка входа
+   * и для перетаскивания карточки, и для контролов в детали заявки; сервер сам
+   * проверяет ролевые правила (руководитель — свободно, испытатель — только своё). */
+  async moveKanbanCard(requestId: number, patch: { status?: string; assigned_to?: string }): Promise<LimsRequest> {
     const token = await this.getToken();
     const res = await this.request({
-      url: `${this.baseUrl}/api/lab/requests/${requestId}/status`,
+      url: `${this.baseUrl}/api/lab/requests/${requestId}/kanban-move`,
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ status }),
+      body: JSON.stringify(patch),
     });
     this.assertOk(res);
+    try {
+      return (JSON.parse(res.text) as { request: LimsRequest }).request;
+    } catch (e: unknown) {
+      console.warn('ЛИМС: не JSON в ответе kanban-move:', errorMessage(e));
+      throw new Error('Сервер вернул не JSON при перемещении карточки');
+    }
   }
 
   // ---- Справочники ----
@@ -328,10 +338,13 @@ export class LimsSyncService {
     await this.deleteEntity(`/api/lab/equipment/${id}`);
   }
 
-  async listLabMembers(): Promise<LabMember[]> {
+  /** Без labId — полный список (только для руководителя лабы, «Настройки»). С
+   * labId — ростер одной лабы, доступен любому её участнику (Kanban-доска). */
+  async listLabMembers(labId?: number): Promise<LabMember[]> {
     const token = await this.getToken();
+    const qs = labId ? `?lab_id=${labId}` : '';
     const res = await this.request({
-      url: `${this.baseUrl}/api/lab/lab-members`,
+      url: `${this.baseUrl}/api/lab/lab-members${qs}`,
       method: 'GET',
       headers: { Authorization: `Bearer ${token}` },
     });

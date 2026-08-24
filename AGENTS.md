@@ -88,12 +88,13 @@ raw-имя письма — системное. `additional_info`/`substrate`/`m
 | Файл | Что это |
 |---|---|
 | `src/main.ts` | `SbeLimsPlugin`: настройки, syncService, refreshMethods (pull методов при onload), view, publishService |
-| `src/services/sync.service.ts` | `LimsSyncService`: JWT из ЦУП, заявки/результаты/расчёт/справочники/графики/протокол, permissions/me, таймауты 30с, понятные 401/403 (дашборд-метода нет — вынесен) |
-| `src/ui/lims-view.ts` | `LimsView` (тип `sbe-lims-view`): фасад (шапка + сайдбар-дерево + контент) полностью наполнен (2026-08-19): «Все заявки»/«Очередь лаборатории»/«Результаты и протоколы» (один рендер `renderRequests(filter?)` с разными фильтрами по статусу), карточка заявки (серии/расчёт/статус/графики/протокол), «Методы» (список + JSON-редактор конфигов, admin), «Объекты» (только чтение), «Испытатели»/«Оборудование» (список + создание, editor+), «Сотрудники» (список + добавление/удаление, admin — раздел скрыт для не-admin, т.к. `GET /lab-members` сам admin-only на сервере) |
+| `src/services/sync.service.ts` | `LimsSyncService`: JWT из ЦУП, заявки/результаты/расчёт/справочники/графики/протокол, `moveKanbanCard` (2026-08-24, `POST .../kanban-move`), `listLabMembers(labId?)` (без аргумента — полный список, admin; с `lab_id` — ростер одной лабы, доступен любому её участнику), permissions/me, таймауты 30с, понятные 401/403 |
+| `src/ui/lims-view.ts` | `LimsView` (тип `sbe-lims-view`): фасад (шапка + сайдбар-дерево + контент). «Все заявки»/«Результаты и протоколы» — один рендер `renderRequests(filter?)` с разными фильтрами по статусу; **«Очередь лаборатории»** (2026-08-24) — Kanban-доска `renderQueueBoard()`, 4 колонки new/received/processing/completed, колонки 2/3 делятся на ячейки по испытателям лабы (`renderPerTesterKanbanColumn`), drag-and-drop + контролы в детали заявки идут через один `performKanbanMove()`; карточка заявки (серии/расчёт/статус-назначение/графики/протокол), «Методы» (список + JSON-редактор конфигов, admin), «Объекты» (только чтение), «Испытатели»/«Оборудование» (список + создание, editor+), «Сотрудники» (список + добавление/удаление, admin) |
 | `src/ui/settings-tab.ts` | Настройки: apiUrl + «Права доступа» (роли + общий доступ) |
-| `src/types/lims.ts` | `LimsRequest`, `Lab`, `LabMethod`, `LabObject`, `MeasurementResult`, `AggregatedResult`, `Inventor`, `Equipment`, `LabMember`, `MethodConfig`, `ProtocolResponse`, `DocumentBlock`/`RichNode`/`InlineNode`/`TableColumn`/`PlaceholderSource`/`PlaceholderAgg` (2026-08-23, блоки форматированного текста — заменили `PresentationSection`/`PresentationField`/`PresentationChartRef`/`ShortView*` от 2026-08-22), `OperatorFormField`/`MethodOperatorForm` (без `DashboardData`) |
-| `src/ui/block-editor.ts` | `renderBlockEditor` — визуальный (WYSIWYG) редактор ОДНОГО блока: строки абзац/заголовок/список/таблица, каждая текстовая строка — небольшой `contenteditable` с тулбаром Ж/К/🏷Плейсхолдер (чип, `PlaceholderPickerModal`); таблица — структурный виджет (не contenteditable), колонки атрибутов + "Серия" (номер по порядку), drag-reorder |
-| `src/styles.css` | Классы `tn-lims-*` на семантических токенах, `.tn-lims-chip` (плейсхолдер), `.tn-lims-rich-line` (contenteditable-строка) |
+| `src/types/lims.ts` | `LimsRequest` (+ `assigned_to`/`completed_at`, 2026-08-24, Kanban-доска), `Lab`, `LabMethod`, `LabObject`, `MeasurementResult`, `AggregatedResult`, `Inventor`, `Equipment`, `LabMember`, `MethodConfig`, `ProtocolResponse`, `DocumentBlock`/`RichNode`(+`align`/`static_table`/`rows`, 2026-08-24)/`InlineNode`(+`sup`/`sub`, 2026-08-24)/`TableColumn`/`PlaceholderSource`/`PlaceholderAgg`, `OperatorFormField`/`MethodOperatorForm` |
+| `src/ui/block-editor.ts` | `renderBlockEditor` — визуальный (WYSIWYG) редактор ОДНОГО блока: строки абзац/заголовок/список/таблица/**статическая таблица** (2026-08-24, `renderStaticTableEditor` — визуальный конструктор, ячейки — mini rich-text), каждая текстовая строка — небольшой `contenteditable` с тулбаром Ж/К/**x²/x₂** (2026-08-24, `execCommand('superscript'/'subscript')`)/🏷Плейсхолдер (чип, `PlaceholderPickerModal`); абзац/заголовок — **выравнивание** (`renderAlignSelect`, 2026-08-24); таблица данных серий — структурный виджет (не contenteditable), колонки атрибутов + "Серия", drag-reorder; **список — drag-reorder пунктов** (2026-08-24) |
+| `src/ui/subsup.ts` | `toggleSubSupPalette` (2026-08-24, вынесен из `lims-view.ts`) — юникод-палитра над-/подстрочных символов для plain `<input>` (название атрибута, подпись колонки таблицы) |
+| `src/styles.css` | Классы `tn-lims-*` на семантических токенах, `.tn-lims-chip` (плейсхолдер), `.tn-lims-rich-line` (contenteditable-строка), `.tn-lims-kanban*` (2026-08-24, доска) |
 
 ## Настройки (data.json)
 
@@ -145,6 +146,77 @@ lab_operator/lab_admin/владелец. Не трогали: эндпоинт �
   классификации `none`/`avg`/`min`/`max` (не `best`/`worst`).
 
 ## История работ
+
+### 2026-08-24 — v0.2.3 (Kanban-доска «Очередь лаборатории»; 5 доработок блочного редактора: таблицы/индексы/выравнивание/drag-list/полный номер)
+
+Два независимых блока работы, оба по прямым запросам пользователя.
+
+**1. Kanban-доска «Очередь лаборатории».** Раньше это была плоская страница
+(`renderRequests`, фильтр `new`/`received`) — статус `processing` не показывался
+вообще ни на одной специализированной странице. Теперь `renderQueueBoard()`:
+4 колонки (Новые / В работу / В работе / Завершённые = new/received/processing/
+completed — маппинг подтверждён точным совпадением подписи `processing`
+"🟡 В работе" названию колонки 3); колонки 2/3 делятся на ячейки по испытателям
+лабы (`lab_members.role IN ('lab_operator','lab_admin')`, ростер — новый
+`fetchLabRoster`/`testersOf`/`myRoleIn`); колонка 4 показывает завершённую
+заявку 10 РАБОЧИХ дней от нового `completed_at` (`withinCompletedWindow`,
+Пн–Пт), затем карточка пропадает с доски (сама заявка не трогается — видна на
+плоской «Результаты»).
+- **Правило перетаскивания/назначения** (сервер — единственная точка входа
+  `POST .../kanban-move`, см. `lab-service/AGENTS.md`, `kanban.go`): руководитель
+  лабы (глобальная роль admin/superadmin) двигает и назначает свободно;
+  испытатель двигает только уже назначенные ему карточки между СВОИМИ ячейками
+  колонок 2/3 (и дальше в 4), либо забирает СЕБЕ (не кому-то другому)
+  неназначенную заявку прямо из колонки 1 — самозабор, уточнено пользователем
+  отдельно от исходного текста задачи. Клиент (`renderFlatKanbanColumn`/
+  `renderPerTesterKanbanColumn`/`performKanbanMove`) реализует ТЕ ЖЕ правила и
+  для drag-and-drop, и для контролов в детали заявки (полный статус-select +
+  select испытателя у руководителя; «📥 Взять в работу» у испытателя на
+  неназначенной новой; ограниченный статус-select у испытателя на своей уже
+  назначенной) — сервер всё равно перепроверяет, клиентские предикаты только
+  скрывают заведомо отклоняемое.
+- Новое поле `LimsRequest.assigned_to`/`completed_at`; удалён геттер
+  `canEditStatus` (был `myRole !== ''` — теперь решает сервер по факту вызова
+  `kanban-move`, а не единая клиентская проверка).
+- `GET /lab-members?lab_id=` (сервер) теперь доступен любому участнику этой
+  лабы, не только admin — испытателю нужно видеть состав всех ячеек, не
+  только свою.
+
+**2. Пять доработок блочного редактора протокола** (список из 6 задач
+пользователя — задача 6, экспорт Word/Excel из модуля заявок, целиком в
+sbe-requests, см. его `AGENTS.md`):
+1. Таблица результатов — границы/центрирование теперь видны и в «Кратком
+   виде» (не только в модалке протокола): контейнер обёрнут новым общим
+   классом `.tn-protocol-html` (sbe-core, зеркалит серверный `<style>`, который
+   в короткий вид не доходит — вставляется только `doc.body.innerHTML`).
+2. **Статические таблицы в тексте + выравнивание абзаца.** Новый
+   `RichNode.type = 'static_table'` (визуальный конструктор — пользователь сам
+   задаёт число строк/столбцов, каждая ячейка — mini rich-text через
+   `renderInlineEditable`, сразу получает bold/italic/индексы/плейсхолдеры
+   бесплатно) — в отличие от `type: 'table'` (данные серий, авто-заполняемые
+   столбцы). `RichNode.align` (''/center/right/justify) — на абзаце/заголовке,
+   `renderAlignSelect`.
+3. **Верхние/нижние индексы во всех rich-text элементах** (абзац/заголовок/
+   пункт списка — все три идут через один `renderInlineEditable`): настоящие
+   `<sup>/<sub>` через `document.execCommand('superscript'/'subscript')` (как
+   Ж/К), `InlineNode.sup`/`.sub`. Для подписи колонки таблицы (plain `<input>`,
+   `execCommand` неприменим) — прежний юникод-приём, вынесен в общий
+   `src/ui/subsup.ts` (`toggleSubSupPalette`, был приватным методом `LimsView`).
+4. **Перетаскивание пунктов списка** — тот же паттерн, что уже был у колонок
+   таблицы (draggable-строка + ⠿-хэндл + dragstart/dragover/drop + splice).
+5. **Полный номер заявки везде** (заголовок детали, модалка протокола, имя
+   файла DOCX) — `fullRequestNumber()` (`customer_number`, с кодом проекта/
+   лабы/метода). Карточки списков («Все заявки»/«Очередь лаборатории» —
+   отдельный частичный откат по прямой просьбе пользователя) остаются
+   единственным местом с коротким `lab_number`.
+- Попутно: `downloadDocx` переведён на общий `downloadBase64File`
+  (`sbe-core/src/utils/download.ts`) — тот же хелпер теперь и в sbe-requests
+  (кнопки Word/Excel там, задача 6).
+- `npx tsc --noEmit`/`npm run build` — чисто (Kanban-доска дополнительно
+  проверена: `go build`/`vet`/`test` в lab-service, 10 новых юнит-тестов
+  `canApplyKanbanMove`/`normalizeKanbanTarget` — все зелёные; деплой на VDS
+  подтверждён, миграция применена, `curl .../health` → `{"status":"ok"}`).
+  Версия 0.2.2 → **0.2.3**.
 
 ### 2026-08-23/24 — v0.2.2 (живое тестирование ГВ: свободный ввод grade, singleton-модалка протокола)
 

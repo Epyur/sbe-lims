@@ -1,4 +1,5 @@
 import { App, Modal } from 'obsidian';
+import { toggleSubSupPalette } from './subsup';
 import type {
   ChartConfig,
   DocumentBlock,
@@ -92,6 +93,8 @@ function renderInlineNodesIntoDOM(container: HTMLElement, nodes: InlineNode[], a
     let el: Node = document.createTextNode(n.text || '');
     if (n.bold) { const b = document.createElement('b'); b.appendChild(el); el = b; }
     if (n.italic) { const i = document.createElement('i'); i.appendChild(el); el = i; }
+    if (n.sup) { const sup = document.createElement('sup'); sup.appendChild(el); el = sup; }
+    else if (n.sub) { const sub = document.createElement('sub'); sub.appendChild(el); el = sub; }
     container.appendChild(el);
   }
 }
@@ -102,10 +105,15 @@ function renderInlineNodesIntoDOM(container: HTMLElement, nodes: InlineNode[], a
  * теги не протаскиваются. */
 function domToInlineNodes(root: HTMLElement): InlineNode[] {
   const out: InlineNode[] = [];
-  const walk = (node: Node, bold: boolean, italic: boolean): void => {
+  const walk = (node: Node, bold: boolean, italic: boolean, sup: boolean, sub: boolean): void => {
     if (node.nodeType === Node.TEXT_NODE) {
       const text = node.textContent || '';
-      if (text) out.push({ type: 'text', text, bold: bold || undefined, italic: italic || undefined });
+      if (text) {
+        out.push({
+          type: 'text', text, bold: bold || undefined, italic: italic || undefined,
+          sup: sup || undefined, sub: (!sup && sub) || undefined,
+        });
+      }
       return;
     }
     if (node.nodeType !== Node.ELEMENT_NODE) return;
@@ -118,6 +126,8 @@ function domToInlineNodes(root: HTMLElement): InlineNode[] {
         agg: (el.getAttribute('data-agg') as PlaceholderAgg) || undefined,
         bold: bold || undefined,
         italic: italic || undefined,
+        sup: sup || undefined,
+        sub: (!sup && sub) || undefined,
       });
       return;
     }
@@ -125,9 +135,15 @@ function domToInlineNodes(root: HTMLElement): InlineNode[] {
     const style = el.getAttribute('style') || '';
     const nextBold = bold || tag === 'b' || tag === 'strong' || /font-weight:\s*(bold|[6-9]00)/i.test(style);
     const nextItalic = italic || tag === 'i' || tag === 'em' || /font-style:\s*italic/i.test(style);
-    for (const child of Array.from(el.childNodes)) walk(child, nextBold, nextItalic);
+    // sup/sub взаимоисключающие (2026-08-24) — если оба тега умудрились
+    // вложиться друг в друга (execCommand такого не делает, но paste — в
+    // теории могло бы, если не был бы санитизирован до plainText), sup
+    // побеждает: см. приоритет !sup&&sub при записи текстового узла выше.
+    const nextSup = sup || tag === 'sup';
+    const nextSub = sub || tag === 'sub';
+    for (const child of Array.from(el.childNodes)) walk(child, nextBold, nextItalic, nextSup, nextSub);
   };
-  for (const child of Array.from(root.childNodes)) walk(child, false, false);
+  for (const child of Array.from(root.childNodes)) walk(child, false, false, false, false);
   return out;
 }
 
@@ -165,6 +181,13 @@ function renderInlineEditable(
   const toolbar = container.createDiv({ cls: 'tn-lims-flex' });
   const boldBtn = toolbar.createEl('button', { text: 'Ж', cls: 'tn-btn tn-btn-ghost', attr: { title: 'Жирный' } });
   const italicBtn = toolbar.createEl('button', { text: 'К', cls: 'tn-btn tn-btn-ghost', attr: { title: 'Курсив' } });
+  // Верхний/нижний индекс (2026-08-24, по запросу пользователя — "во всех
+  // элементах... как это сделано в настройках атрибутов", но там из-за plain
+  // <input> — юникод-символ; тут настоящий contenteditable, execCommand даёт
+  // реальные <sup>/<sub>, как Ж/К через execCommand('bold'/'italic') выше —
+  // браузер сам взаимоисключает superscript/subscript на одном выделении.
+  const supBtn = toolbar.createEl('button', { text: 'x²', cls: 'tn-btn tn-btn-ghost', attr: { title: 'Верхний индекс' } });
+  const subBtn = toolbar.createEl('button', { text: 'x₂', cls: 'tn-btn tn-btn-ghost', attr: { title: 'Нижний индекс' } });
   const placeholderBtn = toolbar.createEl('button', { text: '🏷 Плейсхолдер', cls: 'tn-btn tn-btn-ghost' });
 
   const editable = container.createDiv({ cls: 'tn-lims-rich-line', attr: { contenteditable: 'true' } });
@@ -176,6 +199,10 @@ function renderInlineEditable(
   boldBtn.addEventListener('click', () => { editable.focus(); document.execCommand('bold'); serialize(); });
   italicBtn.addEventListener('mousedown', (ev) => ev.preventDefault());
   italicBtn.addEventListener('click', () => { editable.focus(); document.execCommand('italic'); serialize(); });
+  supBtn.addEventListener('mousedown', (ev) => ev.preventDefault());
+  supBtn.addEventListener('click', () => { editable.focus(); document.execCommand('superscript'); serialize(); });
+  subBtn.addEventListener('mousedown', (ev) => ev.preventDefault());
+  subBtn.addEventListener('click', () => { editable.focus(); document.execCommand('subscript'); serialize(); });
   placeholderBtn.addEventListener('click', () => {
     new PlaceholderPickerModal(deps.app, deps.attrs, (node) => {
       insertChipAtCursor(editable, buildChipEl(node, deps.attrs));
@@ -305,6 +332,10 @@ function renderTableNodeEditor(container: HTMLElement, node: RichNode, attrs: Me
       });
       labelInput.value = col.label || '';
       labelInput.addEventListener('change', () => { col.label = labelInput.value.trim() || undefined; });
+      // x² — тот же юникод-приём, что у названия атрибута (subsup.ts): подпись
+      // колонки — plain input, execCommand неприменим (2026-08-24).
+      const colSupBtn = row.createEl('button', { text: 'x²', cls: 'tn-btn tn-btn-ghost', attr: { title: 'Вставить надстрочный/подстрочный символ' } });
+      colSupBtn.addEventListener('click', (e) => { e.preventDefault(); toggleSubSupPalette(row, labelInput); });
       const delBtn = row.createEl('button', { text: '✖', cls: 'tn-btn tn-btn-ghost' });
       delBtn.addEventListener('click', () => { node.columns!.splice(idx, 1); onStructuralChange(); });
     });
@@ -332,11 +363,85 @@ function renderTableNodeEditor(container: HTMLElement, node: RichNode, attrs: Me
   });
 }
 
+// Перетаскивание пунктов списка (2026-08-24, по запросу пользователя) — тот же
+// паттерн, что уже есть в этом файле для колонок таблицы (renderTableNodeEditor)
+// и строк содержимого блока (renderBlockEditor): draggable-строка + ⠿-хэндл +
+// dragstart/dragover/drop + splice/onStructuralChange (полный редрав списка).
+/** Статическая таблица (RichNode "static_table", 2026-08-24) — визуальный
+ * конструктор: пользователь сам задаёт число строк/столбцов и содержимое КАЖДОЙ
+ * ячейки (мини rich-text через renderInlineEditable — та же модель, что абзац,
+ * ячейки сразу получают bold/italic/индексы/плейсхолдеры без отдельной логики).
+ * В отличие от RichNode "table" (данные серий, авто-заполняемые ячейки) —
+ * здесь ничего не подставляется автоматически из результатов эксперимента. */
+function renderStaticTableEditor(
+  container: HTMLElement,
+  node: RichNode,
+  deps: BlockEditorDeps,
+  onStructuralChange: () => void,
+): void {
+  if (!node.rows || node.rows.length === 0) node.rows = [[[], []], [[], []]]; // 2×2 по умолчанию
+  const rows = node.rows;
+  const colCount = rows[0]?.length || 1;
+
+  container.createDiv({ cls: 'tn-lims-meta' }).setText('Статическая таблица — содержимое каждой ячейки вводится вручную:');
+  const table = container.createEl('table', { cls: 'tn-table' });
+
+  // строка управления столбцами — ✖ под каждым столбцом + ➕ столбец в конце
+  const colControlRow = table.createEl('tr');
+  colControlRow.createEl('td'); // угловая ячейка — под управление строками
+  for (let c = 0; c < colCount; c++) {
+    const td = colControlRow.createEl('td');
+    const delColBtn = td.createEl('button', { text: '✖ столбец', cls: 'tn-btn tn-btn-ghost' });
+    delColBtn.addEventListener('click', () => {
+      for (const r of rows) r.splice(c, 1);
+      onStructuralChange();
+    });
+  }
+  const addColTd = colControlRow.createEl('td');
+  const addColBtn = addColTd.createEl('button', { text: '➕ столбец', cls: 'tn-btn tn-btn-ghost' });
+  addColBtn.addEventListener('click', () => {
+    for (const r of rows) r.push([]);
+    onStructuralChange();
+  });
+
+  rows.forEach((row, ri) => {
+    const tr = table.createEl('tr');
+    const rowCtlTd = tr.createEl('td');
+    const delRowBtn = rowCtlTd.createEl('button', { text: '✖ строка', cls: 'tn-btn tn-btn-ghost' });
+    delRowBtn.addEventListener('click', () => { rows.splice(ri, 1); onStructuralChange(); });
+    row.forEach((cell, ci) => {
+      const td = tr.createEl('td');
+      renderInlineEditable(td, cell, (nodes) => { rows[ri][ci] = nodes; }, deps);
+    });
+  });
+
+  const addRowTr = table.createEl('tr');
+  const addRowTd = addRowTr.createEl('td');
+  const addRowBtn = addRowTd.createEl('button', { text: '➕ строка', cls: 'tn-btn tn-btn-ghost' });
+  addRowBtn.addEventListener('click', () => {
+    rows.push(Array.from({ length: colCount }, () => []));
+    onStructuralChange();
+  });
+}
+
 function renderBulletListEditor(container: HTMLElement, node: RichNode, deps: BlockEditorDeps, onStructuralChange: () => void): void {
   if (!node.items) node.items = [];
+  let dragFromIdx: number | null = null;
   node.items.forEach((item: InlineNode[], idx: number) => {
-    const row = container.createDiv({ cls: 'tn-lims-flex' });
-    row.createSpan({ text: '•' });
+    const row = container.createDiv({ cls: 'tn-lims-flex', attr: { draggable: 'true' } });
+    row.style.cursor = 'grab';
+    row.addEventListener('dragstart', (ev) => { dragFromIdx = idx; ev.stopPropagation(); });
+    row.addEventListener('dragover', (ev) => ev.preventDefault());
+    row.addEventListener('drop', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (dragFromIdx === null || dragFromIdx === idx) return;
+      const [moved] = node.items!.splice(dragFromIdx, 1);
+      node.items!.splice(idx, 0, moved);
+      dragFromIdx = null;
+      onStructuralChange();
+    });
+    row.createSpan({ text: '⠿ •', cls: 'tn-lims-meta' });
     const lineWrap = row.createDiv();
     renderInlineEditable(lineWrap, item, (nodes) => { node.items![idx] = nodes; }, deps);
     const delBtn = row.createEl('button', { text: '✖', cls: 'tn-btn tn-btn-ghost' });
@@ -344,6 +449,24 @@ function renderBulletListEditor(container: HTMLElement, node: RichNode, deps: Bl
   });
   const addBtn = container.createEl('button', { text: '➕ Пункт списка', cls: 'tn-btn tn-btn-ghost' });
   addBtn.addEventListener('click', () => { node.items!.push([]); onStructuralChange(); });
+}
+
+/** Выравнивание абзаца/заголовка (2026-08-24, по запросу пользователя — "в
+ * абзаце настройки выравнивания (по ширине, центр, право, лево)"). Применимо к
+ * paragraph/heading — оба блочные текстовые узлы; для bullet_list/table не
+ * имеет смысла (список — свой маркер слева, таблица — своя ширина колонок). */
+function renderAlignSelect(container: HTMLElement, node: RichNode): void {
+  const row = container.createDiv({ cls: 'tn-lims-flex' });
+  row.createSpan({ text: 'Выравнивание:', cls: 'tn-lims-meta' });
+  const select = row.createEl('select', { cls: 'tn-lims-select' });
+  const OPTIONS: Array<[string, string]> = [
+    ['', 'слева (по умолч.)'], ['center', 'по центру'], ['right', 'справа'], ['justify', 'по ширине'],
+  ];
+  for (const [val, label] of OPTIONS) select.createEl('option', { attr: { value: val }, text: label });
+  select.value = node.align || '';
+  select.addEventListener('change', () => {
+    node.align = (select.value || undefined) as RichNode['align'];
+  });
 }
 
 /** Один узел содержимого блока — заголовок редактора зависит от типа.
@@ -365,6 +488,7 @@ function renderRichNodeEditor(
     for (const lvl of [2, 3, 4]) levelSelect.createEl('option', { attr: { value: String(lvl) }, text: String(lvl) });
     levelSelect.value = String(node.level || 3);
     levelSelect.addEventListener('change', () => { node.level = (Number(levelSelect.value) || 3) as 2 | 3 | 4; });
+    renderAlignSelect(container, node);
     if (!node.children) node.children = [];
     renderInlineEditable(container, node.children, (nodes) => { node.children = nodes; }, deps);
     return;
@@ -377,13 +501,19 @@ function renderRichNodeEditor(
     renderTableNodeEditor(container, node, deps.attrs, onStructuralChange);
     return;
   }
+  if (node.type === 'static_table') {
+    renderStaticTableEditor(container, node, deps, onStructuralChange);
+    return;
+  }
   // "paragraph"
+  renderAlignSelect(container, node);
   if (!node.children) node.children = [];
   renderInlineEditable(container, node.children, (nodes) => { node.children = nodes; }, deps);
 }
 
 const NODE_TYPE_LABEL: Record<RichNode['type'], string> = {
   paragraph: 'Абзац', heading: 'Заголовок', bullet_list: 'Список', table: 'Таблица',
+  static_table: 'Статическая таблица',
 };
 
 /** Редактор ОДНОГО блока документа — список строк (абзац/заголовок/список/
@@ -450,6 +580,11 @@ export function renderBlockEditor(
     // implicit; так поведение по умолчанию не меняется, но теперь колонку
     // можно убрать/переместить/переименовать (2026-08-23).
     block.content.push({ type: 'table', columns: [{ kind: 'series_no' }] });
+    onStructuralChange();
+  });
+  const addStaticTableBtn = addRow.createEl('button', { text: '➕ Статическая таблица', cls: 'tn-btn tn-btn-ghost' });
+  addStaticTableBtn.addEventListener('click', () => {
+    block.content.push({ type: 'static_table', rows: [[[], []], [[], []]] });
     onStructuralChange();
   });
 

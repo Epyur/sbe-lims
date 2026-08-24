@@ -360,6 +360,69 @@
   gap: 4px 12px;
 }
 
+/* Kanban-доска «Очередь лаборатории» (2026-08-24) */
+.tn-lims-kanban {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  overflow-x: auto;
+  padding-bottom: 8px;
+}
+.tn-lims-kanban-col {
+  flex: 1 0 240px;
+  min-width: 240px;
+  background: var(--tn-card);
+  border: 1px solid var(--tn-border);
+  border-radius: var(--tn-radius);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.tn-lims-kanban-col-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-weight: 600;
+  font-size: 13px;
+}
+.tn-lims-kanban-col-count {
+  font-size: var(--font-smaller);
+  color: var(--tn-muted);
+}
+.tn-lims-kanban-cell {
+  border: 1px dashed var(--tn-border);
+  border-radius: var(--tn-radius);
+  padding: 6px;
+  min-height: 40px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.tn-lims-kanban-cell-head {
+  font-size: var(--font-smaller);
+  color: var(--tn-muted);
+  font-weight: 600;
+}
+.tn-lims-kanban-dropzone-over {
+  border-color: var(--tn-brand);
+  border-style: solid;
+}
+.tn-lims-kanban-card {
+  background: var(--tn-card);
+  border: 1px solid var(--tn-border);
+  border-radius: var(--tn-radius);
+  padding: 8px 10px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.tn-lims-kanban-card[draggable="true"] {
+  cursor: grab;
+}
+.tn-lims-kanban-card:hover {
+  border-color: var(--tn-brand);
+}
+
 .tn-lims-series-form {
   display: flex;
   flex-direction: column;
