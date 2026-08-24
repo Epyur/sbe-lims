@@ -253,7 +253,11 @@ class PlaceholderPickerModal extends Modal {
       this.buildRow(s.label, () => this.pick({ type: 'placeholder', source: 'system', attribute_id: s.id }));
     }
 
-    const aggregated = this.attrs.filter(a => a.level === 'aggregated');
+    // "timeseries" — не скалярное значение (весь ряд датчика целиком), плейсхолдер
+    // вставил бы дамп JSON вместо текста/картинки — такой атрибут показывается только
+    // через график (см. ChartConfig.kind="timeseries" в конфигураторе), не здесь
+    // (2026-08-24, по жалобе "все данные внесены в одну ячейку").
+    const aggregated = this.attrs.filter(a => a.level === 'aggregated' && a.data_type !== 'timeseries');
     if (aggregated.length > 0) {
       this.contentEl.createDiv({ cls: 'tn-lims-meta tn-lims-mt8' }).setText('Агрегированные результаты:');
       for (const a of aggregated) {
@@ -261,7 +265,7 @@ class PlaceholderPickerModal extends Modal {
       }
     }
 
-    const experiment = this.attrs.filter(a => a.level === 'experiment');
+    const experiment = this.attrs.filter(a => a.level === 'experiment' && a.data_type !== 'timeseries');
     if (experiment.length > 0) {
       this.contentEl.createDiv({ cls: 'tn-lims-meta tn-lims-mt8' }).setText(
         'Атрибуты эксперимента (нужно выбрать одно значение серии; 📷 — фотография, вставляется как изображение):',
@@ -358,7 +362,9 @@ function renderTableNodeEditor(container: HTMLElement, node: RichNode, attrs: Me
   if (!node.columns!.some((c: TableColumn) => c.kind === 'series_no')) {
     select.createEl('option', { attr: { value: '__series_no__' }, text: 'Серия (номер по порядку)' });
   }
-  for (const a of attrs.filter(a => a.level === 'experiment')) {
+  // "timeseries" исключён (2026-08-24, см. PlaceholderPickerModal выше) — ячейка
+  // таблицы показала бы дамп всего JSON-ряда, а не осмысленное значение.
+  for (const a of attrs.filter(a => a.level === 'experiment' && a.data_type !== 'timeseries')) {
     if (node.columns!.some((c: TableColumn) => c.attribute_id === a.id)) continue;
     select.createEl('option', { attr: { value: a.id }, text: attrDisplayName(a, a.id) });
   }

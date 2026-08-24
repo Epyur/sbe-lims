@@ -22,6 +22,7 @@ import type {
   Operand,
   OperatorFormField,
   PresentationKind,
+  TimeseriesSeriesConfig,
 } from '../types/lims';
 import { renderBlockEditor, SYSTEM_PLACEHOLDERS } from './block-editor';
 import { toggleSubSupPalette } from './subsup';
@@ -1424,10 +1425,23 @@ export class LimsView extends ItemView {
       id: c.id || `chart_${i}`,
       title: c.title,
       chart_type: c.chart_type === 'scatter' || c.chart_type === 'bar' ? c.chart_type : 'line',
+      // kind/timeseries_series/y2_label (2026-08-24) — до этого фикса редактор их не
+      // знал и терял при пересохранении (см. AGENTS.md "график по датчику" — реальный
+      // инцидент, ДВАЖДЫ: сперва с source_param/channels, потом при переходе на
+      // timeseries_series — пока фронтенд не обновлён вслед за форматом на сервере,
+      // любое открытие+сохранение конфигуратора стирает поля, которых типы/редактор
+      // ещё не знают). Сохраняем при чтении, чтобы дальше не терять.
+      kind: c.kind === 'timeseries' ? 'timeseries' : undefined,
       x_column: c.x_column,
       x_label: c.x_label,
       y_label: c.y_label,
+      y2_label: c.y2_label,
       series_config: Array.isArray(c.series_config) ? c.series_config.map(s => ({ ...s })) : [],
+      timeseries_series: Array.isArray(c.timeseries_series)
+        ? c.timeseries_series
+          .filter((s): s is TimeseriesSeriesConfig => !!s && typeof s.source_param === 'string' && typeof s.channel === 'string')
+          .map(s => ({ ...s }))
+        : undefined,
     }));
     form.createEl('h4', { text: 'Графики' });
     const chartsListEl = form.createDiv();
@@ -1756,8 +1770,20 @@ export class LimsView extends ItemView {
     }
   }
 
+  /** Каналы графика "по времени" (kind="timeseries") — фиксированный список под
+   * реальную форму письма прибора (mesure_data.channels.channel_1-4/average_temp/
+   * derivative, см. extractInstrumentFields в lab-service) — не свободный ввод, чтобы
+   * не разойтись с тем, что реально понимает сервер (buildChartSeriesFromTimeseries). */
+  private static readonly TIMESERIES_CHANNEL_OPTIONS: Array<[string, string]> = [
+    ['channel_1', 'Канал 1'], ['channel_2', 'Канал 2'], ['channel_3', 'Канал 3'], ['channel_4', 'Канал 4'],
+    ['average_temp', 'Среднее по каналам'], ['derivative', 'Скорость нарастания'],
+  ];
+
   /** Карточки графиков (блок 3б, chart_configs) — тот же паттерн, что атрибуты/
-   * правила классификации. */
+   * правила классификации. Два несовместимых режима (2026-08-24, см. AGENTS.md
+   * "график по датчику"): "по сериям" (обычный — X/Y читаются из значений атрибутов
+   * ПОПЕРЁК серий-повторов) и "по времени" (kind="timeseries" — X/Y читаются ИЗ ОДНОГО
+   * значения атрибута data_type="timeseries", целого ряда датчика). */
   private renderChartRows(
     container: HTMLElement,
     charts: ChartConfig[],
@@ -1780,48 +1806,146 @@ export class LimsView extends ItemView {
       const delBtn = row1.createEl('button', { text: '✖', cls: 'tn-btn tn-btn-ghost' });
       delBtn.addEventListener('click', () => { charts.splice(idx, 1); onChange(); });
 
-      const row2 = card.createDiv({ cls: 'tn-lims-flex' });
-      row2.createSpan({ text: 'Ось X:' });
-      const xSelect = row2.createEl('select', { cls: 'tn-lims-select' });
-      xSelect.createEl('option', { attr: { value: '' }, text: '— номер серии —' });
-      for (const a of attrs) {
-        if (!a.id) continue;
-        xSelect.createEl('option', { attr: { value: a.id }, text: a.name || a.id });
-      }
-      xSelect.value = chart.x_column || '';
-      xSelect.addEventListener('change', () => { chart.x_column = xSelect.value || undefined; });
-      const xLabelInput = row2.createEl('input', { attr: { type: 'text', placeholder: 'Подпись оси X' }, cls: 'tn-lims-input' });
+      const row1b = card.createDiv({ cls: 'tn-lims-flex' });
+      row1b.createSpan({ text: 'Режим:' });
+      const modeSelect = row1b.createEl('select', { cls: 'tn-lims-select' });
+      modeSelect.createEl('option', { attr: { value: '' }, text: 'По сериям (атрибут на каждый повтор)' });
+      modeSelect.createEl('option', { attr: { value: 'timeseries' }, text: 'По времени (весь ряд датчика)' });
+      modeSelect.value = chart.kind || '';
+
+      const bodyEl = card.createDiv();
+      const redrawBody = (): void => {
+        bodyEl.empty();
+        if (chart.kind === 'timeseries') {
+          this.renderTimeseriesChartBody(bodyEl, chart, attrs);
+        } else {
+          this.renderSeriesChartBody(bodyEl, chart, attrs);
+        }
+      };
+      modeSelect.addEventListener('change', () => {
+        chart.kind = modeSelect.value === 'timeseries' ? 'timeseries' : undefined;
+        redrawBody();
+      });
+
+      const labelsRow = card.createDiv({ cls: 'tn-lims-flex' });
+      const xLabelInput = labelsRow.createEl('input', { attr: { type: 'text', placeholder: 'Подпись оси X' }, cls: 'tn-lims-input' });
       xLabelInput.value = chart.x_label || '';
       xLabelInput.addEventListener('change', () => { chart.x_label = xLabelInput.value.trim() || undefined; });
-      const yLabelInput = row2.createEl('input', { attr: { type: 'text', placeholder: 'Подпись оси Y' }, cls: 'tn-lims-input' });
+      const yLabelInput = labelsRow.createEl('input', { attr: { type: 'text', placeholder: 'Подпись оси Y' }, cls: 'tn-lims-input' });
       yLabelInput.value = chart.y_label || '';
       yLabelInput.addEventListener('change', () => { chart.y_label = yLabelInput.value.trim() || undefined; });
 
-      card.createDiv({ cls: 'tn-lims-meta' }).setText('Ряды:');
-      const seriesListEl = card.createDiv();
-      const redrawSeries = () => {
-        seriesListEl.empty();
-        chart.series_config.forEach((sc, sIdx) => {
-          const sRow = seriesListEl.createDiv({ cls: 'tn-lims-flex' });
-          const srcSelect = sRow.createEl('select', { cls: 'tn-lims-select' });
-          srcSelect.createEl('option', { attr: { value: '' }, text: '— источник —' });
-          for (const a of attrs) {
-            if (!a.id) continue;
-            srcSelect.createEl('option', { attr: { value: a.id }, text: a.name || a.id });
-          }
-          srcSelect.value = sc.source_param;
-          srcSelect.addEventListener('change', () => { sc.source_param = srcSelect.value; });
-          const sLabelInput = sRow.createEl('input', { attr: { type: 'text', placeholder: 'Подпись ряда' }, cls: 'tn-lims-input' });
-          sLabelInput.value = sc.label || '';
-          sLabelInput.addEventListener('change', () => { sc.label = sLabelInput.value.trim() || undefined; });
-          const sDelBtn = sRow.createEl('button', { text: '✖', cls: 'tn-btn tn-btn-ghost' });
-          sDelBtn.addEventListener('click', () => { chart.series_config.splice(sIdx, 1); redrawSeries(); });
-        });
-      };
-      redrawSeries();
-      const addSeriesBtn = card.createEl('button', { text: '➕ Ряд', cls: 'tn-btn tn-btn-ghost' });
-      addSeriesBtn.addEventListener('click', () => { chart.series_config.push({ source_param: '' }); redrawSeries(); });
+      redrawBody();
     });
+  }
+
+  /** Тело карточки графика "по сериям" (обычный режим, kind не задан) — Ось X +
+   * список рядов, поведение не изменилось относительно версии до режима "по времени". */
+  private renderSeriesChartBody(bodyEl: HTMLElement, chart: ChartConfig, attrs: MethodAttribute[]): void {
+    const row2 = bodyEl.createDiv({ cls: 'tn-lims-flex' });
+    row2.createSpan({ text: 'Ось X:' });
+    const xSelect = row2.createEl('select', { cls: 'tn-lims-select' });
+    xSelect.createEl('option', { attr: { value: '' }, text: '— номер серии —' });
+    for (const a of attrs) {
+      if (!a.id || a.data_type === 'timeseries') continue;
+      xSelect.createEl('option', { attr: { value: a.id }, text: a.name || a.id });
+    }
+    xSelect.value = chart.x_column || '';
+    xSelect.addEventListener('change', () => { chart.x_column = xSelect.value || undefined; });
+
+    bodyEl.createDiv({ cls: 'tn-lims-meta' }).setText('Ряды:');
+    const seriesListEl = bodyEl.createDiv();
+    const redrawSeries = () => {
+      seriesListEl.empty();
+      chart.series_config.forEach((sc, sIdx) => {
+        const sRow = seriesListEl.createDiv({ cls: 'tn-lims-flex' });
+        const srcSelect = sRow.createEl('select', { cls: 'tn-lims-select' });
+        srcSelect.createEl('option', { attr: { value: '' }, text: '— источник —' });
+        for (const a of attrs) {
+          if (!a.id || a.data_type === 'timeseries') continue; // не скаляр — сюда не годится
+          srcSelect.createEl('option', { attr: { value: a.id }, text: a.name || a.id });
+        }
+        srcSelect.value = sc.source_param;
+        srcSelect.addEventListener('change', () => { sc.source_param = srcSelect.value; });
+        const sLabelInput = sRow.createEl('input', { attr: { type: 'text', placeholder: 'Подпись ряда' }, cls: 'tn-lims-input' });
+        sLabelInput.value = sc.label || '';
+        sLabelInput.addEventListener('change', () => { sc.label = sLabelInput.value.trim() || undefined; });
+        const sDelBtn = sRow.createEl('button', { text: '✖', cls: 'tn-btn tn-btn-ghost' });
+        sDelBtn.addEventListener('click', () => { chart.series_config.splice(sIdx, 1); redrawSeries(); });
+      });
+    };
+    redrawSeries();
+    const addSeriesBtn = bodyEl.createEl('button', { text: '➕ Ряд', cls: 'tn-btn tn-btn-ghost' });
+    addSeriesBtn.addEventListener('click', () => { chart.series_config.push({ source_param: '' }); redrawSeries(); });
+  }
+
+  /** Тело карточки графика "по времени" (kind="timeseries", 2026-08-24) — список
+   * НЕЗАВИСИМЫХ рядов (timeseries_series): каждый со своим источником (атрибут
+   * data_type="timeseries"), каналом и осью — не общий источник+канал на весь график,
+   * чтобы можно было наложить ряды из РАЗНЫХ атрибутов (см. TimeseriesSeriesConfig,
+   * прямой запрос пользователя учесть случай "пары X-Y не совпадают"). См.
+   * lab-service/charts.go buildChartSeriesFromTimeseries — ровно это поле он читает. */
+  private renderTimeseriesChartBody(bodyEl: HTMLElement, chart: ChartConfig, attrs: MethodAttribute[]): void {
+    const timeseriesAttrs = attrs.filter(a => a.data_type === 'timeseries' && a.id);
+    if (!chart.timeseries_series) chart.timeseries_series = [];
+    if (timeseriesAttrs.length === 0) {
+      bodyEl.createDiv({ cls: 'tn-lims-meta' }).setText(
+        'Нет ни одного атрибута с типом "Временной ряд" — сначала заведите такой атрибут выше.',
+      );
+    }
+
+    bodyEl.createDiv({ cls: 'tn-lims-meta' }).setText(
+      'Ряды (у каждого свой источник и канал — можно совмещать разные приборы; "Вторая ось" — для рядов другого масштаба, напр. производная поверх температуры):',
+    );
+    const listEl = bodyEl.createDiv();
+    const redraw = (): void => {
+      listEl.empty();
+      chart.timeseries_series!.forEach((spec, idx) => {
+        const row = listEl.createDiv({ cls: 'tn-lims-flex' });
+        const srcSelect = row.createEl('select', { cls: 'tn-lims-select' });
+        srcSelect.createEl('option', { attr: { value: '' }, text: '— источник —' });
+        for (const a of timeseriesAttrs) {
+          srcSelect.createEl('option', { attr: { value: a.id }, text: a.name || a.id });
+        }
+        srcSelect.value = spec.source_param;
+        srcSelect.addEventListener('change', () => { spec.source_param = srcSelect.value; });
+
+        const chSelect = row.createEl('select', { cls: 'tn-lims-select' });
+        chSelect.createEl('option', { attr: { value: '' }, text: '— канал —' });
+        for (const [key, label] of LimsView.TIMESERIES_CHANNEL_OPTIONS) {
+          chSelect.createEl('option', { attr: { value: key }, text: label });
+        }
+        chSelect.value = spec.channel;
+        chSelect.addEventListener('change', () => { spec.channel = chSelect.value; });
+
+        const labelInput = row.createEl('input', { attr: { type: 'text', placeholder: 'Подпись в легенде (опц.)' }, cls: 'tn-lims-input' });
+        labelInput.value = spec.label || '';
+        labelInput.addEventListener('change', () => { spec.label = labelInput.value.trim() || undefined; });
+
+        const axisSelect = row.createEl('select', { cls: 'tn-lims-select' });
+        axisSelect.createEl('option', { attr: { value: '' }, text: 'Основная ось' });
+        axisSelect.createEl('option', { attr: { value: 'y2' }, text: 'Вторая ось' });
+        axisSelect.value = spec.axis || '';
+        axisSelect.addEventListener('change', () => { spec.axis = axisSelect.value === 'y2' ? 'y2' : undefined; });
+
+        const delBtn = row.createEl('button', { text: '✖', cls: 'tn-btn tn-btn-ghost' });
+        delBtn.addEventListener('click', () => { chart.timeseries_series!.splice(idx, 1); redraw(); });
+      });
+    };
+    redraw();
+    const addBtn = bodyEl.createEl('button', { text: '➕ Ряд', cls: 'tn-btn tn-btn-ghost' });
+    addBtn.addEventListener('click', () => {
+      chart.timeseries_series!.push({ source_param: '', channel: '' });
+      redraw();
+    });
+
+    const y2LabelRow = bodyEl.createDiv({ cls: 'tn-lims-flex tn-lims-mt8' });
+    const y2LabelInput = y2LabelRow.createEl('input', {
+      attr: { type: 'text', placeholder: 'Подпись второй оси (если используется)' },
+      cls: 'tn-lims-input',
+    });
+    y2LabelInput.value = chart.y2_label || '';
+    y2LabelInput.addEventListener('change', () => { chart.y2_label = y2LabelInput.value.trim() || undefined; });
   }
 
   /** Валидация графиков перед сохранением. Представление (блоки форматированного
@@ -1830,6 +1954,16 @@ export class LimsView extends ItemView {
    * не является ошибкой сохранения. */
   private validateCharts(charts: ChartConfig[]): string | null {
     for (const c of charts) {
+      if (c.kind === 'timeseries') {
+        if (!c.timeseries_series || c.timeseries_series.length === 0) {
+          return `График «${c.title || c.id}»: добавьте хотя бы один ряд`;
+        }
+        for (const spec of c.timeseries_series) {
+          if (!spec.source_param) return `График «${c.title || c.id}»: укажите источник для каждого ряда`;
+          if (!spec.channel) return `График «${c.title || c.id}»: укажите канал для каждого ряда`;
+        }
+        continue;
+      }
       if (c.series_config.length === 0) return `График «${c.title || c.id}»: добавьте хотя бы один ряд`;
       for (const sc of c.series_config) {
         if (!sc.source_param.trim()) return `График «${c.title || c.id}»: укажите источник для каждого ряда`;
@@ -1871,6 +2005,7 @@ export class LimsView extends ItemView {
       const typeOptions: Array<[AttributeDataType, string]> = [
         ['text', 'Текст'], ['int', 'Целое число'], ['float', 'Дробное число'],
         ['date', 'Дата'], ['time', 'Время'], ['boolean', 'Да/Нет'], ['photo', 'Фотография'],
+        ['timeseries', 'Временной ряд (для графика)'],
       ];
       for (const [val, label] of typeOptions) typeSelect.createEl('option', { attr: { value: val }, text: label });
       typeSelect.value = attr.data_type;

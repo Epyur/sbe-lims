@@ -104,7 +104,11 @@ export interface LabGroup {
  * хранится как URL (в перспективе — фото с мобильного терминала, загруженное в S3);
  * "boolean" (2026-08-22) — значение хранится как настоящий JSON true/false, в UI —
  * Да/Нет. */
-export type AttributeDataType = 'text' | 'int' | 'float' | 'date' | 'time' | 'photo' | 'boolean';
+/** "timeseries" (2026-08-24) — значение не число/текст, а весь ряд датчика целиком
+ * ({time, channels, average_temp, derivative}) — заполняется автоматически из письма
+ * прибора (synonyms на "mesure_data"), не вводится вручную. См. ChartConfig.kind —
+ * единственный способ показать такой атрибут содержательно — через график. */
+export type AttributeDataType = 'text' | 'int' | 'float' | 'date' | 'time' | 'photo' | 'boolean' | 'timeseries';
 /** Знак сравнения — пороговое правило классификации (условие на строку, 2026-08-22). */
 export type ComparisonOperator = '==' | '!=' | '<' | '<=' | '>' | '>=';
 /** Способ заполнения атрибута. "classification" (2026-08-22) — значение пишет
@@ -210,10 +214,29 @@ export interface ClassificationRule {
   subjects: ClassificationSubject[];
 }
 
-/** Один ряд графика — источник значений (id атрибута) + подпись в легенде. */
+/** Один ряд графика "по сериям" (kind не задан) — источник значений (id атрибута) +
+ * подпись в легенде. */
 export interface ChartSeriesConfig {
   source_param: string;
   label?: string;
+}
+
+/** Один ряд графика "по времени" (kind="timeseries", 2026-08-24) — НЕЗАВИСИМЫЙ ряд:
+ * свой источник (атрибут data_type="timeseries") + свой канал внутри него. Список из
+ * нескольких таких рядов, а не общий source_param+channels на весь график — по прямому
+ * запросу пользователя учесть случай "два и более графика... ось X в одних единицах, но
+ * пары X-Y не совпадают" (напр. будущий второй датчик с другой частотой опроса). */
+export interface TimeseriesSeriesConfig {
+  /** id атрибута data_type="timeseries", чьё значение — весь ряд {time, channels,
+   * average_temp, derivative}. */
+  source_param: string;
+  /** какой под-ряд взять — имя канала ("channel_1" и т.п.) или "average_temp"/"derivative". */
+  channel: string;
+  label?: string;
+  /** "y2" — рисовать по второй (правой) оси, со своим масштабом — для наложения ряда
+   * другого порядка величины (напр. производная поверх температуры) на одно изображение
+   * без взаимного искажения масштаба. Основная (левая) ось — когда не задано. */
+  axis?: 'y2';
 }
 
 /** Конфиг графика — элемент methods.chart_configs (рендерится charts.go, свой
@@ -222,10 +245,19 @@ export interface ChartConfig {
   id: string;
   title?: string;
   chart_type: 'line' | 'scatter' | 'bar';
+  /** "timeseries" (2026-08-24) — график ВНУТРИ одной серии по точкам датчика
+   * (timeseries_series ниже), а не по сериям-повторам (обычный режим — kind не задан,
+   * читает x_column/series_config как раньше). */
+  kind?: 'timeseries';
   x_column?: string;
   x_label?: string;
   y_label?: string;
+  /** Подпись второй (правой) оси Y — есть смысл только если хотя бы один элемент
+   * timeseries_series ниже имеет axis:"y2". */
+  y2_label?: string;
   series_config: ChartSeriesConfig[];
+  /** kind="timeseries": список независимых рядов для наложения на одно изображение. */
+  timeseries_series?: TimeseriesSeriesConfig[];
 }
 
 /** Вид вывода — ровно три фиксированных (2026-08-22, по решению пользователя:
