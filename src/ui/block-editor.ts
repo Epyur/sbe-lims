@@ -51,6 +51,14 @@ const AGG_LABELS: Record<PlaceholderAgg, string> = {
   avg: 'среднее', min: 'минимальное', max: 'максимальное', first: 'первая серия', last: 'последняя серия',
 };
 
+/** Подпись атрибута для пикеров/списков — фото помечены иконкой (2026-08-24,
+ * по жалобе "не понятно, как вставлять фотографии в отчёт"): без неё
+ * photo-атрибут неотличим от обычного текстового в общем списке. */
+function attrDisplayName(attr: { name?: string; id: string; data_type?: string } | undefined, fallbackId: string): string {
+  const base = attr?.name || fallbackId || '?';
+  return attr?.data_type === 'photo' ? `📷 ${base}` : base;
+}
+
 export interface BlockEditorDeps {
   app: App;
   attrs: MethodAttribute[];
@@ -64,7 +72,7 @@ function resolvePlaceholderLabel(n: InlineNode, attrs: MethodAttribute[]): strin
     return SYSTEM_PLACEHOLDERS.find(s => s.id === n.attribute_id)?.label || n.attribute_id || '?';
   }
   const attr = attrs.find(a => a.id === n.attribute_id);
-  const base = attr?.name || n.attribute_id || '?';
+  const base = attrDisplayName(attr, n.attribute_id || '?');
   if (n.agg) return `${base} (${AGG_LABELS[n.agg] || n.agg})`;
   return base;
 }
@@ -249,25 +257,28 @@ class PlaceholderPickerModal extends Modal {
     if (aggregated.length > 0) {
       this.contentEl.createDiv({ cls: 'tn-lims-meta tn-lims-mt8' }).setText('Агрегированные результаты:');
       for (const a of aggregated) {
-        this.buildRow(a.name || a.id, () => this.pick({ type: 'placeholder', source: 'attribute', attribute_id: a.id }));
+        this.buildRow(attrDisplayName(a, a.id), () => this.pick({ type: 'placeholder', source: 'attribute', attribute_id: a.id }));
       }
     }
 
     const experiment = this.attrs.filter(a => a.level === 'experiment');
     if (experiment.length > 0) {
       this.contentEl.createDiv({ cls: 'tn-lims-meta tn-lims-mt8' }).setText(
-        'Атрибуты эксперимента (нужно выбрать одно значение серии):',
+        'Атрибуты эксперимента (нужно выбрать одно значение серии; 📷 — фотография, вставляется как изображение):',
       );
       for (const a of experiment) {
-        this.buildRow(a.name || a.id, () => this.renderAggChoice(a));
+        // Фото — не число: "среднее/минимальное/максимальное" для него не имеют
+        // смысла (2026-08-24, по жалобе "не понятно, как вставлять фотографии") —
+        // предлагаем только выбор серии, а не полный список агрегаций.
+        this.buildRow(attrDisplayName(a, a.id), () => this.renderAggChoice(a, a.data_type === 'photo'));
       }
     }
   }
 
-  private renderAggChoice(attr: MethodAttribute): void {
+  private renderAggChoice(attr: MethodAttribute, photoOnly: boolean): void {
     this.contentEl.empty();
-    this.titleEl.setText(`${attr.name || attr.id} — какое значение серии?`);
-    const opts: PlaceholderAgg[] = ['avg', 'min', 'max', 'first', 'last'];
+    this.titleEl.setText(`${attrDisplayName(attr, attr.id)} — ${photoOnly ? 'фото какой серии показать?' : 'какое значение серии?'}`);
+    const opts: PlaceholderAgg[] = photoOnly ? ['first', 'last'] : ['avg', 'min', 'max', 'first', 'last'];
     for (const agg of opts) {
       this.buildRow(AGG_LABELS[agg], () => this.pick({ type: 'placeholder', source: 'attribute', attribute_id: attr.id, agg }));
     }
@@ -300,7 +311,7 @@ class PlaceholderPickerModal extends Modal {
  * по жалобе "отсутствует опция создания колонки с номером серии"). */
 function renderTableNodeEditor(container: HTMLElement, node: RichNode, attrs: MethodAttribute[], onStructuralChange: () => void): void {
   if (!node.columns) node.columns = [];
-  container.createDiv({ cls: 'tn-lims-meta' }).setText('Колонки таблицы (одна строка — одна серия эксперимента, ⠿ — перетащить для смены порядка):');
+  container.createDiv({ cls: 'tn-lims-meta' }).setText('Колонки таблицы (одна строка — одна серия эксперимента, ⠿ — перетащить для смены порядка; 📷 — колонка с фотографией, автоматически показывается как изображение):');
   const listEl = container.createDiv();
   let dragFromIdx: number | null = null;
   const redraw = (): void => {
@@ -324,7 +335,7 @@ function renderTableNodeEditor(container: HTMLElement, node: RichNode, attrs: Me
         row.createSpan({ text: 'Серия (номер по порядку)' });
       } else {
         const attr = attrs.find(a => a.id === col.attribute_id);
-        row.createSpan({ text: attr?.name || col.attribute_id });
+        row.createSpan({ text: attrDisplayName(attr, col.attribute_id || '') });
       }
       const labelInput = row.createEl('input', {
         attr: { type: 'text', placeholder: col.kind === 'series_no' ? 'подпись (по умолч. «Серия»)' : 'подпись (опц.)' },
@@ -349,7 +360,7 @@ function renderTableNodeEditor(container: HTMLElement, node: RichNode, attrs: Me
   }
   for (const a of attrs.filter(a => a.level === 'experiment')) {
     if (node.columns!.some((c: TableColumn) => c.attribute_id === a.id)) continue;
-    select.createEl('option', { attr: { value: a.id }, text: a.name || a.id });
+    select.createEl('option', { attr: { value: a.id }, text: attrDisplayName(a, a.id) });
   }
   const addBtn = addRow.createEl('button', { text: '➕ Колонка', cls: 'tn-btn tn-btn-ghost' });
   addBtn.addEventListener('click', () => {
