@@ -49,6 +49,20 @@ const pendingResultMaxAttempts = 20
 var resultMetaFields = map[string]bool{
 	"type": true, "method": true, "ID": true, "series_num": true,
 	"aim_indicator": true, "computing": true,
+	// statistics/experiment_params (2026-08-24) — вложенные объекты письма прибора,
+	// не плоские значения: цикл ниже их не читает, нужные под-поля отдельно
+	// достаёт extractInstrumentFields. "mesure_data" ЗДЕСЬ не перечислен
+	// (до 2026-08-24 был) — по прямому запросу пользователя ("почему не перенесены
+	// ряды данных времени и температуры... как строить графики") теперь идёт через
+	// тот же synonyms-путь, что и любое другое поле: если у метода настроен
+	// синоним на атрибут data_type="timeseries" (у ГГ — "smoke_temp_curve"),
+	// вложенный объект {time,channels,average_temp,derivative} сохраняется
+	// целиком как значение этого атрибута — то же самое, что уже было сделано для
+	// photo_before/photo_after. Без настроенного синонима — declaredAttrs всё
+	// равно отбросит "mesure_data" как незаведённый атрибут (тот же итог, что
+	// раньше, для методов без графика по датчику).
+	"statistics": true, "experiment_params": true,
+	"source_file": true, "timestamp": true,
 }
 
 // canonicalFieldNames — раз опечатки и разнобой имён полей в реальных письмах
@@ -304,12 +318,17 @@ func (s *Server) processMessage(ctx context.Context, folder string, cfg *emailIn
 	case "application":
 		s.applyApplicationEmail(ctx, cfg, dedupKey, folder, payload)
 	case "result":
-		if _, hasSignal := payload["mesure_data"]; hasSignal {
-			// сырые сигналы прибора (самосыл) — отдельная подсистема, не MVP (решение
-			// пользователя 2026-08-19), не применяем.
-			s.recordProcessed(ctx, dedupKey, folder, "skipped_signal", payload, 0, "")
-			return
-		}
+		// Раньше письма с "mesure_data" (сырая телеметрия прибора) целиком
+		// пропускались (решение 2026-08-19, "не MVP") — но такое письмо несёт не
+		// только сырые массивы по каналам (их и сейчас не заводим), а ЕЩЁ
+		// statistics.by_channel/average_max_temp и experiment_params — реальные
+		// показатели метода ГГ (tp1-4_smog/temp_of_smog/time_of_max_temp,
+		// pre_time_seconds и т.п.), которые до этого фикса просто никогда не
+		// заполнялись (2026-08-24, найдено пользователем на живом письме
+		// external_id=698). "mesure_data" сам по себе (и statistics/
+		// experiment_params как сырые объекты) — в resultMetaFields, не читается
+		// напрямую циклом в applyResultPayload; нужные под-поля извлекает
+		// extractInstrumentFields.
 		s.applyResultEmail(ctx, cfg, dedupKey, folder, payload, attachments)
 	default:
 		s.recordProcessed(ctx, dedupKey, folder, "error", payload, 0, fmt.Sprintf("unknown type %q", typ))
@@ -573,6 +592,83 @@ var systemRequestFields = map[string]bool{
 	"amb_temp": true, "amb_pres": true, "amb_moist": true,
 }
 
+// extractInstrumentFields достаёт из письма прибора (payload содержит "mesure_data")
+// реальные показатели метода ГГ — БЕЗ самих сырых массивов по каналам
+// (mesure_data.time/channels/average_temp/derivative — решение пользователя
+// 2026-08-19, "не MVP", по-прежнему не заводим). Найдено пользователем на живом письме
+// (external_id=698, 2026-08-24): "statistics"/"experiment_params" несут реальные
+// значения для tp1-4_smog/temp_of_smog/time_of_max_temp и pre_time_seconds и т.п. — до
+// этого фикса терялись целиком вместе с массивами, т.к. письмо просто пропускалось.
+func extractInstrumentFields(payload map[string]any) map[string]any {
+	out := map[string]any{}
+	if stats, ok := payload["statistics"].(map[string]any); ok {
+		if byChannel, ok := stats["by_channel"].(map[string]any); ok {
+			var maxTimes []float64
+			for _, chNum := range []string{"1", "2", "3", "4"} {
+				ch, ok := byChannel[chNum].(map[string]any)
+				if !ok {
+					continue
+				}
+				if maxTemp, ok := ch["max_temp"]; ok {
+					out["tp"+chNum+"_smog"] = maxTemp
+				}
+				if maxTime, ok := toFloatOK(ch["max_time"]); ok {
+					maxTimes = append(maxTimes, maxTime)
+				}
+			}
+			// time_of_max_temp — единый атрибут метода, а прибор отдаёт время пика
+			// ПОКАНАЛЬНО (обычно близкие, но разные значения) — среднее по каналам,
+			// тот же принцип, что уже применён ниже к average_max_temp -> temp_of_smog
+			// (решение пользователя 2026-08-24).
+			if len(maxTimes) > 0 {
+				sum := 0.0
+				for _, v := range maxTimes {
+					sum += v
+				}
+				out["time_of_max_temp"] = sum / float64(len(maxTimes))
+			}
+		}
+		if avgMaxTemp, ok := stats["average_max_temp"]; ok {
+			out["temp_of_smog"] = avgMaxTemp
+		}
+	}
+	if params, ok := payload["experiment_params"].(map[string]any); ok {
+		for _, key := range []string{"pre_time_seconds", "main_time_seconds", "post_time_seconds", "num_channels", "poll_interval_seconds"} {
+			if v, ok := params[key]; ok && v != nil {
+				out[key] = v
+			}
+		}
+	}
+	return out
+}
+
+// setIfMeaningful пишет values[key]=v, НО не даёт пустому значению из ОДНОГО письма
+// затереть уже сохранённое непустое значение из ДРУГОГО письма той же серии
+// (2026-08-24, найдено на живых данных external_id=698): письмо-форма несёт
+// "tp1_smog":"" как заглушку "это поле заполнит прибор" — при повторной обработке
+// формы ПОСЛЕ письма прибора (порядок обработки писем одной серии не гарантирован) эта
+// пустая строка иначе затирала бы уже сохранённое реальное число. Тот же принцип, что
+// уже применялся при восстановлении ЕКН этой сессии — "первое НЕПУСТОЕ значение
+// выигрывает", не "последнее записанное".
+func setIfMeaningful(values map[string]any, key string, v any) {
+	if isBlankValue(v) {
+		if existing, ok := values[key]; ok && !isBlankValue(existing) {
+			return
+		}
+	}
+	values[key] = v
+}
+
+func isBlankValue(v any) bool {
+	if v == nil {
+		return true
+	}
+	if s, ok := v.(string); ok {
+		return strings.TrimSpace(s) == ""
+	}
+	return false
+}
+
 func (s *Server) applyResultPayload(ctx context.Context, requestID, methodID int64, payload map[string]any,
 	cfg *emailIngestConfig, attachments []mailAttachment) error {
 	// synonyms настроены в конфигураторе метода (per-атрибут, см. MethodAttribute.
@@ -596,7 +692,30 @@ func (s *Server) applyResultPayload(ctx context.Context, requestID, methodID int
 	// загруженные в наше объектное хранилище (2026-08-24) — заменяют яндекс-ссылку
 	// из payload (недоступна анонимно) везде, где она использовалась бы ниже.
 	photoURLs := s.resolvePhotoAttachments(ctx, cfg, requestID, payload, attachments)
+
+	// explicitSeriesNum — письмо САМО указывает свой series_num (несёт его КАЖДОЕ
+	// письмо-результат, Comb/Flam/FlamProp — см. TestCanonicalFieldNamesAgainstRealKeys).
+	// 2026-08-24: письмо-форма и письмо прибора для ОДНОГО измерения несут ОДИН и тот
+	// же series_num (external_id=698 — оба "1") — раньше это игнорировалось (всегда
+	// auto-increment), из-за чего два письма одной серии создавали ДВЕ РАЗНЫЕ строки
+	// вместо слияния. Теперь явный series_num — целевая строка; если она уже
+	// существует, её values подгружаются и НОВЫЕ поля добавляются поверх (не
+	// затирают то, что уже было от другого письма той же серии).
+	explicitSeriesNum, _ := parseIntLoose(payload["series_num"])
 	values := map[string]any{}
+	if explicitSeriesNum > 0 {
+		if existing, err := s.loadSeriesValuesAt(ctx, requestID, methodID, explicitSeriesNum); err == nil {
+			for k, v := range existing {
+				values[k] = v
+			}
+		}
+	}
+	for k, v := range extractInstrumentFields(payload) {
+		if declaredAttrs != nil && !declaredAttrs[k] {
+			continue // атрибут не заведён у этого метода — не сохраняем
+		}
+		setIfMeaningful(values, k, v)
+	}
 	sysFields := map[string]any{}
 	for k, v := range payload {
 		if resultMetaFields[k] {
@@ -620,7 +739,7 @@ func (s *Server) applyResultPayload(ctx context.Context, requestID, methodID int
 		if declaredAttrs != nil && !declaredAttrs[key] {
 			continue // не заведено в input_parameters этого метода — не сохраняем
 		}
-		values[key] = v
+		setIfMeaningful(values, key, v)
 	}
 	if len(sysFields) > 0 {
 		if err := s.applyRequestSystemFields(ctx, requestID, sysFields); err != nil {
@@ -629,7 +748,7 @@ func (s *Server) applyResultPayload(ctx context.Context, requestID, methodID int
 	}
 	photoBefore := photoURLs["photo_before"]
 	photoAfter := photoURLs["photo_after"]
-	_, _, err = s.saveResultSeries(ctx, requestID, methodID, 0, 0, values, photoBefore, photoAfter)
+	_, _, err = s.saveResultSeries(ctx, requestID, methodID, 0, explicitSeriesNum, values, photoBefore, photoAfter)
 	return err
 }
 

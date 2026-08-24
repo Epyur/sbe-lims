@@ -310,6 +310,98 @@ func TestMatchAttachmentByFilename(t *testing.T) {
 	}
 }
 
+// 2026-08-24: письмо прибора (payload содержит "mesure_data") раньше пропускалось
+// целиком (решение 2026-08-19), из-за чего statistics/experiment_params — реальные
+// показатели метода ГГ — никогда не заполнялись, хотя не являются сырыми массивами по
+// каналам (те и сейчас не заводим, см. фикстуру ниже — mesure_data сюда не передаётся
+// вовсе, только statistics/experiment_params, ровно то, что реально извлекается).
+// Фикстура — по мотивам реального письма external_id=698 (найдено пользователем).
+func TestExtractInstrumentFields(t *testing.T) {
+	payload := map[string]any{
+		"statistics": map[string]any{
+			"by_channel": map[string]any{
+				"1": map[string]any{"max_temp": 905.3, "max_time": 140.8},
+				"2": map[string]any{"max_temp": 926.7, "max_time": 130.8},
+				"3": map[string]any{"max_temp": 895.7, "max_time": 130.8},
+				"4": map[string]any{"max_temp": 926.5, "max_time": 140.8},
+			},
+			"average_max_temp": 913.55,
+		},
+		"experiment_params": map[string]any{
+			"pre_time_seconds":      15.0,
+			"main_time_seconds":     600.0,
+			"post_time_seconds":     30.0,
+			"num_channels":          4.0,
+			"poll_interval_seconds": nil, // null в реальном письме — не должен попасть в результат
+		},
+	}
+	got := extractInstrumentFields(payload)
+
+	wantChannels := map[string]any{"tp1_smog": 905.3, "tp2_smog": 926.7, "tp3_smog": 895.7, "tp4_smog": 926.5}
+	for k, want := range wantChannels {
+		if got[k] != want {
+			t.Errorf("%s = %v, want %v", k, got[k], want)
+		}
+	}
+	if got["temp_of_smog"] != 913.55 {
+		t.Errorf("temp_of_smog = %v, want 913.55 (statistics.average_max_temp напрямую)", got["temp_of_smog"])
+	}
+	// (140.8+130.8+130.8+140.8)/4 = 135.8 — среднее по каналам (решение пользователя).
+	if timeOfMax, ok := got["time_of_max_temp"].(float64); !ok || timeOfMax != 135.8 {
+		t.Errorf("time_of_max_temp = %v, want 135.8 (среднее max_time по 4 каналам)", got["time_of_max_temp"])
+	}
+	for k, want := range map[string]any{"pre_time_seconds": 15.0, "main_time_seconds": 600.0, "post_time_seconds": 30.0, "num_channels": 4.0} {
+		if got[k] != want {
+			t.Errorf("%s = %v, want %v", k, got[k], want)
+		}
+	}
+	if _, ok := got["poll_interval_seconds"]; ok {
+		t.Errorf("poll_interval_seconds был null в payload — не должен попасть в результат, got %v", got["poll_interval_seconds"])
+	}
+	// mesure_data (сырые массивы) не передавались в payload вовсе — но даже если бы
+	// были, extractInstrumentFields их не читает и не может случайно вернуть.
+	if _, ok := got["mesure_data"]; ok {
+		t.Errorf("extractInstrumentFields не должен возвращать сырые данные прибора")
+	}
+}
+
+// Письмо-форма (без statistics/experiment_params) — extractInstrumentFields должен
+// молча вернуть пустую карту, не паниковать на отсутствующих полях.
+func TestExtractInstrumentFieldsNoInstrumentData(t *testing.T) {
+	payload := map[string]any{"ID": "698", "type": "result", "mass_before": "2462"}
+	got := extractInstrumentFields(payload)
+	if len(got) != 0 {
+		t.Errorf("got %+v, want empty map (письмо-форма не несёт statistics/experiment_params)", got)
+	}
+}
+
+// Регресс на реальных данных (external_id=698, 2026-08-24): письмо-форма несёт
+// "tp1_smog":"" как заглушку "заполнит прибор" — если письмо прибора обработано РАНЬШЕ
+// (порядок обработки писем одной серии не гарантирован) и уже записало реальное число,
+// повторная обработка формы не должна затирать его пустой строкой.
+func TestSetIfMeaningfulDoesNotOverwriteWithBlank(t *testing.T) {
+	values := map[string]any{"tp1_smog": 905.3}
+	setIfMeaningful(values, "tp1_smog", "") // письмо-форма приходит после письма прибора
+	if values["tp1_smog"] != 905.3 {
+		t.Errorf("tp1_smog = %v, want 905.3 (пустая строка не должна затирать уже сохранённое число)", values["tp1_smog"])
+	}
+
+	// Пусто -> пусто: ключа ещё не было, пустое значение — законный первый результат
+	// (напр. поле реально не заполнено ни в одном письме).
+	values2 := map[string]any{}
+	setIfMeaningful(values2, "flam_time", "")
+	if v, ok := values2["flam_time"]; !ok || v != "" {
+		t.Errorf("got %v (ok=%v), want (\"\", true) — не было предыдущего значения для сохранения", v, ok)
+	}
+
+	// Настоящее новое значение поверх настоящего старого — обычная перезапись, не блокируется.
+	values3 := map[string]any{"mass_before": "2400"}
+	setIfMeaningful(values3, "mass_before", "2462")
+	if values3["mass_before"] != "2462" {
+		t.Errorf("mass_before = %v, want \"2462\" (непустое поверх непустого — обычное обновление)", values3["mass_before"])
+	}
+}
+
 // Регресс на реальных данных (external_id=698, живой прогон fetch-mail-photos,
 // 2026-08-24): вложение письма несёт ОРИГИНАЛЬНОЕ имя файла, а ссылка в JSON — то же имя с
 // добавленным Яндексом хеш-префиксом "<hex>_<имя>". Точное совпадение здесь ложно

@@ -1,0 +1,155 @@
+package main
+
+import "testing"
+
+// 2026-08-24: до этого фикса данные датчика (mesure_data.time/channels/average_temp/
+// derivative) не заводились совсем ("не MVP") — по прямому запросу пользователя
+// ("как строить графики") теперь есть отдельный, within-series путь построения графика
+// (buildChartSeriesFromTimeseries), в отличие от buildChartSeries (across-series, одна
+// точка на серию-повтор). "timeseries_series" — список независимых рядов (каждый со
+// своим source_param/channel), не общий "channels" на весь конфиг — переработано по
+// запросу пользователя учесть "два и более графика... X в одних единицах, но пары X-Y
+// не совпадают". Фикстура — по мотивам реального письма external_id=698.
+func TestBuildChartSeriesFromTimeseries(t *testing.T) {
+	curve := map[string]any{
+		"time": []any{0.0, 10.0, 20.0, 30.0},
+		"channels": map[string]any{
+			"channel_1": []any{20.0, 100.0, 400.0, 900.0},
+			"channel_2": []any{21.0, 110.0, 410.0, 910.0},
+		},
+		"average_temp": []any{20.5, 105.0, 405.0, 905.0},
+		"derivative":   []any{0.0, 8.0, 30.0, 50.0},
+	}
+	seriesValues := []map[string]any{{"smoke_temp_curve": curve}}
+
+	cfg := map[string]any{
+		"kind": "timeseries",
+		"timeseries_series": []any{
+			map[string]any{"source_param": "smoke_temp_curve", "channel": "channel_1"},
+			map[string]any{"source_param": "smoke_temp_curve", "channel": "channel_2"},
+			map[string]any{"source_param": "smoke_temp_curve", "channel": "average_temp"},
+		},
+	}
+	got := buildChartSeriesFromTimeseries(cfg, seriesValues)
+	if len(got) != 3 {
+		t.Fatalf("got %d series, want 3 (channel_1, channel_2, average_temp)", len(got))
+	}
+	names := map[string][]float64{}
+	for _, s := range got {
+		names[s.Name] = s.Y
+	}
+	if y, ok := names["channel_1"]; !ok || y[3] != 900.0 {
+		t.Errorf("channel_1: got %v, want Y[3]=900.0", y)
+	}
+	if y, ok := names["channel_2"]; !ok || y[3] != 910.0 {
+		t.Errorf("channel_2: got %v, want Y[3]=910.0", y)
+	}
+	if y, ok := names["Среднее по каналам"]; !ok || y[3] != 905.0 {
+		t.Errorf("average_temp -> %q: got %v, want Y[3]=905.0", "Среднее по каналам", y)
+	}
+	// Все X — общий "time" ряд (в этой фикстуре у всех рядов один source_param, так что
+	// совпадение ожидаемо — но buildChartSeriesFromTimeseries не ТРЕБУЕТ этого, см. тест
+	// TestBuildChartSeriesFromTimeseriesIndependentXPerSeries ниже).
+	for _, s := range got {
+		if len(s.X) != 4 || s.X[1] != 10.0 {
+			t.Errorf("%s: X = %v, want [0 10 20 30]", s.Name, s.X)
+		}
+	}
+}
+
+// derivative — отдельная величина, отличный масштаб от температуры (доли против сотен
+// градусов) — по решению пользователя рисуется на ВТОРОЙ оси Y (axis:"y2") ОДНОГО
+// изображения с температурой, не отдельным графиком (2026-08-24, "наложение графика
+// производной на график температуры").
+func TestBuildChartSeriesFromTimeseriesSecondAxis(t *testing.T) {
+	curve := map[string]any{
+		"time":       []any{0.0, 10.0},
+		"derivative": []any{0.1, 8.5},
+	}
+	seriesValues := []map[string]any{{"smoke_temp_curve": curve}}
+	cfg := map[string]any{
+		"kind": "timeseries",
+		"timeseries_series": []any{
+			map[string]any{"source_param": "smoke_temp_curve", "channel": "derivative", "axis": "y2"},
+		},
+	}
+	got := buildChartSeriesFromTimeseries(cfg, seriesValues)
+	if len(got) != 1 || got[0].Name != "Скорость нарастания" {
+		t.Fatalf("got %+v, want exactly one series named \"Скорость нарастания\"", got)
+	}
+	if !got[0].Y2 {
+		t.Errorf("axis:\"y2\" в конфиге должен дать chartSeries.Y2=true")
+	}
+}
+
+// Ряды из РАЗНЫХ source_param (2026-08-24, прямой запрос пользователя: "в будущем могут
+// быть ситуации, когда... ось X будет в одних единицах, но пары X-Y не будут совпадать")
+// — каждый ряд тянет СВОЙ time-массив, не переиспользует чужой; независимо от того,
+// сколько точек и в каких координатах у другого ряда.
+func TestBuildChartSeriesFromTimeseriesIndependentXPerSeries(t *testing.T) {
+	curveA := map[string]any{
+		"time":     []any{0.0, 10.0, 20.0},
+		"channels": map[string]any{"channel_1": []any{1.0, 2.0, 3.0}},
+	}
+	curveB := map[string]any{
+		"time":     []any{0.0, 5.0, 15.0, 25.0}, // другая частота/сетка точек
+		"channels": map[string]any{"channel_1": []any{10.0, 20.0, 30.0, 40.0}},
+	}
+	seriesValues := []map[string]any{{"curve_a": curveA, "curve_b": curveB}}
+	cfg := map[string]any{
+		"kind": "timeseries",
+		"timeseries_series": []any{
+			map[string]any{"source_param": "curve_a", "channel": "channel_1", "label": "A"},
+			map[string]any{"source_param": "curve_b", "channel": "channel_1", "label": "B"},
+		},
+	}
+	got := buildChartSeriesFromTimeseries(cfg, seriesValues)
+	if len(got) != 2 {
+		t.Fatalf("got %d series, want 2", len(got))
+	}
+	byName := map[string][]float64{}
+	for _, s := range got {
+		byName[s.Name] = s.X
+	}
+	if x := byName["A"]; len(x) != 3 {
+		t.Errorf("A: X = %v, want 3 points (свой массив, не совпадает с B)", x)
+	}
+	if x := byName["B"]; len(x) != 4 {
+		t.Errorf("B: X = %v, want 4 points (свой массив, не совпадает с A)", x)
+	}
+}
+
+// Атрибут пустой/не заполнен ни в одной серии — пустой результат, не паника.
+func TestBuildChartSeriesFromTimeseriesNoData(t *testing.T) {
+	cfg := map[string]any{
+		"kind": "timeseries",
+		"timeseries_series": []any{
+			map[string]any{"source_param": "smoke_temp_curve", "channel": "channel_1"},
+		},
+	}
+	got := buildChartSeriesFromTimeseries(cfg, []map[string]any{{}, {"smoke_temp_curve": "не объект"}})
+	if len(got) != 0 {
+		t.Errorf("got %+v, want empty (нет валидного значения атрибута ни в одной серии)", got)
+	}
+}
+
+// 2026-08-24: title/x_label/y_label раньше принимались renderChart и тут же
+// отбрасывались (`_ = title` и т.п.) — реальный баг, не заметный по коду редактора
+// (пользователь сообщил "невозможно изменить название графика", хотя редактор их
+// корректно сохранял). Проверяем, что renderChart хотя бы не падает и производит
+// валидный PNG с этими параметрами заданными (пиксельное содержимое текста не
+// проверяем — юнит-тест на растровый шрифт неинформативен, полагаемся на визуальную
+// проверку по живым данным, см. AGENTS.md).
+func TestRenderChartWithTitleAndLabelsDoesNotFail(t *testing.T) {
+	series := []chartSeries{
+		{Name: "Канал 1", X: []float64{0, 10, 20}, Y: []float64{20, 500, 900}},
+		{Name: "Производная", X: []float64{0, 10, 20}, Y: []float64{0, 40, -10}, Y2: true},
+	}
+	png, err := renderChart("line", "Заголовок графика", "Время, с", "Температура, °C", "°C/с", series)
+	if err != nil {
+		t.Fatalf("renderChart: %v", err)
+	}
+	if len(png) == 0 {
+		t.Errorf("got empty PNG bytes")
+	}
+}

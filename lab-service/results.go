@@ -356,6 +356,31 @@ ORDER BY series_num`, requestID, methodID)
 	return out, rows.Err()
 }
 
+// loadSeriesValuesAt — values ОДНОЙ конкретной серии по её номеру (2026-08-24) — нужно
+// email_ingest.go/applyResultPayload, когда письмо явно указывает свой series_num
+// (напр. письмо прибора и письмо-форма несут ОДИН и тот же series_num — их values нужно
+// слить, а не одному затирать другого, см. AGENTS.md "прибор — реальные данные, не
+// пропуск"). Пустая карта без ошибки, если строки с таким номером ещё нет — это не
+// исключение, письмо может прийти первым для новой серии.
+func (s *Server) loadSeriesValuesAt(ctx context.Context, requestID, methodID int64, seriesNum int) (map[string]any, error) {
+	var raw []byte
+	err := s.pool.QueryRow(ctx, `
+SELECT values FROM measurement_results
+WHERE request_id = $1 AND method_id = $2 AND series_num = $3 AND is_statistical_row = false`,
+		requestID, methodID, seriesNum).Scan(&raw)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return map[string]any{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	m := map[string]any{}
+	if len(raw) > 0 && string(raw) != "{}" {
+		_ = json.Unmarshal(raw, &m)
+	}
+	return m, nil
+}
+
 // buildFormulaEnv строит среду для DSL: Params = values одной серии (или агрегата),
 // SeriesParams = собранные по сериям значения для агрегаций, rankOrder =
 // determinable_indicators метода (для min_grade/max_grade).
