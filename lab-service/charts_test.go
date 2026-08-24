@@ -133,6 +133,80 @@ func TestBuildChartSeriesFromTimeseriesNoData(t *testing.T) {
 	}
 }
 
+// 2026-08-24: жалоба пользователя — авто-отступ 10% от данных на температурной оси
+// уводил нижнюю границу в отрицательные значения (напр. -68.8), хотя реальных
+// отрицательных значений в данных вообще не было. Без spec.Step авто-диапазон не
+// должен пересекать ноль в сторону, где данных нет.
+func TestResolveAxisTicksAutoRangeDoesNotInventSign(t *testing.T) {
+	lo, hi, ticks := resolveAxisTicks(20.0, 905.0, chartAxisSpec{})
+	if lo < 0 {
+		t.Errorf("lo = %v, want >= 0 (данные все неотрицательные)", lo)
+	}
+	if len(ticks) != 6 {
+		t.Errorf("got %d ticks, want 6 (авто-режим без Step)", len(ticks))
+	}
+	if hi <= 905.0 {
+		t.Errorf("hi = %v, want > 905.0 (10%% отступ сверху)", hi)
+	}
+
+	// симметричный случай — данные все неположительные, авто-диапазон не должен
+	// пересекать ноль в плюс.
+	lo2, hi2, _ := resolveAxisTicks(-900.0, -20.0, chartAxisSpec{})
+	if hi2 > 0 {
+		t.Errorf("hi = %v, want <= 0 (данные все неположительные)", hi2)
+	}
+	if lo2 >= -900.0 {
+		t.Errorf("lo = %v, want < -900.0 (10%% отступ снизу)", lo2)
+	}
+}
+
+// spec.Min без spec.Step — просто сдвигает начало автоматической 6-частной шкалы
+// (напр. явно поставить 0, даже когда данные начинаются выше нуля).
+func TestResolveAxisTicksMinOverrideWithoutStep(t *testing.T) {
+	min := 0.0
+	lo, _, ticks := resolveAxisTicks(20.0, 905.0, chartAxisSpec{Min: &min})
+	if lo != 0.0 {
+		t.Errorf("lo = %v, want 0.0 (явный Min без Step)", lo)
+	}
+	if len(ticks) != 6 || ticks[0] != 0.0 {
+		t.Errorf("ticks = %v, want 6 делений, начиная с 0.0", ticks)
+	}
+}
+
+// spec.Step задаёт цену деления — число делений становится переменным (не 6),
+// покрывая диапазон от origin (spec.Min, если задан, иначе dataMin, округлённый
+// вниз до кратного шагу) до dataMax (прямой запрос пользователя: "для каждой оси
+// нужна возможность настраивать точку начала отсчёта и цену делений").
+func TestResolveAxisTicksWithStep(t *testing.T) {
+	min := 0.0
+	step := 100.0
+	lo, hi, ticks := resolveAxisTicks(20.0, 905.0, chartAxisSpec{Min: &min, Step: &step})
+	if lo != 0.0 {
+		t.Errorf("lo = %v, want 0.0 (origin = Min)", lo)
+	}
+	wantTicks := []float64{0, 100, 200, 300, 400, 500, 600, 700, 800, 900, 1000}
+	if len(ticks) != len(wantTicks) {
+		t.Fatalf("got %d ticks %v, want %d ticks %v", len(ticks), ticks, len(wantTicks), wantTicks)
+	}
+	for i, v := range wantTicks {
+		if ticks[i] != v {
+			t.Errorf("ticks[%d] = %v, want %v", i, ticks[i], v)
+		}
+	}
+	if hi != 1000.0 {
+		t.Errorf("hi = %v, want 1000.0 (последнее деление)", hi)
+	}
+
+	// без явного Min — origin считается от dataMin, округлённого вниз до кратного шагу.
+	lo2, _, ticks2 := resolveAxisTicks(20.0, 250.0, chartAxisSpec{Step: &step})
+	if lo2 != 0.0 {
+		t.Errorf("lo = %v, want 0.0 (floor(20/100)*100)", lo2)
+	}
+	if len(ticks2) != 4 { // 0,100,200,300
+		t.Errorf("got %d ticks %v, want 4", len(ticks2), ticks2)
+	}
+}
+
 // 2026-08-24: title/x_label/y_label раньше принимались renderChart и тут же
 // отбрасывались (`_ = title` и т.п.) — реальный баг, не заметный по коду редактора
 // (пользователь сообщил "невозможно изменить название графика", хотя редактор их
@@ -145,7 +219,7 @@ func TestRenderChartWithTitleAndLabelsDoesNotFail(t *testing.T) {
 		{Name: "Канал 1", X: []float64{0, 10, 20}, Y: []float64{20, 500, 900}},
 		{Name: "Производная", X: []float64{0, 10, 20}, Y: []float64{0, 40, -10}, Y2: true},
 	}
-	png, err := renderChart("line", "Заголовок графика", "Время, с", "Температура, °C", "°C/с", series)
+	png, err := renderChart("line", "Заголовок графика", "Время, с", "Температура, °C", "°C/с", series, chartAxisOverrides{})
 	if err != nil {
 		t.Fatalf("renderChart: %v", err)
 	}

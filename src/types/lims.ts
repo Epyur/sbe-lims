@@ -255,6 +255,20 @@ export interface ChartConfig {
   /** Подпись второй (правой) оси Y — есть смысл только если хотя бы один элемент
    * timeseries_series ниже имеет axis:"y2". */
   y2_label?: string;
+  /** Ручная настройка шкалы деления по каждой оси (2026-08-24, прямой запрос
+   * пользователя: "для каждой оси нужна возможность настраивать точку начала
+   * отсчёта и цену деления" — до этого авто-диапазон с отступом 10% мог утащить
+   * шкалу в отрицательные значения, которых в данных не было). `*_axis_min` —
+   * точка начала отсчёта (первое деление); `*_axis_step` — шаг между соседними
+   * делениями. Оба поля у каждой оси независимо опциональны — пусто значит
+   * "автоматически" (см. lab-service/charts.go resolveAxisTicks, единственное
+   * место, которое их читает через chartAxisSpecFromConfig). */
+  x_axis_min?: number;
+  x_axis_step?: number;
+  y_axis_min?: number;
+  y_axis_step?: number;
+  y2_axis_min?: number;
+  y2_axis_step?: number;
   series_config: ChartSeriesConfig[];
   /** kind="timeseries": список независимых рядов для наложения на одно изображение. */
   timeseries_series?: TimeseriesSeriesConfig[];

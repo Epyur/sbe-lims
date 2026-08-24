@@ -1079,17 +1079,33 @@ export class LimsView extends ItemView {
     const shortViewDiv = methodDiv.createDiv();
     await this.renderShortView(shortViewDiv, req.id);
 
-    // графики
-    const chartDiv = this.bodyEl.createDiv({ cls: 'tn-lims-method' });
-    chartDiv.createEl('h4', { text: '📈 Графики' });
+    // графики — chart_configs привязаны к МЕТОДУ, не к конкретной заявке (2026-08-24):
+    // у графика датчика метода ГГ конфиг есть у ВСЕХ заявок этого метода, но реальные
+    // данные (data_type="timeseries") пока приходят не всегда/не у всех — без проверки
+    // заголовок "Графики" и сломанная картинка (сервер отдаёт 404 "нет данных")
+    // показывались бы у каждой заявки метода, даже без единого готового графика
+    // ("паразитный блок", жалоба пользователя). Скрываем и картинку, и весь блок
+    // целиком, если в итоге не загрузился ни один график.
     const cfg = this.methodConfigOf(req.method_id);
-    for (const c of cfg.chart_configs) {
-      const id = String(c.id || '');
-      const title = String(c.title || id);
-      chartDiv.createEl('img', {
-        attr: { src: this.plugin.syncService.chartUrl(req.id, id), alt: title },
-        cls: 'tn-lims-chart',
-      });
+    if (cfg.chart_configs.length > 0) {
+      const chartDiv = this.bodyEl.createDiv({ cls: 'tn-lims-method' });
+      chartDiv.createEl('h4', { text: '📈 Графики' });
+      let pending = cfg.chart_configs.length;
+      let anyLoaded = false;
+      const onSettle = (): void => {
+        pending -= 1;
+        if (pending === 0 && !anyLoaded) chartDiv.remove();
+      };
+      for (const c of cfg.chart_configs) {
+        const id = String(c.id || '');
+        const title = String(c.title || id);
+        const img = chartDiv.createEl('img', {
+          attr: { src: this.plugin.syncService.chartUrl(req.id, id), alt: title },
+          cls: 'tn-lims-chart',
+        });
+        img.addEventListener('load', () => { anyLoaded = true; onSettle(); });
+        img.addEventListener('error', () => { img.remove(); onSettle(); });
+      }
     }
 
     // протокол / выписка / краткий вид — ровно 3 фиксированных вида вывода
@@ -1436,6 +1452,15 @@ export class LimsView extends ItemView {
       x_label: c.x_label,
       y_label: c.y_label,
       y2_label: c.y2_label,
+      // настройка шкалы делений (2026-08-24) — тот же риск потери полей при
+      // пересохранении, что и выше; сохраняем при чтении сразу же вместе с
+      // добавлением полей в редактор (один коммит/сессия, см. AGENTS.md).
+      x_axis_min: typeof c.x_axis_min === 'number' ? c.x_axis_min : undefined,
+      x_axis_step: typeof c.x_axis_step === 'number' ? c.x_axis_step : undefined,
+      y_axis_min: typeof c.y_axis_min === 'number' ? c.y_axis_min : undefined,
+      y_axis_step: typeof c.y_axis_step === 'number' ? c.y_axis_step : undefined,
+      y2_axis_min: typeof c.y2_axis_min === 'number' ? c.y2_axis_min : undefined,
+      y2_axis_step: typeof c.y2_axis_step === 'number' ? c.y2_axis_step : undefined,
       series_config: Array.isArray(c.series_config) ? c.series_config.map(s => ({ ...s })) : [],
       timeseries_series: Array.isArray(c.timeseries_series)
         ? c.timeseries_series
@@ -1827,15 +1852,64 @@ export class LimsView extends ItemView {
         redrawBody();
       });
 
-      const labelsRow = card.createDiv({ cls: 'tn-lims-flex' });
-      const xLabelInput = labelsRow.createEl('input', { attr: { type: 'text', placeholder: 'Подпись оси X' }, cls: 'tn-lims-input' });
-      xLabelInput.value = chart.x_label || '';
-      xLabelInput.addEventListener('change', () => { chart.x_label = xLabelInput.value.trim() || undefined; });
-      const yLabelInput = labelsRow.createEl('input', { attr: { type: 'text', placeholder: 'Подпись оси Y' }, cls: 'tn-lims-input' });
-      yLabelInput.value = chart.y_label || '';
-      yLabelInput.addEventListener('change', () => { chart.y_label = yLabelInput.value.trim() || undefined; });
+      // Оси: явный список "Название оси Х/Y1/Y2" + поле ввода название, чтобы не
+      // гадать по placeholder'у, какая подпись к какой оси относится (жалоба
+      // пользователя, 2026-08-24 — раньше это была одна безымянная строка полей
+      // "Подпись оси X"/"Подпись оси Y", а подпись Y2 вообще пряталась в другом
+      // месте, внутри режима "по времени"). Тут же — настройка шкалы деления
+      // каждой оси (начало отсчёта + шаг, тот же прямой запрос пользователя),
+      // раз уж это тоже настройка оси и должно быть рядом, а не в отдельном месте.
+      const axesEl = card.createDiv({ cls: 'tn-lims-mt8' });
+      axesEl.createDiv({ cls: 'tn-lims-meta' }).setText('Оси:');
+      this.renderAxisSettingsRow(axesEl, 'Название оси X',
+        () => chart.x_label, (v: string | undefined) => { chart.x_label = v; },
+        () => chart.x_axis_min, (v: number | undefined) => { chart.x_axis_min = v; },
+        () => chart.x_axis_step, (v: number | undefined) => { chart.x_axis_step = v; });
+      this.renderAxisSettingsRow(axesEl, 'Название оси Y1',
+        () => chart.y_label, (v: string | undefined) => { chart.y_label = v; },
+        () => chart.y_axis_min, (v: number | undefined) => { chart.y_axis_min = v; },
+        () => chart.y_axis_step, (v: number | undefined) => { chart.y_axis_step = v; });
+      this.renderAxisSettingsRow(axesEl, 'Название оси Y2 (если используется)',
+        () => chart.y2_label, (v: string | undefined) => { chart.y2_label = v; },
+        () => chart.y2_axis_min, (v: number | undefined) => { chart.y2_axis_min = v; },
+        () => chart.y2_axis_step, (v: number | undefined) => { chart.y2_axis_step = v; });
 
       redrawBody();
+    });
+  }
+
+  /** Одна строка настройки оси графика — явно подписанное название оси + шкала
+   * деления (начало отсчёта/шаг, оба опциональны — пусто значит "автоматически",
+   * см. lab-service/charts.go resolveAxisTicks). caption делает однозначным, к
+   * какой оси относится строка (2026-08-24, жалоба пользователя на прежний вид —
+   * поля без подписи, различимые только по placeholder'у). */
+  private renderAxisSettingsRow(
+    container: HTMLElement,
+    caption: string,
+    getLabel: () => string | undefined, setLabel: (v: string | undefined) => void,
+    getMin: () => number | undefined, setMin: (v: number | undefined) => void,
+    getStep: () => number | undefined, setStep: (v: number | undefined) => void,
+  ): void {
+    const row = container.createDiv({ cls: 'tn-lims-flex' });
+    row.createSpan({ text: `${caption}:`, cls: 'tn-lims-meta' });
+    const labelInput = row.createEl('input', { attr: { type: 'text', placeholder: 'подпись' }, cls: 'tn-lims-input' });
+    labelInput.value = getLabel() || '';
+    labelInput.addEventListener('change', () => { setLabel(labelInput.value.trim() || undefined); });
+    row.createSpan({ text: 'начало отсчёта:', cls: 'tn-lims-meta' });
+    const minInput = row.createEl('input', { attr: { type: 'number', placeholder: 'авто', step: 'any' }, cls: 'tn-lims-input' });
+    const curMin = getMin();
+    minInput.value = curMin !== undefined ? String(curMin) : '';
+    minInput.addEventListener('change', () => {
+      const v = minInput.value.trim();
+      setMin(v === '' ? undefined : Number(v));
+    });
+    row.createSpan({ text: 'шаг деления:', cls: 'tn-lims-meta' });
+    const stepInput = row.createEl('input', { attr: { type: 'number', placeholder: 'авто', step: 'any', min: '0' }, cls: 'tn-lims-input' });
+    const curStep = getStep();
+    stepInput.value = curStep !== undefined ? String(curStep) : '';
+    stepInput.addEventListener('change', () => {
+      const v = stepInput.value.trim();
+      setStep(v === '' ? undefined : Number(v));
     });
   }
 
@@ -1939,13 +2013,8 @@ export class LimsView extends ItemView {
       redraw();
     });
 
-    const y2LabelRow = bodyEl.createDiv({ cls: 'tn-lims-flex tn-lims-mt8' });
-    const y2LabelInput = y2LabelRow.createEl('input', {
-      attr: { type: 'text', placeholder: 'Подпись второй оси (если используется)' },
-      cls: 'tn-lims-input',
-    });
-    y2LabelInput.value = chart.y2_label || '';
-    y2LabelInput.addEventListener('change', () => { chart.y2_label = y2LabelInput.value.trim() || undefined; });
+    // подпись/шкала второй оси — теперь общая строка "Оси:" в renderChartRows
+    // (видна независимо от режима, 2026-08-24), здесь отдельного поля не нужно.
   }
 
   /** Валидация графиков перед сохранением. Представление (блоки форматированного

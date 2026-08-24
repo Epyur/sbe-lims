@@ -30,11 +30,15 @@ import (
 // баг рендера. См. AGENTS.md "график по датчику".
 
 const (
-	chartW          = 800
-	chartPlotH      = 360 // высота области графика (без заголовка/легенды/подписей осей)
-	chartMarginSide = 60
-	legendRowH      = 18
-	titleBandH      = 26
+	chartW = 800
+	// axisLabelThickness — толщина (в горизонтальном направлении) повёрнутой на 90°
+	// подписи оси Y/Y2 (2026-08-24, см. drawVerticalText) — примерная высота строки
+	// шрифта 13pt с запасом; сама подпись после поворота занимает СВОЮ ДЛИНУ по
+	// вертикали (укладывается в chartPlotH для типичных подписей), а не по горизонтали.
+	axisLabelThickness = 18
+	chartPlotH         = 360 // высота области графика (без заголовка/легенды/подписей осей)
+	legendRowH         = 18
+	titleBandH         = 26
 	xLabelBandH     = 32
 )
 
@@ -125,29 +129,77 @@ func layoutLegendRows(series []chartSeries, maxW int) [][]legendItem {
 	return rows
 }
 
+// chartAxisSpec — ручная настройка одной оси (2026-08-24, прямой запрос пользователя:
+// "для каждой оси нужна возможность настраивать точку начала отсчёта и цену деления").
+// Min — точка начала отсчёта (первое деление); Step — цена деления (шаг между
+// соседними делениями) — при заданном Step количество делений подстраивается под
+// диапазон реальных данных (см. resolveAxisTicks), а не фиксированные 6 равных частей.
+// Оба поля опциональны и независимы друг от друга (Min без Step — просто сдвигает
+// начало автоматической 6-частной шкалы).
+type chartAxisSpec struct {
+	Min  *float64
+	Step *float64
+}
+
+// chartAxisOverrides — ручная настройка по каждой из трёх осей графика.
+type chartAxisOverrides struct {
+	X, Y1, Y2 chartAxisSpec
+}
+
+// resolveAxisTicks считает диапазон [lo,hi] и список значений делений одной оси из
+// реального диапазона данных (dataMin/dataMax) и ручной настройки (spec). Без
+// spec.Step — 6 равных делений с 10%-м отступом от данных, НЕ пересекающим ноль, если
+// ноля не было в данных (2026-08-24, по жалобе пользователя: авто-отступ уводил
+// минимум температуры в отрицательные значения, хотя реальных отрицательных значений
+// нет); spec.Min, если задан, — точка отсчёта вместо авто-минимума. С spec.Step —
+// деления идут от spec.Min (или, при его отсутствии, от dataMin, округлённого вниз до
+// кратного шагу) с этим шагом до покрытия dataMax — число делений становится
+// переменным, не 6.
+func resolveAxisTicks(dataMin, dataMax float64, spec chartAxisSpec) (lo, hi float64, ticks []float64) {
+	if spec.Step != nil && *spec.Step > 0 {
+		step := *spec.Step
+		origin := math.Floor(dataMin/step) * step
+		if spec.Min != nil {
+			origin = *spec.Min
+		}
+		n := int(math.Ceil((dataMax-origin)/step)) + 1
+		if n < 2 {
+			n = 2
+		}
+		if n > 100 {
+			n = 100 // защита от вырожденного шага (напр. почти 0) — не рисуем тысячи делений
+		}
+		ticks = make([]float64, n)
+		for i := 0; i < n; i++ {
+			ticks[i] = origin + float64(i)*step
+		}
+		return origin, ticks[n-1], ticks
+	}
+	lo, hi = dataMin, dataMax
+	if lo == hi {
+		hi = lo + 1
+	}
+	pad := (hi - lo) * 0.1
+	lo, hi = lo-pad, hi+pad
+	if dataMin >= 0 && lo < 0 {
+		lo = 0
+	}
+	if dataMax <= 0 && hi > 0 {
+		hi = 0
+	}
+	if spec.Min != nil {
+		lo = *spec.Min
+	}
+	ticks = make([]float64, 6)
+	for i := 0; i <= 5; i++ {
+		ticks[i] = lo + (hi-lo)*float64(i)/5
+	}
+	return lo, hi, ticks
+}
+
 // renderChart строит PNG-график из серий. chartType: line|scatter|bar. y2Label — подпись
 // правой оси, пусто — если вторых осей нет ни у одной серии.
-func renderChart(chartType, title, xLabel, yLabel, y2Label string, series []chartSeries) ([]byte, error) {
-	plotW := chartW - 2*chartMarginSide
-
-	legendRows := layoutLegendRows(series, plotW)
-	marginTop := 10
-	if title != "" {
-		marginTop = titleBandH
-	}
-	if len(legendRows) > 0 {
-		marginTop += len(legendRows)*legendRowH + 6
-	}
-	marginBottom := 20
-	if xLabel != "" {
-		marginBottom = xLabelBandH
-	}
-	top := marginTop
-	totalH := marginTop + chartPlotH + marginBottom
-
-	img := image.NewRGBA(image.Rect(0, 0, chartW, totalH))
-	draw.Draw(img, img.Bounds(), &image.Uniform{chartBg}, image.Point{}, draw.Src)
-
+func renderChart(chartType, title, xLabel, yLabel, y2Label string, series []chartSeries, axisOverride chartAxisOverrides) ([]byte, error) {
 	// границы: X общий для всех серий (одни единицы по X, см. Y2 выше), Y — раздельно
 	// для основной и второй оси.
 	minX, maxX := math.Inf(1), math.Inf(-1)
@@ -185,30 +237,81 @@ func renderChart(chartType, title, xLabel, yLabel, y2Label string, series []char
 	if !anyPts {
 		return nil, errors.New("нет данных для графика")
 	}
-	if minX == maxX {
-		maxX = minX + 1
-	}
+
+	var xTicksF []float64
+	minX, maxX, xTicksF = resolveAxisTicks(minX, maxX, axisOverride.X)
+	var y1TicksF []float64
 	if anyY1 {
-		if minY1 == maxY1 {
-			maxY1 = minY1 + 1
-		}
-		pad := (maxY1 - minY1) * 0.1
-		minY1 -= pad
-		maxY1 += pad
+		minY1, maxY1, y1TicksF = resolveAxisTicks(minY1, maxY1, axisOverride.Y1)
 	} else {
 		minY1, maxY1 = 0, 1
 	}
+	var y2TicksF []float64
 	if anyY2 {
-		if minY2 == maxY2 {
-			maxY2 = minY2 + 1
-		}
-		pad := (maxY2 - minY2) * 0.1
-		minY2 -= pad
-		maxY2 += pad
+		minY2, maxY2, y2TicksF = resolveAxisTicks(minY2, maxY2, axisOverride.Y2)
 	}
 
+	xTicks := make([]string, len(xTicksF))
+	for i, v := range xTicksF {
+		xTicks[i] = formatTickValue(v)
+	}
+	y1Ticks := make([]string, len(y1TicksF))
+	maxY1TickW := 0
+	for i, v := range y1TicksF {
+		y1Ticks[i] = formatTickValue(v)
+		if w := chartTextWidth(y1Ticks[i]); w > maxY1TickW {
+			maxY1TickW = w
+		}
+	}
+	y2Ticks := make([]string, len(y2TicksF))
+	maxY2TickW := 0
+	for i, v := range y2TicksF {
+		y2Ticks[i] = formatTickValue(v)
+		if w := chartTextWidth(y2Ticks[i]); w > maxY2TickW {
+			maxY2TickW = w
+		}
+	}
+
+	// раскладка полей: [подпись оси Y] [деления Y] [график] [деления Y2] [подпись оси Y2]
+	// (2026-08-24, по прямой просьбе пользователя — подписи осей стоят РЯДОМ С ОСЬЮ, не
+	// поверх графика; числа делений раньше не рисовались вовсе, только линии сетки).
+	// Подпись оси Y повёрнута на 90° против часовой стрелки (см. drawVerticalText) —
+	// поэтому в горизонтальном направлении занимает не свою текстовую ширину, а толщину
+	// строки шрифта (axisLabelThickness).
+	const tickGap = 4
+	marginLeft := 12 + maxY1TickW + tickGap
+	if yLabel != "" {
+		marginLeft += axisLabelThickness + 6
+	}
+	marginRight := 12
+	if anyY2 {
+		marginRight += maxY2TickW + tickGap
+	}
+	if y2Label != "" {
+		marginRight += axisLabelThickness + 6
+	}
+	plotW := chartW - marginLeft - marginRight
+
+	legendRows := layoutLegendRows(series, plotW)
+	marginTop := 10
+	if title != "" {
+		marginTop = titleBandH
+	}
+	if len(legendRows) > 0 {
+		marginTop += len(legendRows)*legendRowH + 6
+	}
+	marginBottom := 30 // деления оси X
+	if xLabel != "" {
+		marginBottom += xLabelBandH
+	}
+	top := marginTop
+	totalH := marginTop + chartPlotH + marginBottom
+
+	img := image.NewRGBA(image.Rect(0, 0, chartW, totalH))
+	draw.Draw(img, img.Bounds(), &image.Uniform{chartBg}, image.Point{}, draw.Src)
+
 	toX := func(x float64) int {
-		return chartMarginSide + int((x-minX)/(maxX-minX)*float64(plotW))
+		return marginLeft + int((x-minX)/(maxX-minX)*float64(plotW))
 	}
 	toY1 := func(y float64) int {
 		return top + chartPlotH - int((y-minY1)/(maxY1-minY1)*float64(chartPlotH))
@@ -217,24 +320,32 @@ func renderChart(chartType, title, xLabel, yLabel, y2Label string, series []char
 		return top + chartPlotH - int((y-minY2)/(maxY2-minY2)*float64(chartPlotH))
 	}
 
-	// сетка (по основной оси)
-	for i := 0; i <= 5; i++ {
-		gy := minY1 + (maxY1-minY1)*float64(i)/5
+	// сетка (по основной оси, Y1) + деления с числами. Деления Y2 — СВОИ позиции по
+	// пикселям (toY2), не привязаны к сетке Y1: при независимой ручной настройке шага
+	// числа делений могут не совпадать (2026-08-24), поэтому у Y2 только текст деления,
+	// без отдельной сетки линий (не плодим два пересекающихся набора линий).
+	for i, gy := range y1TicksF {
 		y := toY1(gy)
-		drawHLine(img, chartMarginSide, chartMarginSide+plotW, y, chartGrid)
+		drawHLine(img, marginLeft, marginLeft+plotW, y, chartGrid)
+		w := chartTextWidth(y1Ticks[i])
+		drawText(img, marginLeft-tickGap-w, y+4, y1Ticks[i], chartText)
 	}
-	for i := 0; i <= 5; i++ {
-		gx := minX + (maxX-minX)*float64(i)/5
+	for i, gy2 := range y2TicksF {
+		y := toY2(gy2)
+		drawText(img, marginLeft+plotW+tickGap, y+4, y2Ticks[i], chartText)
+	}
+	for i, gx := range xTicksF {
 		x := toX(gx)
 		drawVLine(img, x, top, top+chartPlotH, chartGrid)
+		drawTextCentered(img, x, top+chartPlotH+16, xTicks[i], chartText)
 	}
 
 	// рамка
-	drawRect(img, chartMarginSide, top, chartMarginSide+plotW, top+chartPlotH, chartAxis)
+	drawRect(img, marginLeft, top, marginLeft+plotW, top+chartPlotH, chartAxis)
 	if anyY2 {
 		// вторая ось — отдельная вертикальная линия правее рамки (2026-08-24,
 		// наложение графиков разного масштаба на одно изображение).
-		drawVLine(img, chartMarginSide+plotW+6, top, top+chartPlotH, chartAxis)
+		drawVLine(img, marginLeft+plotW+6, top, top+chartPlotH, chartAxis)
 	}
 
 	// серии
@@ -254,8 +365,8 @@ func renderChart(chartType, title, xLabel, yLabel, y2Label string, series []char
 		case "bar":
 			step := float64(plotW) / float64(len(s.X)+1)
 			for i := range s.X {
-				x0 := chartMarginSide + int(float64(i+1)*step) - int(step*0.3)
-				x1 := chartMarginSide + int(float64(i+1)*step) + int(step*0.3)
+				x0 := marginLeft + int(float64(i+1)*step) - int(step*0.3)
+				x1 := marginLeft + int(float64(i+1)*step) + int(step*0.3)
 				y := toY(s.Y[i])
 				drawRectFilled(img, x0, y, x1, top+chartPlotH, col)
 			}
@@ -280,7 +391,7 @@ func renderChart(chartType, title, xLabel, yLabel, y2Label string, series []char
 	// легенда — под заголовком (или у верхнего края, если заголовка нет), с переносом
 	legendY := marginTop - len(legendRows)*legendRowH
 	for _, row := range legendRows {
-		x := chartMarginSide
+		x := marginLeft
 		for _, item := range row {
 			drawRectFilled(img, x, legendY-9, x+12, legendY+3, item.color)
 			x += 16
@@ -289,18 +400,20 @@ func renderChart(chartType, title, xLabel, yLabel, y2Label string, series []char
 		}
 		legendY += legendRowH
 	}
-	// подпись оси X — под графиком по центру
+	// подпись оси X — под делениями, по центру графика
 	if xLabel != "" {
-		drawTextCentered(img, chartMarginSide+plotW/2, top+chartPlotH+24, xLabel, chartText)
+		drawTextCentered(img, marginLeft+plotW/2, top+chartPlotH+xLabelBandH, xLabel, chartText)
 	}
-	// подпись оси Y — у верхнего края графика слева (без поворота: собственный
-	// рендерер рисует только горизонтальный текст, вращение глифов не реализовано)
+	// подпись оси Y — слева от делений основной оси, по вертикальному центру графика,
+	// повёрнута на 90° против часовой стрелки (2026-08-24, прямой запрос пользователя —
+	// читается снизу вверх, общепринятая ориентация подписи оси Y).
 	if yLabel != "" {
-		drawText(img, chartMarginSide, top-8, yLabel, chartText)
+		drawVerticalText(img, yLabel, 4, top+chartPlotH/2, chartText)
 	}
+	// подпись оси Y2 — справа от делений второй оси, по вертикальному центру, тот же
+	// поворот.
 	if y2Label != "" {
-		w := chartTextWidth(y2Label)
-		drawText(img, chartMarginSide+plotW-w, top-8, y2Label, chartText)
+		drawVerticalText(img, y2Label, chartW-4-axisLabelThickness, top+chartPlotH/2, chartText)
 	}
 
 	var buf bytes.Buffer
@@ -310,11 +423,56 @@ func renderChart(chartType, title, xLabel, yLabel, y2Label string, series []char
 	return buf.Bytes(), nil
 }
 
+// formatTickValue — компактное текстовое представление числового деления оси (до 3
+// значащих цифр — достаточно для читаемости на небольшом графике, не претендует на
+// точность оригинального значения).
+func formatTickValue(v float64) string {
+	return strconv.FormatFloat(v, 'g', 3, 64)
+}
+
 // chartTextWidth измеряет ширину строки в пикселях для данного шрифта — нужно для
 // центрирования заголовка и переноса легенды по ширине.
 func chartTextWidth(s string) int {
 	d := &font.Drawer{Face: chartFace}
 	return d.MeasureString(s).Round()
+}
+
+// rotateImage90CCW поворачивает прямоугольное RGBA-изображение на 90° ПРОТИВ часовой
+// стрелки (2026-08-24, прямой запрос пользователя — подпись оси Y читается снизу
+// вверх, общепринятая ориентация). Пиксель источника (x,y) переходит в (y, w-1-x) —
+// верхний край исходного изображения (начало текста) становится ЛЕВЫМ краем
+// результата, правый край (конец текста) — верхним; итог читается снизу вверх слева
+// направо в исходном порядке символов.
+func rotateImage90CCW(src *image.RGBA) *image.RGBA {
+	b := src.Bounds()
+	w, h := b.Dx(), b.Dy()
+	dst := image.NewRGBA(image.Rect(0, 0, h, w))
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			dst.Set(y, w-1-x, src.At(b.Min.X+x, b.Min.Y+y))
+		}
+	}
+	return dst
+}
+
+// drawVerticalText рисует текст, повёрнутый на 90° против часовой стрелки. leftX —
+// левый край повёрнутого блока, centerY — вертикальный центр (2026-08-24, подпись оси
+// Y/Y2 — собственный текстовый рендерер не умеет поворачивать глифы напрямую, поэтому
+// текст сначала рисуется горизонтально на прозрачном холсте нужного размера, затем
+// холст целиком поворачивается и накладывается на итоговое изображение).
+func drawVerticalText(dst *image.RGBA, s string, leftX, centerY int, c color.RGBA) {
+	w := chartTextWidth(s)
+	if w == 0 {
+		return
+	}
+	const lineH = 16
+	tmp := image.NewRGBA(image.Rect(0, 0, w+2, lineH))
+	d := &font.Drawer{Dst: tmp, Src: image.NewUniform(c), Face: chartFace, Dot: fixed.P(0, lineH-4)}
+	d.DrawString(s)
+	rotated := rotateImage90CCW(tmp)
+	rb := rotated.Bounds()
+	destRect := image.Rect(leftX, centerY-rb.Dy()/2, leftX+rb.Dx(), centerY-rb.Dy()/2+rb.Dy())
+	draw.Draw(dst, destRect, rotated, image.Point{}, draw.Over)
 }
 
 // drawText рисует строку, (x, baselineY) — левый край базовой линии (baseline), как
@@ -607,7 +765,26 @@ func renderChartConfigPNG(cfg map[string]any, seriesValues []map[string]any) ([]
 	xLabel, _ := cfg["x_label"].(string)
 	yLabel, _ := cfg["y_label"].(string)
 	y2Label, _ := cfg["y2_label"].(string)
-	return renderChart(chartType, title, xLabel, yLabel, y2Label, series)
+	axisOverride := chartAxisOverrides{
+		X:  chartAxisSpecFromConfig(cfg, "x_axis_min", "x_axis_step"),
+		Y1: chartAxisSpecFromConfig(cfg, "y_axis_min", "y_axis_step"),
+		Y2: chartAxisSpecFromConfig(cfg, "y2_axis_min", "y2_axis_step"),
+	}
+	return renderChart(chartType, title, xLabel, yLabel, y2Label, series, axisOverride)
+}
+
+// chartAxisSpecFromConfig достаёт ручную настройку одной оси из chart_config
+// (2026-08-24, прямой запрос пользователя — "для каждой оси нужна возможность
+// настраивать точку начала отсчёта и цену деления"). Оба поля независимо опциональны.
+func chartAxisSpecFromConfig(cfg map[string]any, minKey, stepKey string) chartAxisSpec {
+	var spec chartAxisSpec
+	if f, ok := toFloatOK(cfg[minKey]); ok {
+		spec.Min = &f
+	}
+	if f, ok := toFloatOK(cfg[stepKey]); ok && f > 0 {
+		spec.Step = &f
+	}
+	return spec
 }
 
 // findChartConfig ищет конфиг чарта по cfg_id среди методов заявки.
