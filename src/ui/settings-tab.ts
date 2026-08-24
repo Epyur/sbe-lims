@@ -62,12 +62,37 @@ export class LimsSettingsTab extends PluginSettingTab {
       thead.createEl('th').setText('Лаборатория');
       thead.createEl('th').setText('Email');
       thead.createEl('th').setText('Роль');
+      thead.createEl('th').setText('');
       const tbody = table.createEl('tbody');
       for (const m of members) {
         const tr = tbody.createEl('tr');
         tr.createEl('td').setText(String(m.lab_id));
         tr.createEl('td').setText(m.email);
-        tr.createEl('td').setText(m.role);
+        const roleCell = tr.createEl('td');
+        const roleSelect = roleCell.createEl('select', { cls: 'tn-lims-input' });
+        roleSelect.createEl('option', { value: 'lab_operator', text: 'Сотрудник' });
+        roleSelect.createEl('option', { value: 'lab_admin', text: 'Админ лабы' });
+        roleSelect.createEl('option', { value: 'lab_auditor', text: 'Аудитор (только чтение)' });
+        roleSelect.value = m.role;
+        roleSelect.addEventListener('change', async () => {
+          try {
+            await this.plugin.syncService.setLabMember(m.lab_id, m.email, roleSelect.value);
+            new Notice(`Роль ${m.email} обновлена`);
+          } catch (e: unknown) {
+            new Notice(`Ошибка: ${e instanceof Error ? e.message : String(e)}`);
+          }
+        });
+        const removeBtn = tr.createEl('td').createEl('button', { text: '✖', cls: 'tn-btn tn-btn-ghost' });
+        removeBtn.addEventListener('click', async () => {
+          if (!window.confirm(`Убрать «${m.email}» из лаборатории ${m.lab_id}?`)) return;
+          try {
+            await this.plugin.syncService.removeLabMember(m.lab_id, m.email);
+            new Notice('Сотрудник удалён');
+            this.display();
+          } catch (e: unknown) {
+            new Notice(`Ошибка: ${e instanceof Error ? e.message : String(e)}`);
+          }
+        });
       }
       const addRow = tbody.createEl('tr');
       const labCell = addRow.createEl('td');
