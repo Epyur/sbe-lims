@@ -299,6 +299,25 @@ func (s *Server) loadMethodLabsMap(ctx context.Context) (map[int64][]int64, erro
 	return out, rows.Err()
 }
 
+// methodLabIDs — лабы ОДНОГО метода (для проверки requireLabAdminOfAny/OfAll на
+// PATCH/DELETE — не тянуть карту по всем методам ради одного).
+func (s *Server) methodLabIDs(ctx context.Context, methodID int64) ([]int64, error) {
+	rows, err := s.pool.Query(ctx, `SELECT lab_id FROM method_labs WHERE method_id = $1`, methodID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []int64{}
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			continue
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
 // validateLabIDs дедуплицирует и проверяет, что каждый id ссылается на существующую лабу.
 func (s *Server) validateLabIDs(ctx context.Context, ids []int64) ([]int64, error) {
 	seen := map[int64]bool{}
@@ -406,6 +425,15 @@ func (s *Server) handleCreateMethod(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "at least one lab_id is required"})
 		return
 	}
+	// lab_admin создаёт методы ТОЛЬКО для лаб, которые администрирует (2026-08-24,
+	// делегированные полномочия) — не может привязать метод к чужой лабе.
+	if ok, err := s.requireLabAdminOfAll(r.Context(), currentEmail(r), labIDs); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
+		return
+	} else if !ok {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden: must administer all listed labs"})
+		return
+	}
 
 	tx, err := s.pool.Begin(r.Context())
 	if err != nil {
@@ -443,6 +471,19 @@ func (s *Server) handleDeleteMethod(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid id"})
+		return
+	}
+	// lab_admin удаляет только методы своих лаб (2026-08-24, делегированные полномочия).
+	labIDs, err := s.methodLabIDs(r.Context(), id)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
+		return
+	}
+	if ok, err := s.requireLabAdminOfAny(r.Context(), currentEmail(r), labIDs); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
+		return
+	} else if !ok {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden: must administer at least one of this method's labs"})
 		return
 	}
 	if _, err := s.pool.Exec(r.Context(), `DELETE FROM methods WHERE id = $1`, id); err != nil {

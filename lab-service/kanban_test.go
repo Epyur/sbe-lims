@@ -25,6 +25,25 @@ func TestCanApplyKanbanMoveLabHeadAlwaysAllowed(t *testing.T) {
 	}
 }
 
+func TestCanApplyKanbanMoveLabAdminActsAsLabHead(t *testing.T) {
+	// lab_admin ИМЕННО этой лабы (без глобальной admin-роли) — свободно, как
+	// руководитель: переназначение, движение чужих карточек, переоткрытие
+	// завершённых (2026-08-24, делегированные полномочия).
+	cases := []struct {
+		oldStatus, newStatus, oldAssignedTo, newAssignedTo string
+	}{
+		{"new", "received", "", testerAEmail},
+		{"received", "processing", testerAEmail, testerBEmail},
+		{"completed", "processing", testerAEmail, testerAEmail},
+	}
+	for _, c := range cases {
+		ok, reason := canApplyKanbanMove(headEmail, "", "lab_admin", c.oldStatus, c.newStatus, c.oldAssignedTo, c.newAssignedTo)
+		if !ok {
+			t.Errorf("lab_admin move %+v: got forbidden (%s), want allowed", c, reason)
+		}
+	}
+}
+
 func TestCanApplyKanbanMoveTesterCannotAssign(t *testing.T) {
 	// Заявка уже назначена testerA; testerA пытается переназначить её testerB.
 	ok, reason := canApplyKanbanMove(testerAEmail, "", "lab_operator", "received", "received", testerAEmail, testerBEmail)

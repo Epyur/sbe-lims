@@ -48,8 +48,11 @@ func normalizeKanbanTarget(oldStatus, oldAssignedTo string, patch kanbanMoveRequ
 
 // canApplyKanbanMove — без БД (роли резолвит вызывающая сторона), юнит-тестируется
 // напрямую:
-//  1. Руководитель лабы (глобальная роль admin/superadmin) — разрешено всё.
-//  2. Испытатель (lab_operator/lab_admin ИМЕННО этой лабы):
+//  1. Руководитель лабы — глобальная роль admin/superadmin, ЛИБО lab_admin
+//     ИМЕННО этой лабы (2026-08-24, делегированные полномочия: lab_admin теперь
+//     полноценный руководитель своей лабы в канбане, не синоним lab_operator) —
+//     разрешено всё.
+//  2. Испытатель (lab_operator ИМЕННО этой лабы):
 //     a. Самозабор: неназначенную заявку из "новых" (oldStatus=="new",
 //        oldAssignedTo=="") может забрать СЕБЕ (newAssignedTo==actorEmail) в
 //        статус "received" — и только себе, не кому-то другому.
@@ -61,10 +64,10 @@ func normalizeKanbanTarget(oldStatus, oldAssignedTo string, patch kanbanMoveRequ
 //        завершённую).
 //  3. Остальные — запрещено.
 func canApplyKanbanMove(actorEmail, actorGlobalRole, actorLabRole, oldStatus, newStatus, oldAssignedTo, newAssignedTo string) (bool, string) {
-	if roleRank(actorGlobalRole) >= roleRank("admin") {
+	if roleRank(actorGlobalRole) >= roleRank("admin") || actorLabRole == "lab_admin" {
 		return true, ""
 	}
-	if actorLabRole != "lab_operator" && actorLabRole != "lab_admin" {
+	if actorLabRole != "lab_operator" {
 		return false, "forbidden: not a lab_operator/lab_admin of this lab"
 	}
 	if oldStatus == "new" && oldAssignedTo == "" {

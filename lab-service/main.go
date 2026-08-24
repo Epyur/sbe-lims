@@ -88,7 +88,7 @@ func main() {
 	mux.HandleFunc("POST /api/lab/labs", s.requirePerm("superadmin")(s.handleCreateLab))
 	mux.HandleFunc("PATCH /api/lab/labs/{id}", s.requirePerm("superadmin")(s.handleUpdateLab))
 	mux.HandleFunc("GET /api/lab/methods", s.requirePerm("viewer")(s.handleListMethods))
-	mux.HandleFunc("POST /api/lab/methods", s.requirePerm("admin")(s.handleCreateMethod))
+	mux.HandleFunc("POST /api/lab/methods", s.requirePerm("editor")(s.handleCreateMethod))
 	mux.HandleFunc("GET /api/lab/objects", s.requirePerm("viewer")(s.handleListObjects))
 	mux.HandleFunc("POST /api/lab/objects", s.requirePerm("editor")(s.handleCreateObject))
 	mux.HandleFunc("PATCH /api/lab/objects/{id}", s.requirePerm("editor")(s.handleUpdateObject))
@@ -147,12 +147,12 @@ func main() {
 	mux.HandleFunc("PATCH /api/lab/equipment/{id}", s.requirePerm("editor")(s.handleUpdateEquipment))
 	mux.HandleFunc("DELETE /api/lab/equipment/{id}", s.requirePerm("editor")(s.handleDeleteEquipment))
 	mux.HandleFunc("GET /api/lab/lab-members", s.requirePerm("viewer")(s.handleListLabMembers))
-	mux.HandleFunc("POST /api/lab/lab-members", s.requirePerm("admin")(s.handleSetLabMember))
-	mux.HandleFunc("DELETE /api/lab/lab-members/{lab_id}/{email}", s.requirePerm("admin")(s.handleRemoveLabMember))
+	mux.HandleFunc("POST /api/lab/lab-members", s.requirePerm("editor")(s.handleSetLabMember))
+	mux.HandleFunc("DELETE /api/lab/lab-members/{lab_id}/{email}", s.requirePerm("editor")(s.handleRemoveLabMember))
 
 	// ЛИМС: методы (конфиги, удаление)
-	mux.HandleFunc("PATCH /api/lab/methods/{id}", s.requirePerm("admin")(s.handleUpdateMethodConfig))
-	mux.HandleFunc("DELETE /api/lab/methods/{id}", s.requirePerm("admin")(s.handleDeleteMethod))
+	mux.HandleFunc("PATCH /api/lab/methods/{id}", s.requirePerm("editor")(s.handleUpdateMethodConfig))
+	mux.HandleFunc("DELETE /api/lab/methods/{id}", s.requirePerm("editor")(s.handleDeleteMethod))
 
 	// ЛИМС: графики, протокол, дашборд
 	mux.HandleFunc("GET /api/lab/requests/{id}/chart/{cfg_id}", s.requirePerm("viewer")(s.handleChart))

@@ -44,6 +44,15 @@ const STATUS_LABELS: Record<string, string> = {
  * только числовую часть — префикс восстанавливается для отображения. */
 const EXTERNAL_ID_PREFIX = 'LPIZAYAVKINAPRO-';
 
+/** Роли lab_members — общий список опций для формы добавления И для inline-
+ * редактирования роли (2026-08-24, по запросу пользователя: раньше смену роли
+ * можно было сделать только через удаление/повторное добавление сотрудника). */
+const LAB_MEMBER_ROLE_LABELS: Array<[string, string]> = [
+  ['lab_operator', 'Испытатель (lab_operator)'],
+  ['lab_admin', 'Администратор лабы (lab_admin)'],
+  ['lab_auditor', 'Аудитор, только чтение (lab_auditor)'],
+];
+
 /** Знаки сравнения для условий правила классификации (2026-08-22). */
 const COMPARISON_OPERATOR_OPTIONS: Array<[ComparisonOperator, string]> = [
   ['<', 'меньше'], ['<=', 'меньше или равно'], ['>', 'больше'], ['>=', 'больше или равно'],
@@ -691,11 +700,13 @@ export class LimsView extends ItemView {
   // 4 колонки: new/received/processing/completed (маппинг подтверждён — подпись
   // processing "🟡 В работе" буквально равна названию колонки 3). Колонки 2/3
   // делятся на ячейки по испытателям лабы (lab_members.role IN ('lab_operator',
-  // 'lab_admin')); руководитель (canAdmin) двигает карточки свободно, испытатель —
-  // только свои уже назначенные (между своими ячейками 2⇄3, дальше в 4), либо
-  // забирает СЕБЕ неназначенную заявку прямо из колонки 1. Авторизация реально
-  // проверяется на сервере (kanban.go, canApplyKanbanMove) — клиентские предикаты
-  // ниже только скрывают то, что заведомо будет отклонено, не единственная защита.
+  // 'lab_admin')); руководитель (canAdmin ИЛИ lab_admin именно этой лабы,
+  // 2026-08-24 — делегированные полномочия) двигает карточки свободно, испытатель
+  // (lab_operator) — только свои уже назначенные (между своими ячейками 2⇄3,
+  // дальше в 4), либо забирает СЕБЕ неназначенную заявку прямо из колонки 1.
+  // Авторизация реально проверяется на сервере (kanban.go, canApplyKanbanMove) —
+  // клиентские предикаты ниже только скрывают то, что заведомо будет отклонено,
+  // не единственная защита.
 
   /** Ростер лабы заявки (для деления колонок 2/3 на ячейки и для пикера в детали).
    * Внешняя лаба не имеет своих lab_members — резолвим в parent_lab_id, как и
@@ -718,6 +729,19 @@ export class LimsView extends ItemView {
     return roster.find(m => m.email === this.myEmail)?.role || '';
   }
 
+  /** Лабы, где текущий пользователь — lab_admin (делегированные полномочия,
+   * 2026-08-24) — нужно для гейтинга «Методов» (метод может принадлежать
+   * нескольким лабам, достаточно администрировать одну из них). Не вызывать
+   * для глобального admin+ — там всё разрешено без этого списка. */
+  private async myAdminLabIds(): Promise<Set<number>> {
+    const ids = new Set<number>();
+    await Promise.all(this.labs.map(async (lab) => {
+      const roster = await this.fetchLabRoster(lab.id);
+      if (this.myRoleIn(roster) === 'lab_admin') ids.add(lab.id);
+    }));
+    return ids;
+  }
+
   private async renderQueueBoard(): Promise<void> {
     this.bodyEl.empty();
     if (!this.labId) {
@@ -729,7 +753,9 @@ export class LimsView extends ItemView {
       const roster = await this.fetchLabRoster(this.labId);
       const testers = this.testersOf(roster);
       const myLabRole = this.myRoleIn(roster);
-      const isLabHead = this.canAdmin;
+      // lab_admin ИМЕННО этой лабы — тоже руководитель (2026-08-24, делегированные
+      // полномочия), не только глобальный admin/superadmin.
+      const isLabHead = this.canAdmin || myLabRole === 'lab_admin';
       const all = await this.plugin.syncService.listRequests();
       const requests = all.filter(r => r.lab_id === this.labId);
       this.bodyEl.empty();
@@ -957,7 +983,8 @@ export class LimsView extends ItemView {
     // либо самозабор неназначенной "новой" себе.
     const roster = req.lab_id > 0 ? await this.fetchLabRoster(req.lab_id) : [];
     const myLabRole = this.myRoleIn(roster);
-    if (this.canAdmin) {
+    // lab_admin ИМЕННО этой лабы — тоже руководитель (2026-08-24, делегированные полномочия).
+    if (this.canAdmin || myLabRole === 'lab_admin') {
       const statusSelect = this.bodyEl.createEl('select', { cls: 'tn-lims-select tn-lims-mb8' });
       for (const [v, l] of Object.entries(STATUS_LABELS)) statusSelect.createEl('option', { value: v, text: l });
       statusSelect.value = req.status;
@@ -1113,11 +1140,17 @@ export class LimsView extends ItemView {
 
   // ---- Справочники ----
 
-  /** Методы: список из кэша (pull); создание + JSON-редактор конфигов + удаление — admin. */
+  /** Методы: список из кэша (pull); создание + JSON-редактор конфигов + удаление —
+   * глобальный admin+, либо lab_admin хотя бы ОДНОЙ из лаб метода (2026-08-24,
+   * делегированные полномочия — метод может принадлежать нескольким лабам, для
+   * своих lab_admin получает полный доступ, для чужих — только просмотр). */
   private async renderMethods(): Promise<void> {
     this.bodyEl.empty();
-    if (this.canAdmin) {
-      this.renderMethodCreateForm();
+    const adminLabIds = this.canAdmin ? null : await this.myAdminLabIds();
+    const isAdminOf = (labIds: number[]): boolean =>
+      this.canAdmin || (adminLabIds !== null && labIds.some(id => adminLabIds.has(id)));
+    if (this.canAdmin || (adminLabIds !== null && adminLabIds.size > 0)) {
+      this.renderMethodCreateForm(adminLabIds);
     }
     // Все методы, не только текущей выбранной лабы — метод может принадлежать
     // нескольким (включая внешние), фильтр по this.labId скрывал бы только что
@@ -1142,7 +1175,7 @@ export class LimsView extends ItemView {
       if (m.determinable_indicators.length > 0) {
         card.createDiv({ cls: 'tn-lims-meta' }).setText(`Показатели: ${m.determinable_indicators.join(', ')}`);
       }
-      if (this.canAdmin) {
+      if (isAdminOf(m.lab_ids)) {
         const editBtn = head.createEl('button', { text: '✎ Конфиг', cls: 'tn-btn tn-btn-ghost' });
         editBtn.addEventListener('click', () => new MethodConfigModal(this, m.id).open());
         const delBtn = head.createEl('button', { text: '✖ Удалить', cls: 'tn-btn tn-btn-ghost' });
@@ -1163,9 +1196,9 @@ export class LimsView extends ItemView {
 
   /** Чекбоксы выбора лабораторий метода (принадлежит нескольким — 2026-08-19).
    * Возвращает функцию, читающую текущий выбор в момент сохранения. */
-  private renderLabCheckboxes(container: HTMLElement, selected: number[]): () => number[] {
+  private renderLabCheckboxes(container: HTMLElement, selected: number[], labs: Lab[] = this.labs): () => number[] {
     const boxes: Array<{ id: number; el: HTMLInputElement }> = [];
-    for (const lab of this.labs) {
+    for (const lab of labs) {
       const row = container.createDiv({ cls: 'tn-lims-flex' });
       const cb = row.createEl('input', { attr: { type: 'checkbox' } });
       cb.checked = selected.includes(lab.id);
@@ -1175,9 +1208,11 @@ export class LimsView extends ItemView {
     return () => boxes.filter(b => b.el.checked).map(b => b.id);
   }
 
-  /** Форма создания метода (admin). Лаборатории — чекбоксы (метод может принадлежать
-   * нескольким), из уже загруженного списка лабораторий. */
-  private renderMethodCreateForm(): void {
+  /** Форма создания метода — глобальный admin+, либо lab_admin (список лабораторий
+   * ограничен своими, 2026-08-24 — не даёт даже попытаться привязать метод к чужой
+   * лабе, хотя сервер и так это отклонит). Лаборатории — чекбоксы (метод может
+   * принадлежать нескольким), из уже загруженного списка лабораторий. */
+  private renderMethodCreateForm(adminLabIds: Set<number> | null): void {
     const form = this.bodyEl.createDiv({ cls: 'tn-lims-series-form' });
     const row = form.createDiv({ cls: 'tn-lims-flex' });
     const code = row.createEl('input', { attr: { type: 'text', placeholder: 'Код метода' }, cls: 'tn-lims-input' });
@@ -1192,7 +1227,8 @@ export class LimsView extends ItemView {
       '(Г1, Г2, Г3, Г4 → Г1 > Г2 > Г3 > Г4) — используется в правилах классификации и формулах min_grade/max_grade.',
     );
     form.createDiv({ cls: 'tn-lims-meta' }).setText('Лаборатории (метод может принадлежать нескольким):');
-    const getLabIDs = this.renderLabCheckboxes(form, []);
+    const availableLabs = adminLabIds === null ? this.labs : this.labs.filter(l => adminLabIds.has(l.id));
+    const getLabIDs = this.renderLabCheckboxes(form, [], availableLabs);
     const addBtn = form.createEl('button', { text: '➕ Добавить метод', cls: 'tn-btn tn-btn-primary' });
     addBtn.addEventListener('click', async () => {
       const labIDs = getLabIDs();
@@ -2612,18 +2648,28 @@ export class LimsView extends ItemView {
     });
   }
 
-  /** Сотрудники лаборатории — только admin (GET /lab-members сам требует admin на сервере). */
+  /** Сотрудники лаборатории — глобальный admin+, либо lab_admin ИМЕННО текущей
+   * лабы (2026-08-24, делегированные полномочия: lab_admin теперь полноценный
+   * руководитель своей лабы, не синоним lab_operator — см. lab-service kanban.go/
+   * requireLabAdminOf). Роль каждого сотрудника редактируется на месте (select) —
+   * раньше единственным способом сменить роль было удалить и добавить заново. */
   private async renderLabMembers(): Promise<void> {
-    if (!this.canAdmin) {
-      this.bodyEl.createDiv({ cls: 'tn-lims-meta tn-lims-p24' }).setText(
-        'Раздел доступен только администратору (управление сотрудниками лаборатории).'
-      );
+    if (!this.labId) {
+      this.bodyEl.createDiv({ cls: 'tn-lims-meta tn-lims-p24' }).setText('Выберите лабораторию.');
       return;
     }
     this.bodyEl.createDiv({ cls: 'tn-lims-meta', text: 'Загрузка…' });
     try {
-      const all = await this.plugin.syncService.listLabMembers();
-      const members = this.labId ? all.filter(m => m.lab_id === this.labId) : all;
+      const roster = await this.fetchLabRoster(this.labId);
+      const isLabAdmin = this.myRoleIn(roster) === 'lab_admin';
+      if (!this.canAdmin && !isLabAdmin) {
+        this.bodyEl.empty();
+        this.bodyEl.createDiv({ cls: 'tn-lims-meta tn-lims-p24' }).setText(
+          'Раздел доступен только руководителю лаборатории (администратору или lab_admin этой лабы).'
+        );
+        return;
+      }
+      const members = roster.filter(m => m.lab_id === this.labId);
       this.bodyEl.empty();
       this.renderLabMemberForm();
       if (members.length === 0) {
@@ -2637,7 +2683,18 @@ export class LimsView extends ItemView {
       for (const m of members) {
         const tr = tbody.createEl('tr');
         tr.createEl('td').setText(m.email);
-        tr.createEl('td').setText(m.role);
+        const roleSelect = tr.createEl('td').createEl('select', { cls: 'tn-lims-select' });
+        for (const [v, l] of LAB_MEMBER_ROLE_LABELS) roleSelect.createEl('option', { value: v, text: l });
+        roleSelect.value = m.role;
+        roleSelect.addEventListener('change', async () => {
+          try {
+            await this.plugin.syncService.setLabMember(m.lab_id, m.email, roleSelect.value);
+            new Notice(`Роль ${m.email} обновлена`);
+            await this.renderLabMembers();
+          } catch (e: unknown) {
+            new Notice(`Ошибка: ${errorMessage(e)}`);
+          }
+        });
         const removeBtn = tr.createEl('td').createEl('button', { text: '✖ Убрать', cls: 'tn-btn tn-btn-ghost' });
         removeBtn.addEventListener('click', async () => {
           if (!window.confirm(`Убрать «${m.email}» из лаборатории?`)) return;
@@ -2661,8 +2718,7 @@ export class LimsView extends ItemView {
     const row = form.createDiv({ cls: 'tn-lims-flex' });
     const email = row.createEl('input', { attr: { type: 'text', placeholder: 'E-mail сотрудника' }, cls: 'tn-lims-input' });
     const roleSelect = row.createEl('select', { cls: 'tn-lims-select' });
-    roleSelect.createEl('option', { value: 'lab_operator', text: 'Испытатель (lab_operator)' });
-    roleSelect.createEl('option', { value: 'lab_admin', text: 'Администратор лабы (lab_admin)' });
+    for (const [v, l] of LAB_MEMBER_ROLE_LABELS) roleSelect.createEl('option', { value: v, text: l });
     const addBtn = row.createEl('button', { text: '➕ Добавить', cls: 'tn-btn tn-btn-primary' });
     addBtn.addEventListener('click', async () => {
       if (!email.value.trim() || !this.labId) { new Notice('Укажите e-mail и выберите лабораторию'); return; }
@@ -2816,12 +2872,17 @@ export class LimsView extends ItemView {
     return this.myRole !== '';
   }
 
-  /** Admin+ (app-level, включая superadmin) — методы-конфиги, сотрудники лаборатории,
-   * и «руководитель лабы» для Kanban-доски «Очередь лаборатории» (свободное
-   * перетаскивание/назначение). Точная lab_admin/lab_auditor (per-lab) роль
-   * текущего пользователя для конкретной лабы — через fetchLabRoster/myRoleIn
-   * (2026-08-24, GET /lab-members?lab_id= теперь доступен любому участнику
-   * лабы, не только admin — см. lims_refs.go handleListLabMembers). */
+  /** Admin+ (app-level, включая superadmin) — глобально разрешено всё, что ниже
+   * дополнительно открыто lab_admin ТОЛЬКО для своей лабы (2026-08-24,
+   * делегированные полномочия — по прямому запросу пользователя: lab_admin должен
+   * быть реальным админом своей лабы, а не синонимом lab_operator): конфиг/
+   * создание/удаление методов своей лабы, сотрудники своей лабы (любая роль, в
+   * т.ч. назначение другого lab_admin), роль «руководителя» в Kanban-доске своей
+   * лабы. Точная lab_admin/lab_auditor роль текущего пользователя для конкретной
+   * лабы — через fetchLabRoster/myRoleIn (GET /lab-members?lab_id= доступен
+   * любому участнику лабы, не только admin — см. lims_refs.go
+   * handleListLabMembers); за пределами своей лабы у lab_admin прав нет — там
+   * решает именно этот геттер (глобальная роль). */
   private get canAdmin(): boolean {
     return this.myRole === 'admin' || this.myRole === 'superadmin';
   }

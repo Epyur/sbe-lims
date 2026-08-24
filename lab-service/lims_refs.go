@@ -97,6 +97,75 @@ func (s *Server) requireLabRead(ctx context.Context, email string, requestID int
 	return memberRole == "lab_auditor", nil
 }
 
+// requireLabAdminOf — делегированные полномочия lab_admin внутри своей лабы
+// (2026-08-24, по прямому запросу пользователя: lab_admin должен быть реальным
+// админом своей лабы — конфиг методов, сотрудники, роль "руководителя" в
+// Kanban-доске — а не просто synonym для lab_operator). true, если app-admin+
+// (глобально), либо lab_admin ИМЕННО лабы labID.
+func (s *Server) requireLabAdminOf(ctx context.Context, email string, labID int64) (bool, error) {
+	role, err := s.effectiveRole(ctx, appIDFromEnv(), email)
+	if err != nil {
+		return false, err
+	}
+	if roleRank(role) >= roleRank("admin") {
+		return true, nil
+	}
+	memberRole, err := s.labMemberRole(ctx, email, labID)
+	if err != nil {
+		return false, err
+	}
+	return memberRole == "lab_admin", nil
+}
+
+// requireLabAdminOfAny — app-admin+ либо lab_admin ХОТЯ БЫ ОДНОЙ из labIDs (метод
+// может принадлежать нескольким лабам — достаточно администрировать одну из них,
+// чтобы редактировать/удалить метод целиком).
+func (s *Server) requireLabAdminOfAny(ctx context.Context, email string, labIDs []int64) (bool, error) {
+	role, err := s.effectiveRole(ctx, appIDFromEnv(), email)
+	if err != nil {
+		return false, err
+	}
+	if roleRank(role) >= roleRank("admin") {
+		return true, nil
+	}
+	for _, labID := range labIDs {
+		memberRole, err := s.labMemberRole(ctx, email, labID)
+		if err != nil {
+			return false, err
+		}
+		if memberRole == "lab_admin" {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// requireLabAdminOfAll — app-admin+ либо lab_admin КАЖДОЙ из labIDs (создание
+// метода/переназначение его лаб — нельзя привязать метод к лабе, которой не
+// администрируешь, даже если администрируешь другую).
+func (s *Server) requireLabAdminOfAll(ctx context.Context, email string, labIDs []int64) (bool, error) {
+	role, err := s.effectiveRole(ctx, appIDFromEnv(), email)
+	if err != nil {
+		return false, err
+	}
+	if roleRank(role) >= roleRank("admin") {
+		return true, nil
+	}
+	if len(labIDs) == 0 {
+		return false, nil
+	}
+	for _, labID := range labIDs {
+		memberRole, err := s.labMemberRole(ctx, email, labID)
+		if err != nil {
+			return false, err
+		}
+		if memberRole != "lab_admin" {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
 // ---- Inventors ----
 
 type Inventor struct {
@@ -446,6 +515,17 @@ func (s *Server) handleSetLabMember(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "role must be lab_operator, lab_admin or lab_auditor"})
 		return
 	}
+	// lab_admin управляет сотрудниками ТОЛЬКО своей лабы, но ЛЮБОЙ их ролью, включая
+	// назначение другого lab_admin (2026-08-24, делегированные полномочия — по
+	// решению пользователя: полноценный админ своей лабы, без ограничения "только
+	// обычных сотрудников").
+	if ok, err := s.requireLabAdminOf(r.Context(), currentEmail(r), req.LabID); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
+		return
+	} else if !ok {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden: must administer this lab"})
+		return
+	}
 	// lab_members заводится только для внутренних лаб — у внешней своих пользователей
 	// системы нет, видимость её заявок резолвится через parent_lab_id (requestLabID),
 	// а не через lab_members самой внешней лабы.
@@ -473,6 +553,13 @@ func (s *Server) handleRemoveLabMember(w http.ResponseWriter, r *http.Request) {
 	labID, err := strconv.ParseInt(r.PathValue("lab_id"), 10, 64)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid lab_id"})
+		return
+	}
+	if ok, err := s.requireLabAdminOf(r.Context(), currentEmail(r), labID); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
+		return
+	} else if !ok {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden: must administer this lab"})
 		return
 	}
 	email := r.PathValue("email")
@@ -610,6 +697,21 @@ func (s *Server) handleUpdateMethodConfig(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid id"})
 		return
 	}
+	email := currentEmail(r)
+	// lab_admin конфигурирует только методы своих лаб (2026-08-24, делегированные
+	// полномочия) — достаточно администрировать ОДНУ из текущих лаб метода.
+	currentLabIDs, err := s.methodLabIDs(r.Context(), id)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
+		return
+	}
+	if ok, err := s.requireLabAdminOfAny(r.Context(), email, currentLabIDs); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
+		return
+	} else if !ok {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden: must administer at least one of this method's labs"})
+		return
+	}
 	var req struct {
 		Formulas               *json.RawMessage `json:"formulas"`
 		Classification         *json.RawMessage `json:"classification"`
@@ -658,6 +760,16 @@ func (s *Server) handleUpdateMethodConfig(w http.ResponseWriter, r *http.Request
 		}
 		if len(labIDs) == 0 {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "at least one lab_id is required"})
+			return
+		}
+		// Переназначение лаб метода — lab_admin должен администрировать ВСЕ новые
+		// лабы (не только одну из текущих, как для остальных полей PATCH), иначе
+		// мог бы привязать метод к чужой лабе.
+		if ok, err := s.requireLabAdminOfAll(r.Context(), email, labIDs); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
+			return
+		} else if !ok {
+			writeJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden: must administer all newly assigned labs"})
 			return
 		}
 	}

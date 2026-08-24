@@ -69,7 +69,7 @@ chart_configs/input_parameters), расширенный ЖЦ заявки (recei
 | GET | `/health` | — |
 | GET | `/labs`, `/methods`, `/objects` | viewer |
 | POST/PATCH | `/labs`, `/labs/{id}` | superadmin (внешняя лаба требует `parent_lab_id` — внутренней) |
-| POST | `/methods` | admin |
+| POST | `/methods` | admin, ИЛИ lab_admin ВСЕХ запрошенных `lab_ids` (2026-08-24, делегированные полномочия — `requireLabAdminOfAll`) |
 | POST/PATCH | `/objects`, `/objects/{id}` | editor (PATCH — 2026-08-24, characteristics заменяются целиком) |
 | GET | `/projects` | viewer |
 | POST | `/projects` | editor |
@@ -99,10 +99,10 @@ chart_configs/input_parameters), расширенный ЖЦ заявки (recei
 | GET/POST | `/equipment` | viewer / editor+ |
 | PATCH/DELETE | `/equipment/{id}` | editor+ |
 | GET | `/lab-members` | admin (без `?lab_id=`) / любой участник лабы (с `?lab_id=`, 2026-08-24) |
-| POST | `/lab-members` | admin |
-| DELETE | `/lab-members/{lab_id}/{email}` | admin |
-| PATCH | `/methods/{id}` | admin (formulas/classification/chart_configs/input_parameters/presentation/operator_form/lab_ids/description) |
-| DELETE | `/methods/{id}` | admin |
+| POST | `/lab-members` | admin, ИЛИ lab_admin ИМЕННО этой лабы (2026-08-24, `requireLabAdminOf` — любая роль сотрудника своей лабы, включая назначение другого lab_admin) |
+| DELETE | `/lab-members/{lab_id}/{email}` | admin, ИЛИ lab_admin ИМЕННО этой лабы (2026-08-24) |
+| PATCH | `/methods/{id}` | admin, ИЛИ lab_admin ХОТЯ БЫ ОДНОЙ из ТЕКУЩИХ лаб метода (2026-08-24, `requireLabAdminOfAny`; при смене `lab_ids` — lab_admin ВСЕХ новых лаб, `requireLabAdminOfAll`) (formulas/classification/chart_configs/input_parameters/presentation/operator_form/lab_ids/description) |
+| DELETE | `/methods/{id}` | admin, ИЛИ lab_admin хотя бы одной из лаб метода (2026-08-24, `requireLabAdminOfAny`) |
 | GET | `/requests/{id}/chart/{cfg_id}` | viewer |
 | POST | `/requests/{id}/protocol?template=&format=` | editor+ |
 | GET | `/requests/{id}/export.xlsx` | editor (2026-08-24, серии + агрегаты/статистика, `excelize`) |
@@ -351,6 +351,35 @@ docker compose exec lab wget -qO- http://localhost:3000/api/lab/health   # вн�
 ```
 
 ## История
+
+- **2026-08-24 — lab_admin: реальный делегированный админ своей лабы (не синоним
+  lab_operator).** Найдено пользователем: у shoya.vs@tn.ru роль `lab_admin`
+  (`lab_members`), но конфиг методов/«Сотрудники»/канбан-руководитель были
+  недоступны — все admin-гейты проверяли только ГЛОБАЛЬНУЮ роль
+  (`lab_permissions`), у которой не было персональной строки (только
+  `lab_common_access=editor` по умолчанию). ЗАДЕПЛОЕНО на VDS, health ok.
+  - Новые `requireLabAdminOf(email, labID)`/`requireLabAdminOfAny(email,
+    labIDs)`/`requireLabAdminOfAll(email, labIDs)` (`lims_refs.go`) —
+    app-admin+ ИЛИ lab_admin соответствующей лабы(лаб). Применены: (a)
+    `handleCreateMethod` — `OfAll` по запрошенным `lab_ids` (не привязать
+    метод к чужой лабе); (b) `handleUpdateMethodConfig`/`handleDeleteMethod` —
+    `OfAny` по ТЕКУЩИМ лабам метода (метод может принадлежать нескольким,
+    достаточно администрировать одну; при смене `lab_ids` в PATCH — `OfAll` по
+    НОВЫМ лабам); (c) `handleSetLabMember`/`handleRemoveLabMember` — `Of` по
+    `lab_id` операции (lab_admin управляет ЛЮБОЙ ролью сотрудников своей лабы,
+    включая назначение другого lab_admin — решение пользователя). Новый
+    `methodLabIDs(methodID)` (`references.go`) — лабы одного метода без карты
+    по всем методам (`loadMethodLabsMap`).
+  - Route-гейты `POST /methods`, `PATCH/DELETE /methods/{id}`, `POST/DELETE
+    /lab-members` ослаблены `requirePerm("admin")` → `requirePerm("editor")`
+    (`main.go`) — реальная проверка теперь внутри хендлера (тот же паттерн,
+    что уже был у `kanban-move`/`lab-members?lab_id=` read).
+  - `canApplyKanbanMove` (`kanban.go`) — lab_admin ИМЕННО этой лабы теперь
+    проходит в "свободную" ветку руководителя (было — синоним lab_operator).
+    Новый тест `TestCanApplyKanbanMoveLabAdminActsAsLabHead`.
+  - `go build`/`vet`/`test` — 10/10 зелёных, без регрессий существующих. См.
+    также `sbe-lims/AGENTS.md` (v0.2.4, клиентская часть — «Методы»/
+    «Сотрудники»/inline-редактирование роли).
 
 - **2026-08-24 — Kanban-доска «Очередь лаборатории» (sbe-lims): новый `kanban.go`,
   `assigned_to`/`completed_at` на `requests`, `lab-members` открыт для чтения любому
