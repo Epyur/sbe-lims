@@ -95,13 +95,13 @@ type legendItem struct {
 	color color.RGBA
 }
 
-// layoutLegendRows раскладывает подписи серий в строки легенды с переносом по ширине
-// maxW — до этого фикса легенды не было вовсе, серии на графике различались только
-// цветом без объяснения, что каждый цвет означает.
-func layoutLegendRows(series []chartSeries, maxW int) [][]legendItem {
-	var rows [][]legendItem
-	var cur []legendItem
-	curW := 0
+// buildLegendItems строит список подписей серий для легенды — до этого фикса легенды
+// не было вовсе, серии на графике различались только цветом без объяснения, что каждый
+// цвет означает. Список (не строки с переносом по ширине) — легенда теперь рисуется
+// ВНУТРИ поля графика одной колонкой (2026-08-25, прямой запрос пользователя —
+// "легенду нужно размещать в поле графика списком", см. renderChart).
+func buildLegendItems(series []chartSeries) []legendItem {
+	var items []legendItem
 	for idx, s := range series {
 		if s.Name == "" {
 			continue
@@ -114,28 +114,61 @@ func layoutLegendRows(series []chartSeries, maxW int) [][]legendItem {
 		if s.Y2 {
 			label += " (ось 2)"
 		}
-		itemW := 16 + chartTextWidth(label) + 18
-		if curW+itemW > maxW && len(cur) > 0 {
-			rows = append(rows, cur)
-			cur = nil
-			curW = 0
+		items = append(items, legendItem{label: label, color: col})
+	}
+	return items
+}
+
+// drawLegendBox рисует список подписей серий одной колонкой ВНУТРИ поля графика
+// (marginLeft..marginLeft+plotW, начиная от top), правый верхний угол по умолчанию
+// (2026-08-25, прямой запрос пользователя). Непрозрачный фон + рамка вокруг списка —
+// рисуется ПОСЛЕ серий (см. вызов в renderChart), поэтому подписи остаются читаемыми,
+// даже если легенда физически перекрывает линию/точки данных под ней.
+func drawLegendBox(img *image.RGBA, items []legendItem, marginLeft, top, plotW int) {
+	if len(items) == 0 {
+		return
+	}
+	const (
+		legendPad     = 6
+		legendSwatchW = 12
+		legendGap     = 6
+	)
+	maxLabelW := 0
+	for _, it := range items {
+		if w := chartTextWidth(it.label); w > maxLabelW {
+			maxLabelW = w
 		}
-		cur = append(cur, legendItem{label: label, color: col})
-		curW += itemW
 	}
-	if len(cur) > 0 {
-		rows = append(rows, cur)
+	boxW := legendPad*2 + legendSwatchW + legendGap + maxLabelW
+	boxH := legendPad*2 + len(items)*legendRowH
+	x1 := marginLeft + plotW - legendPad
+	x0 := x1 - boxW
+	if x0 < marginLeft {
+		x0 = marginLeft
 	}
-	return rows
+	y0 := top + legendPad
+	y1 := y0 + boxH
+
+	drawRectFilled(img, x0, y0, x1, y1, chartBg)
+	drawRect(img, x0, y0, x1, y1, chartGrid)
+
+	textY := y0 + legendPad + legendRowH - 5
+	for _, it := range items {
+		sx := x0 + legendPad
+		drawRectFilled(img, sx, textY-9, sx+legendSwatchW, textY+3, it.color)
+		drawText(img, sx+legendSwatchW+legendGap, textY, it.label, chartText)
+		textY += legendRowH
+	}
 }
 
 // chartAxisSpec — ручная настройка одной оси (2026-08-24, прямой запрос пользователя:
 // "для каждой оси нужна возможность настраивать точку начала отсчёта и цену деления").
 // Min — точка начала отсчёта (первое деление); Step — цена деления (шаг между
 // соседними делениями) — при заданном Step количество делений подстраивается под
-// диапазон реальных данных (см. resolveAxisTicks), а не фиксированные 6 равных частей.
-// Оба поля опциональны и независимы друг от друга (Min без Step — просто сдвигает
-// начало автоматической 6-частной шкалы).
+// диапазон реальных данных (см. resolveAxisTicks). Без Step число делений тоже
+// переменное — авто-режим сам подбирает минимально возможный целый шаг (2026-08-25,
+// см. resolveAxisTicks), не фиксированные 6 равных частей. Оба поля опциональны и
+// независимы друг от друга (Min без Step — просто сдвигает начало авто-шкалы).
 type chartAxisSpec struct {
 	Min  *float64
 	Step *float64
@@ -146,16 +179,48 @@ type chartAxisOverrides struct {
 	X, Y1, Y2 chartAxisSpec
 }
 
+// niceStepCandidates — возрастающий ряд "круглых" целых шагов деления {1,2,5}×10^n
+// (2026-08-25, прямой запрос пользователя: "деления всегда должны быть целые числа...
+// ни каких дробных делений быть не должно"). Верхняя граница — заведомо достаточный
+// шаг, чтобы диапазон rng покрылся 1-2 делениями (гарантирует, что перебор в
+// resolveAxisTicks всегда найдёт подходящий кандидат, а не упрётся в пустой список).
+func niceStepCandidates(rng float64) []float64 {
+	if rng <= 0 {
+		rng = 1
+	}
+	var steps []float64
+	mag := 1.0
+	for mag <= rng*2 {
+		for _, m := range [3]float64{1, 2, 5} {
+			steps = append(steps, m*mag)
+		}
+		mag *= 10
+	}
+	if len(steps) == 0 {
+		steps = append(steps, math.Ceil(rng))
+	}
+	return steps
+}
+
 // resolveAxisTicks считает диапазон [lo,hi] и список значений делений одной оси из
-// реального диапазона данных (dataMin/dataMax) и ручной настройки (spec). Без
-// spec.Step — 6 равных делений с 10%-м отступом от данных, НЕ пересекающим ноль, если
-// ноля не было в данных (2026-08-24, по жалобе пользователя: авто-отступ уводил
-// минимум температуры в отрицательные значения, хотя реальных отрицательных значений
-// нет); spec.Min, если задан, — точка отсчёта вместо авто-минимума. С spec.Step —
-// деления идут от spec.Min (или, при его отсутствии, от dataMin, округлённого вниз до
-// кратного шагу) с этим шагом до покрытия dataMax — число делений становится
-// переменным, не 6.
-func resolveAxisTicks(dataMin, dataMax float64, spec chartAxisSpec) (lo, hi float64, ticks []float64) {
+// реального диапазона данных (dataMin/dataMax) и ручной настройки (spec).
+//
+// С явным spec.Step (ручная настройка из редактора графика) — деления идут от
+// spec.Min (или, при его отсутствии, от dataMin, округлённого вниз до кратного шагу)
+// с этим шагом до покрытия dataMax; ответственность за то, целый шаг или дробный,
+// здесь на пользователе (сам явно ввёл число в редакторе).
+//
+// БЕЗ spec.Step (авто-режим, применяется к БОЛЬШИНСТВУ графиков) — деления ВСЕГДА
+// целые, шаг — минимально возможный из ряда niceStepCandidates, при котором подписи
+// делений не накладываются друг на друга в доступном месте (fits, см. вызовы в
+// renderChart — у X это ширина текста, у Y1/Y2 высота строки); spec.Min, если задан,
+// — точка отсчёта вместо авто-минимума. Целочисленность нового авто-шага
+// автоматически не даёт диапазону пересечь ноль там, где данных с этим знаком нет
+// (2026-08-24, по жалобе пользователя: старый 10%-й отступ уводил минимум температуры
+// в отрицательные значения, хотя отрицательных значений в данных не было вовсе) —
+// floor(dataMin/step)*step при dataMin>=0 и целом положительном step всегда >= 0, и
+// симметрично для ceil(dataMax/step)*step при dataMax<=0.
+func resolveAxisTicks(dataMin, dataMax float64, spec chartAxisSpec, fits func(ticks []float64) bool) (lo, hi float64, ticks []float64) {
 	if spec.Step != nil && *spec.Step > 0 {
 		step := *spec.Step
 		origin := math.Floor(dataMin/step) * step
@@ -175,26 +240,39 @@ func resolveAxisTicks(dataMin, dataMax float64, spec chartAxisSpec) (lo, hi floa
 		}
 		return origin, ticks[n-1], ticks
 	}
-	lo, hi = dataMin, dataMax
-	if lo == hi {
-		hi = lo + 1
+
+	rng := dataMax - dataMin
+	var lastStep float64
+	for _, step := range niceStepCandidates(rng) {
+		lastStep = step
+		origin := math.Floor(dataMin/step) * step
+		if spec.Min != nil {
+			origin = *spec.Min
+		}
+		top := math.Ceil(dataMax/step) * step
+		if top < origin+step {
+			top = origin + step
+		}
+		n := int(math.Round((top-origin)/step)) + 1
+		if n < 2 {
+			n = 2
+			top = origin + step
+		}
+		candidate := make([]float64, n)
+		for i := 0; i < n; i++ {
+			candidate[i] = origin + float64(i)*step
+		}
+		if fits == nil || fits(candidate) {
+			return origin, candidate[n-1], candidate
+		}
 	}
-	pad := (hi - lo) * 0.1
-	lo, hi = lo-pad, hi+pad
-	if dataMin >= 0 && lo < 0 {
-		lo = 0
-	}
-	if dataMax <= 0 && hi > 0 {
-		hi = 0
-	}
+	// Не должно происходить — niceStepCandidates гарантирует кандидат, который
+	// укладывается в 1-2 деления. Подстраховка: берём последний (самый крупный).
+	origin := math.Floor(dataMin/lastStep) * lastStep
 	if spec.Min != nil {
-		lo = *spec.Min
+		origin = *spec.Min
 	}
-	ticks = make([]float64, 6)
-	for i := 0; i <= 5; i++ {
-		ticks[i] = lo + (hi-lo)*float64(i)/5
-	}
-	return lo, hi, ticks
+	return origin, origin + lastStep, []float64{origin, origin + lastStep}
 }
 
 // renderChart строит PNG-график из серий. chartType: line|scatter|bar. y2Label — подпись
@@ -238,23 +316,28 @@ func renderChart(chartType, title, xLabel, yLabel, y2Label string, series []char
 		return nil, errors.New("нет данных для графика")
 	}
 
-	var xTicksF []float64
-	minX, maxX, xTicksF = resolveAxisTicks(minX, maxX, axisOverride.X)
+	// Y1/Y2 — сначала (доступное место для их делений, chartPlotH, — константа, не
+	// зависит от margin'ов); margin'ы (и, значит, доступное место для оси X) считаются
+	// из ширины ИХ подписей делений, поэтому ось X резолвится позже (см. xFits ниже).
+	const yTickRowMinH = 16 // минимальная высота строки подписи деления (шрифт 13pt)
+	yFits := func(ticks []float64) bool {
+		if len(ticks) < 2 {
+			return true
+		}
+		rowH := float64(chartPlotH) / float64(len(ticks)-1)
+		return rowH >= yTickRowMinH
+	}
 	var y1TicksF []float64
 	if anyY1 {
-		minY1, maxY1, y1TicksF = resolveAxisTicks(minY1, maxY1, axisOverride.Y1)
+		minY1, maxY1, y1TicksF = resolveAxisTicks(minY1, maxY1, axisOverride.Y1, yFits)
 	} else {
 		minY1, maxY1 = 0, 1
 	}
 	var y2TicksF []float64
 	if anyY2 {
-		minY2, maxY2, y2TicksF = resolveAxisTicks(minY2, maxY2, axisOverride.Y2)
+		minY2, maxY2, y2TicksF = resolveAxisTicks(minY2, maxY2, axisOverride.Y2, yFits)
 	}
 
-	xTicks := make([]string, len(xTicksF))
-	for i, v := range xTicksF {
-		xTicks[i] = formatTickValue(v)
-	}
 	y1Ticks := make([]string, len(y1TicksF))
 	maxY1TickW := 0
 	for i, v := range y1TicksF {
@@ -292,13 +375,37 @@ func renderChart(chartType, title, xLabel, yLabel, y2Label string, series []char
 	}
 	plotW := chartW - marginLeft - marginRight
 
-	legendRows := layoutLegendRows(series, plotW)
+	// Ось X — теперь, когда известна доступная ширина plotW: минимальный шаг из
+	// niceStepCandidates, при котором подписи делений не накладываются друг на друга
+	// (2026-08-25, прямой запрос пользователя — "цена делений должна по умолчанию быть
+	// минимально возможной для того, чтобы цифры не накладывались друг на друга").
+	const tickLabelGapPx = 10
+	xFits := func(ticks []float64) bool {
+		if len(ticks) < 2 {
+			return true
+		}
+		maxW := 0
+		for _, v := range ticks {
+			if w := chartTextWidth(formatTickValue(v)); w > maxW {
+				maxW = w
+			}
+		}
+		spacing := float64(plotW) / float64(len(ticks)-1)
+		return spacing >= float64(maxW+tickLabelGapPx)
+	}
+	var xTicksF []float64
+	minX, maxX, xTicksF = resolveAxisTicks(minX, maxX, axisOverride.X, xFits)
+	xTicks := make([]string, len(xTicksF))
+	for i, v := range xTicksF {
+		xTicks[i] = formatTickValue(v)
+	}
+
+	// легенда (2026-08-25) теперь рисуется ВНУТРИ поля графика (см. drawLegendBox
+	// ниже, после серий) — больше не отдельная полоса над графиком, поэтому marginTop
+	// от неё не зависит.
 	marginTop := 10
 	if title != "" {
 		marginTop = titleBandH
-	}
-	if len(legendRows) > 0 {
-		marginTop += len(legendRows)*legendRowH + 6
 	}
 	marginBottom := 30 // деления оси X
 	if xLabel != "" {
@@ -388,18 +495,12 @@ func renderChart(chartType, title, xLabel, yLabel, y2Label string, series []char
 	if title != "" {
 		drawTextCentered(img, chartW/2, 20, title, chartText)
 	}
-	// легенда — под заголовком (или у верхнего края, если заголовка нет), с переносом
-	legendY := marginTop - len(legendRows)*legendRowH
-	for _, row := range legendRows {
-		x := marginLeft
-		for _, item := range row {
-			drawRectFilled(img, x, legendY-9, x+12, legendY+3, item.color)
-			x += 16
-			drawText(img, x, legendY, item.label, chartText)
-			x += chartTextWidth(item.label) + 18
-		}
-		legendY += legendRowH
-	}
+	// легенда — списком ВНУТРИ поля графика, правый верхний угол по умолчанию
+	// (2026-08-25, прямой запрос пользователя: "легенду нужно размещать в поле
+	// графика списком... предпочтительное расположение — правый верхний угол").
+	// Рисуется ПОСЛЕ серий, с непрозрачным фоном — подписи остаются читаемыми, даже
+	// если легенда физически перекрывает линию/точки данных.
+	drawLegendBox(img, buildLegendItems(series), marginLeft, top, plotW)
 	// подпись оси X — под делениями, по центру графика
 	if xLabel != "" {
 		drawTextCentered(img, marginLeft+plotW/2, top+chartPlotH+xLabelBandH, xLabel, chartText)
@@ -423,10 +524,16 @@ func renderChart(chartType, title, xLabel, yLabel, y2Label string, series []char
 	return buf.Bytes(), nil
 }
 
-// formatTickValue — компактное текстовое представление числового деления оси (до 3
-// значащих цифр — достаточно для читаемости на небольшом графике, не претендует на
-// точность оригинального значения).
+// formatTickValue — компактное текстовое представление числового деления оси. Деления
+// авто-режима (resolveAxisTicks без spec.Step) всегда целые (2026-08-25, прямой запрос
+// пользователя) — выводим их как обычное целое число ('f', 0 знаков), без ".0" и без
+// экспоненциальной записи, в которую 'g' уходит на круглых числах вроде 1000/10000.
+// Дробные деления возможны только при ручном spec.Step — для них старое компактное
+// представление (до 3 значащих цифр).
 func formatTickValue(v float64) string {
+	if math.Abs(v-math.Round(v)) < 1e-9 {
+		return strconv.FormatFloat(math.Round(v), 'f', 0, 64)
+	}
 	return strconv.FormatFloat(v, 'g', 3, 64)
 }
 

@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 // 2026-08-24: до этого фикса данные датчика (mesure_data.time/channels/average_temp/
 // derivative) не заводились совсем ("не MVP") — по прямому запросу пользователя
@@ -133,54 +136,83 @@ func TestBuildChartSeriesFromTimeseriesNoData(t *testing.T) {
 	}
 }
 
-// 2026-08-24: жалоба пользователя — авто-отступ 10% от данных на температурной оси
-// уводил нижнюю границу в отрицательные значения (напр. -68.8), хотя реальных
-// отрицательных значений в данных вообще не было. Без spec.Step авто-диапазон не
-// должен пересекать ноль в сторону, где данных нет.
-func TestResolveAxisTicksAutoRangeDoesNotInventSign(t *testing.T) {
-	lo, hi, ticks := resolveAxisTicks(20.0, 905.0, chartAxisSpec{})
+// fitsMaxN — простой "fits" из тестов: не более n делений (имитирует ограничение по
+// доступному месту в пикселях без завязки на реальный рендер шрифта).
+func fitsMaxN(n int) func([]float64) bool {
+	return func(ticks []float64) bool { return len(ticks) <= n }
+}
+
+func allIntegerTicks(ticks []float64) bool {
+	for _, v := range ticks {
+		if math.Abs(v-math.Round(v)) > 1e-9 {
+			return false
+		}
+	}
+	return true
+}
+
+// 2026-08-25: деления авто-режима (без spec.Step) теперь ВСЕГДА целые числа из ряда
+// {1,2,5}×10^n (прямой запрос пользователя: "деления всегда должны быть целые числа...
+// ни каких дробных делений быть не должно"), с минимально возможным шагом, при котором
+// подписи не накладываются (здесь имитируется через fitsMaxN). Целочисленность шага
+// как побочный эффект защищает и от старой жалобы (2026-08-24) — авто-диапазон не
+// должен пересекать ноль в сторону, где данных нет (напр. -68.8 у температуры, где
+// отрицательных значений в данных вообще не было).
+func TestResolveAxisTicksAutoRangeIsIntegerAndDoesNotInventSign(t *testing.T) {
+	lo, hi, ticks := resolveAxisTicks(20.0, 905.0, chartAxisSpec{}, fitsMaxN(8))
 	if lo < 0 {
 		t.Errorf("lo = %v, want >= 0 (данные все неотрицательные)", lo)
 	}
-	if len(ticks) != 6 {
-		t.Errorf("got %d ticks, want 6 (авто-режим без Step)", len(ticks))
+	if !allIntegerTicks(ticks) {
+		t.Errorf("ticks = %v, want все целые", ticks)
 	}
-	if hi <= 905.0 {
-		t.Errorf("hi = %v, want > 905.0 (10%% отступ сверху)", hi)
+	if hi < 905.0 {
+		t.Errorf("hi = %v, want >= 905.0 (покрывает весь диапазон данных)", hi)
+	}
+	if len(ticks) > 8 {
+		t.Errorf("got %d ticks, want <= 8 (fitsMaxN(8))", len(ticks))
 	}
 
 	// симметричный случай — данные все неположительные, авто-диапазон не должен
 	// пересекать ноль в плюс.
-	lo2, hi2, _ := resolveAxisTicks(-900.0, -20.0, chartAxisSpec{})
+	lo2, hi2, ticks2 := resolveAxisTicks(-900.0, -20.0, chartAxisSpec{}, fitsMaxN(8))
 	if hi2 > 0 {
 		t.Errorf("hi = %v, want <= 0 (данные все неположительные)", hi2)
 	}
-	if lo2 >= -900.0 {
-		t.Errorf("lo = %v, want < -900.0 (10%% отступ снизу)", lo2)
+	if lo2 > -900.0 {
+		t.Errorf("lo = %v, want <= -900.0 (покрывает весь диапазон данных)", lo2)
+	}
+	if !allIntegerTicks(ticks2) {
+		t.Errorf("ticks = %v, want все целые", ticks2)
 	}
 }
 
-// spec.Min без spec.Step — просто сдвигает начало автоматической 6-частной шкалы
-// (напр. явно поставить 0, даже когда данные начинаются выше нуля).
+// spec.Min без spec.Step — сдвигает начало отсчёта авто-шкалы (напр. явно поставить 0,
+// даже когда данные начинаются выше нуля); деления остаются целыми.
 func TestResolveAxisTicksMinOverrideWithoutStep(t *testing.T) {
 	min := 0.0
-	lo, _, ticks := resolveAxisTicks(20.0, 905.0, chartAxisSpec{Min: &min})
+	lo, _, ticks := resolveAxisTicks(20.0, 905.0, chartAxisSpec{Min: &min}, fitsMaxN(8))
 	if lo != 0.0 {
 		t.Errorf("lo = %v, want 0.0 (явный Min без Step)", lo)
 	}
-	if len(ticks) != 6 || ticks[0] != 0.0 {
-		t.Errorf("ticks = %v, want 6 делений, начиная с 0.0", ticks)
+	if len(ticks) < 2 || ticks[0] != 0.0 {
+		t.Errorf("ticks = %v, want >= 2 делений, начиная с 0.0", ticks)
+	}
+	if !allIntegerTicks(ticks) {
+		t.Errorf("ticks = %v, want все целые", ticks)
 	}
 }
 
-// spec.Step задаёт цену деления — число делений становится переменным (не 6),
-// покрывая диапазон от origin (spec.Min, если задан, иначе dataMin, округлённый
-// вниз до кратного шагу) до dataMax (прямой запрос пользователя: "для каждой оси
-// нужна возможность настраивать точку начала отсчёта и цену делений").
+// spec.Step задаёт цену деления — число делений становится переменным, покрывая
+// диапазон от origin (spec.Min, если задан, иначе dataMin, округлённый вниз до
+// кратного шагу) до dataMax (прямой запрос пользователя: "для каждой оси нужна
+// возможность настраивать точку начала отсчёта и цену делений"). Ручной Step —
+// единственный случай, где дробные деления в принципе возможны (пользователь сам
+// явно ввёл число в редакторе) — resolveAxisTicks его не округляет.
 func TestResolveAxisTicksWithStep(t *testing.T) {
 	min := 0.0
 	step := 100.0
-	lo, hi, ticks := resolveAxisTicks(20.0, 905.0, chartAxisSpec{Min: &min, Step: &step})
+	lo, hi, ticks := resolveAxisTicks(20.0, 905.0, chartAxisSpec{Min: &min, Step: &step}, nil)
 	if lo != 0.0 {
 		t.Errorf("lo = %v, want 0.0 (origin = Min)", lo)
 	}
@@ -198,7 +230,7 @@ func TestResolveAxisTicksWithStep(t *testing.T) {
 	}
 
 	// без явного Min — origin считается от dataMin, округлённого вниз до кратного шагу.
-	lo2, _, ticks2 := resolveAxisTicks(20.0, 250.0, chartAxisSpec{Step: &step})
+	lo2, _, ticks2 := resolveAxisTicks(20.0, 250.0, chartAxisSpec{Step: &step}, nil)
 	if lo2 != 0.0 {
 		t.Errorf("lo = %v, want 0.0 (floor(20/100)*100)", lo2)
 	}

@@ -441,6 +441,41 @@ func (s *Server) applyFormulas(ctx context.Context, methodID int64, seriesValues
 	return nil
 }
 
+// evalAggregatedFormulas считает формулы уровня "aggregated" по готовому env, пропуская
+// (с логом) те, что не удалось посчитать, вместо того чтобы прерывать весь проход
+// (2026-08-25, реальный инцидент — заявка 287/2026, метод ГГ: agg_burning_drops =
+// max(burning_drops) падал с "не число «Нет»", т.к. burning_drops — текстовое Да/Нет
+// поле, а не число; из-за return err на первой ошибке ни одна из ОСТАЛЬНЫХ формул, ни
+// applyAggregatedClassification (см. вызывающую applyAggregatedFormulas) не
+// выполнялись НИКОГДА, для ЛЮБОЙ заявки этого метода — баг устойчивости прохода, не
+// баг конкретной заявки). Цель неудавшейся формулы просто остаётся неопределённой в
+// результате, остальные считаются как обычно. requestID/methodID — только для лога.
+// Вынесена в чистую функцию (без обращения к БД) специально, чтобы это поведение
+// было юнит-тестируемым.
+func evalAggregatedFormulas(requestID, methodID int64, formulas []map[string]any, env *FormulaEnv) map[string]any {
+	result := map[string]any{}
+	for _, f := range formulas {
+		lvl, _ := f["apply_level"].(string)
+		if lvl != "aggregated" {
+			continue
+		}
+		expr, _ := f["expression"].(string)
+		target, _ := f["target_parameter"].(string)
+		if strings.TrimSpace(expr) == "" || target == "" {
+			continue
+		}
+		res, err := runFormula(expr, env)
+		if err != nil {
+			log.Printf("evalAggregatedFormulas: request=%d method=%d target=%q: %v (пропущено)",
+				requestID, methodID, target, err)
+			continue
+		}
+		result[target] = res
+		env.Params[target] = res
+	}
+	return result
+}
+
 // applyAggregatedFormulas выполняет формулы уровня "aggregated" (например, итоговая
 // оценка по всем сериям заявки+метода) И классификацию, чьи subjects читают/пишут
 // aggregated-атрибуты (applyAggregatedClassification, 2026-08-23 — см. там; нужно
@@ -494,24 +529,7 @@ ruleLoop:
 		rankOrder = nil
 	}
 	env := buildFormulaEnv(seriesValues, map[string]any{}, rankOrder)
-	result := map[string]any{}
-	for _, f := range cfg.Formulas {
-		lvl, _ := f["apply_level"].(string)
-		if lvl != "aggregated" {
-			continue
-		}
-		expr, _ := f["expression"].(string)
-		target, _ := f["target_parameter"].(string)
-		if strings.TrimSpace(expr) == "" || target == "" {
-			continue
-		}
-		res, err := runFormula(expr, env)
-		if err != nil {
-			return err
-		}
-		result[target] = res
-		env.Params[target] = res
-	}
+	result := evalAggregatedFormulas(requestID, methodID, cfg.Formulas, env)
 	if hasAggregatedClassification {
 		if err := s.applyAggregatedClassification(ctx, requestID, methodID, cfg, result); err != nil {
 			return err

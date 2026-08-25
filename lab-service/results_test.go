@@ -314,3 +314,35 @@ func TestApplyRuleToSubjectsAggregatedOutputRequiresAggregatedPass(t *testing.T)
 		t.Errorf("flammability_group: got %v, want В3", got)
 	}
 }
+
+// 2026-08-25: реальный инцидент — заявка 287/2026, метод ГГ. Одна некорректная
+// агрегированная формула (max по текстовому Да/Нет-полю burning_drops, а не по
+// числу — ошибка конфигурации метода, не входных данных) раньше обрывала ВЕСЬ
+// проход applyAggregatedFormulas на первой ошибке (return err) — из-за этого ни
+// avg_temp_of_smog, ни agg_combustion_time (обе формулы КОРРЕКТНЫЕ и идут ПОСЛЕ
+// сломанной в списке formulas) никогда не считались, ни для одной заявки этого
+// метода. evalAggregatedFormulas должна пропустить только сломанную цель и
+// досчитать остальные.
+func TestEvalAggregatedFormulasSkipsFailingFormulaContinuesRest(t *testing.T) {
+	formulas := []map[string]any{
+		{"apply_level": "aggregated", "expression": "avg(temp_of_smog)", "target_parameter": "avg_temp_of_smog"},
+		{"apply_level": "aggregated", "expression": "max(burning_drops)", "target_parameter": "agg_burning_drops"},
+		{"apply_level": "aggregated", "expression": "max(combustion_time)", "target_parameter": "agg_combustion_time"},
+	}
+	seriesValues := []map[string]any{
+		{"temp_of_smog": 900.0, "burning_drops": "Нет", "combustion_time": 12.0},
+		{"temp_of_smog": 920.0, "burning_drops": "Да", "combustion_time": 15.0},
+	}
+	env := buildFormulaEnv(seriesValues, map[string]any{}, nil)
+	result := evalAggregatedFormulas(1378, 1, formulas, env)
+
+	if got := result["avg_temp_of_smog"]; got != 910.0 {
+		t.Errorf("avg_temp_of_smog: got %v, want 910.0 (формула ДО сломанной должна досчитаться)", got)
+	}
+	if got := result["agg_combustion_time"]; got != 15.0 {
+		t.Errorf("agg_combustion_time: got %v, want 15.0 (формула ПОСЛЕ сломанной должна досчитаться)", got)
+	}
+	if _, ok := result["agg_burning_drops"]; ok {
+		t.Errorf("agg_burning_drops: got %v, want отсутствие в результате (формула нечисловая, должна быть пропущена)", result["agg_burning_drops"])
+	}
+}
