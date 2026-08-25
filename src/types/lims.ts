@@ -121,10 +121,14 @@ export type AttributeFillMethod = 'manual' | 'instrument' | 'calculated' | 'clas
 export type AttributeLevel = 'experiment' | 'aggregated';
 
 /** Простое агрегирование атрибута уровня "aggregated" без своей формулы — сервер сам
- * строит formulas-запись `{method}({source})` (lab-service, deriveFormulasFromAttributes). */
+ * строит formulas-запись `{method}({source})` (lab-service, deriveFormulasFromAttributes).
+ * "any"/"all" (2026-08-25, прямой запрос пользователя — заявка 287/2026, метод ГГ:
+ * агрегация текстового Да/Нет-поля через числовой max падала) — логическая агрегация:
+ * any — "Да", если хоть в одной серии "Да"; all — "Да" только если ВО ВСЕХ сериях
+ * "Да" (т.е. "Нет", если хоть в одной серии "Нет"). См. lab-service dsl.go callExpr.eval. */
 export interface AttributeAggregation {
   source: string;
-  method: 'avg' | 'min' | 'max';
+  method: 'avg' | 'min' | 'max' | 'any' | 'all';
 }
 
 /** Атрибут метода — элемент methods.input_parameters. Единственный источник formulas

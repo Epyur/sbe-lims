@@ -2,6 +2,7 @@ import { ItemView, Modal, Notice, WorkspaceLeaf } from 'obsidian';
 import type { App } from 'obsidian';
 import type SbeLimsPlugin from '../main';
 import type {
+  AttributeAggregation,
   AttributeDataType,
   AttributeFillMethod,
   AttributeLevel,
@@ -2130,14 +2131,20 @@ export class LimsView extends ItemView {
         }
         sourceSelect.value = attr.aggregation?.source || '';
         const methodSelect = row.createEl('select', { cls: 'tn-lims-select' });
-        const aggMethodOptions: Array<['avg' | 'min' | 'max', string]> = [
+        // any/all (2026-08-25) — для текстовых Да/Нет-полей (напр. burning_drops):
+        // числовые среднее/минимум/максимум для них не имеют смысла (реальный
+        // инцидент — заявка 287/2026, см. AGENTS.md); прямой запрос пользователя —
+        // "если будет выбор 'Да если хоть в одной серии Да' и 'Нет, если хоть в
+        // одной серии Нет' — это было бы удобно".
+        const aggMethodOptions: Array<[AttributeAggregation['method'], string]> = [
           ['avg', 'среднему'], ['min', 'минимальному'], ['max', 'максимальному'],
+          ['any', '"Да", если хоть одна серия "Да"'], ['all', '"Нет", если хоть одна серия "Нет"'],
         ];
         for (const [val, label] of aggMethodOptions) methodSelect.createEl('option', { attr: { value: val }, text: label });
         methodSelect.value = attr.aggregation?.method || 'avg';
         const syncAggregation = () => {
           attr.aggregation = sourceSelect.value
-            ? { source: sourceSelect.value, method: methodSelect.value as 'avg' | 'min' | 'max' }
+            ? { source: sourceSelect.value, method: methodSelect.value as AttributeAggregation['method'] }
             : undefined;
         };
         sourceSelect.addEventListener('change', syncAggregation);
