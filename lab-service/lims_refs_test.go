@@ -97,6 +97,33 @@ func TestDeriveFormulasFromAttributesInvalidAggregationMethod(t *testing.T) {
 	}
 }
 
+// any/all (2026-08-25, реальный сценарий заявки 287/2026 — метод ГГ): агрегация
+// текстового Да/Нет-поля должна давать логическую DSL-формулу (any(...)/all(...),
+// см. dsl.go), не числовую max/min/avg, которая падает на "Да"/"Нет".
+func TestDeriveFormulasFromAttributesAnyAllAggregation(t *testing.T) {
+	input := `[
+		{"id":"agg_burning_drops","level":"aggregated","fill_method":"instrument","aggregation":{"source":"burning_drops","method":"any"}},
+		{"id":"agg_all_smog","level":"aggregated","fill_method":"instrument","aggregation":{"source":"has_smog","method":"all"}}
+	]`
+	out, err := deriveFormulasFromAttributes(json.RawMessage(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var formulas []map[string]any
+	if err := json.Unmarshal(out, &formulas); err != nil {
+		t.Fatal(err)
+	}
+	if len(formulas) != 2 {
+		t.Fatalf("got %d formulas, want 2: %v", len(formulas), formulas)
+	}
+	if formulas[0]["expression"] != "any(burning_drops)" {
+		t.Errorf("formula[0] expression = %v, want any(burning_drops)", formulas[0]["expression"])
+	}
+	if formulas[1]["expression"] != "all(has_smog)" {
+		t.Errorf("formula[1] expression = %v, want all(has_smog)", formulas[1]["expression"])
+	}
+}
+
 func TestDeriveFormulasFromAttributesEmpty(t *testing.T) {
 	out, err := deriveFormulasFromAttributes(json.RawMessage(`[]`))
 	if err != nil {

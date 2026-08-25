@@ -596,17 +596,27 @@ type MethodAttribute struct {
 }
 
 // AttributeAggregation — простое агрегирование по одному атрибуту
-// эксперимент-уровня (среднее/минимум/максимум) без ручного ввода формулы —
-// сервер сам строит формулу `{method}({source})` с apply_level="aggregated"
-// (тот же путь исполнения, что уже работает для существующих агрегированных
-// формул, см. results.go applyAggregatedFormulas). Для более сложных случаев
-// (напр. калибровочная интерполяция) — атрибут задаёт Formula напрямую.
+// эксперимент-уровня (среднее/минимум/максимум/логическое) без ручного ввода
+// формулы — сервер сам строит формулу `{method}({source})` с
+// apply_level="aggregated" (тот же путь исполнения, что уже работает для
+// существующих агрегированных формул, см. results.go applyAggregatedFormulas).
+// Для более сложных случаев (напр. калибровочная интерполяция) — атрибут задаёт
+// Formula напрямую.
+//
+// "any"/"all" (2026-08-25, прямой запрос пользователя — заявка 287/2026, метод
+// ГГ: agg_burning_drops пытался считаться как max(burning_drops), а
+// burning_drops — текстовое Да/Нет-поле, не число; см. AGENTS.md) — для таких
+// полей: any — "Да", если хоть в одной серии "Да"; all — "Да" только если ВО
+// ВСЕХ сериях "Да" (т.е. "Нет", если хоть в одной серии "Нет"). См. dsl.go
+// callExpr.eval/collectBools.
 type AttributeAggregation struct {
 	Source string `json:"source"`
-	Method string `json:"method"` // avg|min|max
+	Method string `json:"method"` // avg|min|max|any|all
 }
 
-var validAggregationMethods = map[string]bool{"avg": true, "min": true, "max": true}
+var validAggregationMethods = map[string]bool{
+	"avg": true, "min": true, "max": true, "any": true, "all": true,
+}
 
 // loadAttributeSynonymMap строит raw-имя -> id атрибута из methods.input_parameters
 // (только атрибуты с непустыми Synonyms) — используется при приёме результатов из
@@ -701,7 +711,7 @@ func deriveFormulasFromAttributes(inputParamsRaw json.RawMessage) (json.RawMessa
 			// calculated-атрибуте (агрегация одной строкой, без DSL) — рабочий,
 			// поддерживаемый сервером сценарий (см. TestDeriveFormulasFromAttributes).
 			if !validAggregationMethods[a.Aggregation.Method] {
-				return nil, fmt.Errorf("attribute %q: invalid aggregation method %q (avg/min/max)", a.ID, a.Aggregation.Method)
+				return nil, fmt.Errorf("attribute %q: invalid aggregation method %q (avg/min/max/any/all)", a.ID, a.Aggregation.Method)
 			}
 			if strings.TrimSpace(a.Aggregation.Source) == "" {
 				return nil, fmt.Errorf("attribute %q: aggregation.source is required", a.ID)

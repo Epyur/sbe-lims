@@ -296,6 +296,33 @@ func (n *condExpr) eval(env *FormulaEnv) (any, error) {
 
 func (n *callExpr) eval(env *FormulaEnv) (any, error) {
 	switch n.fn {
+	case "any", "all":
+		// Логическая агрегация по сериям для текстовых Да/Нет-полей (2026-08-25, по
+		// прямому запросу пользователя — заявка 287/2026, метод ГГ: agg_burning_drops
+		// пытался считаться как max(burning_drops), а burning_drops — текстовое Да/Нет,
+		// не число; см. AGENTS.md). any(field) — "Да", если хоть в одной серии "Да";
+		// all(field) — "Да" только если ВО ВСЕХ сериях "Да" (т.е. "Нет", если хоть в
+		// одной серии "Нет") — два явных, разных по смыслу варианта, которые
+		// пользователь попросил как выбор в конфигураторе (см. AttributeAggregation).
+		if len(n.args) != 1 {
+			return nil, ferrf("%s ожидает 1 аргумент", n.fn)
+		}
+		bools, err := collectBools(env, n.args[0])
+		if err != nil {
+			return nil, err
+		}
+		result := n.fn == "all"
+		for _, b := range bools {
+			if n.fn == "any" {
+				result = result || b
+			} else {
+				result = result && b
+			}
+		}
+		if result {
+			return "Да", nil
+		}
+		return "Нет", nil
 	case "avg", "min", "max", "sum", "count", "median", "std":
 		if len(n.args) == 0 {
 			return nil, ferrf("%s ожидает хотя бы 1 аргумент", n.fn)
@@ -833,6 +860,39 @@ func collectVals(env *FormulaEnv, e expr) ([]float64, error) {
 		return nil, err
 	}
 	return []float64{f}, nil
+}
+
+// collectBools — то же самое, что collectVals, но для логических агрегаций any/all
+// (2026-08-25): каждое значение по сериям приводится через toBool ("Да"/"Нет"/
+// true/false/1/0), а не toFloat — источник (напр. burning_drops) текстовый Да/Нет,
+// не число.
+func collectBools(env *FormulaEnv, e expr) ([]bool, error) {
+	var raw []any
+	if id, ok := e.(*identRef); ok {
+		if arr, ok2 := env.SeriesParams[id.name]; ok2 {
+			raw = arr
+		}
+	}
+	if raw == nil {
+		v, err := e.eval(env)
+		if err != nil {
+			return nil, err
+		}
+		if arr, ok := v.([]any); ok {
+			raw = arr
+		} else {
+			raw = []any{v}
+		}
+	}
+	out := make([]bool, 0, len(raw))
+	for _, v := range raw {
+		b, err := toBool(v)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	return out, nil
 }
 
 func aggregate(fn string, vals []float64) (any, error) {

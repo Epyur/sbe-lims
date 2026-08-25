@@ -78,6 +78,27 @@ func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 // пока не истёк срок какой-то одной подписанной ссылки.
 func (s *Server) uploadFileBytes(ctx context.Context, requestID int64, filename string,
 	data []byte, uploadedBy string) (string, error) {
+	// Дедуп по (request_id, file_name, file_size) — 2026-08-25, реальный инцидент:
+	// заявка 287/2026 набрала 10 файлов вместо 2 (по 5 копий каждого) из-за ручных
+	// повторных запусков одноразового CLI fetch-mail-photos во время отладки
+	// фото-фикса (mail_fetch_by_id.go) — у этой функции не было НИКАКОЙ проверки на
+	// уже загруженный файл: каждый вызов грузил в S3 и писал в files НОВУЮ строку с
+	// новым случайным ключом, даже для байт-в-байт того же вложения того же письма
+	// (saveResultSeries идемпотентен через ON CONFLICT, uploadFileBytes — не был).
+	// Совпадение имени+размера — достаточно надёжный признак "тот же файл" для этого
+	// сценария (files не хранит хэш содержимого; случайная коллизия имя+размер у
+	// РАЗНЫХ файлов не стоит отдельной миграции под хэш). requestID<=0 — до этого
+	// момента заявка ещё не найдена (см. resolvePhotoAttachments pending-путь) —
+	// дедуп не имеет смысла, files ничего не знает про такую заявку.
+	if requestID > 0 {
+		var existingURL string
+		err := s.pool.QueryRow(ctx, `
+SELECT file_url FROM files WHERE request_id = $1 AND file_name = $2 AND file_size = $3
+ORDER BY id LIMIT 1`, requestID, filename, len(data)).Scan(&existingURL)
+		if err == nil {
+			return existingURL, nil
+		}
+	}
 	key := s3Key(filename)
 	size, _, err := s.s3.Put(ctx, key, data)
 	if err != nil {
