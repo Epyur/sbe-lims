@@ -389,7 +389,9 @@ function renderTableNodeEditor(container: HTMLElement, node: RichNode, attrs: Me
  * ячейки (мини rich-text через renderInlineEditable — та же модель, что абзац,
  * ячейки сразу получают bold/italic/индексы/плейсхолдеры без отдельной логики).
  * В отличие от RichNode "table" (данные серий, авто-заполняемые ячейки) —
- * здесь ничего не подставляется автоматически из результатов эксперимента. */
+ * здесь ничего не подставляется автоматически из результатов эксперимента.
+ * Порядок столбцов — drag-reorder (2026-08-25, по запросу пользователя), тот же
+ * паттерн, что уже был у колонок динамической таблицы. */
 function renderStaticTableEditor(
   container: HTMLElement,
   node: RichNode,
@@ -400,14 +402,34 @@ function renderStaticTableEditor(
   const rows = node.rows;
   const colCount = rows[0]?.length || 1;
 
-  container.createDiv({ cls: 'tn-lims-meta' }).setText('Статическая таблица — содержимое каждой ячейки вводится вручную:');
+  container.createDiv({ cls: 'tn-lims-meta' }).setText('Статическая таблица — содержимое каждой ячейки вводится вручную (⠿ над столбцом — перетащить для смены порядка):');
   const table = container.createEl('table', { cls: 'tn-table' });
 
-  // строка управления столбцами — ✖ под каждым столбцом + ➕ столбец в конце
+  // строка управления столбцами — ⠿ (перетащить, 2026-08-25) + ✖ под каждым столбцом +
+  // ➕ столбец в конце. Тот же паттерн drag-reorder, что у колонок динамической
+  // таблицы (renderTableNodeEditor выше) и пунктов списка (renderBulletListEditor) —
+  // здесь переставляется НЕ один массив, а i-й элемент КАЖДОЙ строки (rows —
+  // строка → колонка → содержимое ячейки).
   const colControlRow = table.createEl('tr');
   colControlRow.createEl('td'); // угловая ячейка — под управление строками
+  let dragFromCol: number | null = null;
   for (let c = 0; c < colCount; c++) {
-    const td = colControlRow.createEl('td');
+    const td = colControlRow.createEl('td', { attr: { draggable: 'true' } });
+    td.style.cursor = 'grab';
+    td.addEventListener('dragstart', (ev) => { dragFromCol = c; ev.stopPropagation(); });
+    td.addEventListener('dragover', (ev) => ev.preventDefault());
+    td.addEventListener('drop', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (dragFromCol === null || dragFromCol === c) return;
+      for (const r of rows) {
+        const [moved] = r.splice(dragFromCol, 1);
+        r.splice(c, 0, moved);
+      }
+      dragFromCol = null;
+      onStructuralChange();
+    });
+    td.createSpan({ text: '⠿ ', cls: 'tn-lims-meta' });
     const delColBtn = td.createEl('button', { text: '✖ столбец', cls: 'tn-btn tn-btn-ghost' });
     delColBtn.addEventListener('click', () => {
       for (const r of rows) r.splice(c, 1);
