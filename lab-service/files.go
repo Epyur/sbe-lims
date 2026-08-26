@@ -9,8 +9,21 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
+
+// validObjectKey проверяет ключ S3: разрешён только собственный префикс сервиса,
+// без выхода за пределы («..») и служебных символов (path traversal — ревью B3).
+func validObjectKey(key, prefix string) bool {
+	if key == "" || len(key) > 512 {
+		return false
+	}
+	if strings.Contains(key, "..") || strings.ContainsAny(key, "\\\x00\r\n") {
+		return false
+	}
+	return strings.HasPrefix(key, prefix+"/")
+}
 
 // publicBaseURL — базовый адрес ЭТОГО сервиса, каким его видит браузер/клиент
 // (2026-08-24, нужен для handleFileRedirect — ссылка на файл, встраиваемая в HTML
@@ -128,8 +141,8 @@ VALUES ($1, $2, $3, $4, $5, $6)`,
 // не может протухнуть на хранении.
 func (s *Server) handleFileRedirect(w http.ResponseWriter, r *http.Request) {
 	key := r.URL.Query().Get("key")
-	if key == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "key is required"})
+	if key == "" || !validObjectKey(key, "lab") {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid or missing key"})
 		return
 	}
 	link, err := s.s3.Link(r.Context(), key, 7*24*time.Hour)
@@ -143,8 +156,8 @@ func (s *Server) handleFileRedirect(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 	key := r.URL.Query().Get("key")
-	if key == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "key is required"})
+	if key == "" || !validObjectKey(key, "lab") {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid or missing key"})
 		return
 	}
 	data, err := s.s3.Get(r.Context(), key)
