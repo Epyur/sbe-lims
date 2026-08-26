@@ -11,6 +11,7 @@ import type {
   ComparisonOperator,
   DocumentBlock,
   Equipment,
+  EquipmentMethodLink,
   Inventor,
   Lab,
   LabGroup,
@@ -1080,34 +1081,10 @@ export class LimsView extends ItemView {
     const shortViewDiv = methodDiv.createDiv();
     await this.renderShortView(shortViewDiv, req.id);
 
-    // графики — chart_configs привязаны к МЕТОДУ, не к конкретной заявке (2026-08-24):
-    // у графика датчика метода ГГ конфиг есть у ВСЕХ заявок этого метода, но реальные
-    // данные (data_type="timeseries") пока приходят не всегда/не у всех — без проверки
-    // заголовок "Графики" и сломанная картинка (сервер отдаёт 404 "нет данных")
-    // показывались бы у каждой заявки метода, даже без единого готового графика
-    // ("паразитный блок", жалоба пользователя). Скрываем и картинку, и весь блок
-    // целиком, если в итоге не загрузился ни один график.
-    const cfg = this.methodConfigOf(req.method_id);
-    if (cfg.chart_configs.length > 0) {
-      const chartDiv = this.bodyEl.createDiv({ cls: 'tn-lims-method' });
-      chartDiv.createEl('h4', { text: '📈 Графики' });
-      let pending = cfg.chart_configs.length;
-      let anyLoaded = false;
-      const onSettle = (): void => {
-        pending -= 1;
-        if (pending === 0 && !anyLoaded) chartDiv.remove();
-      };
-      for (const c of cfg.chart_configs) {
-        const id = String(c.id || '');
-        const title = String(c.title || id);
-        const img = chartDiv.createEl('img', {
-          attr: { src: this.plugin.syncService.chartUrl(req.id, id), alt: title },
-          cls: 'tn-lims-chart',
-        });
-        img.addEventListener('load', () => { anyLoaded = true; onSettle(); });
-        img.addEventListener('error', () => { img.remove(); onSettle(); });
-      }
-    }
+    // графики (2026-08-26): жёсткая панель «📈 Графики» мимо системы блоков убрана —
+    // графики показываются только через «Краткий вид» выше (renderShortView, блоки
+    // с show_in_ui=true, chart_id — авто-блок при открытии конфигуратора метода,
+    // см. renderMethodConfigForm). Один источник правды вместо двух параллельных.
 
     // протокол / выписка / краткий вид — ровно 3 фиксированных вида вывода
     // (2026-08-22, по решению пользователя), каждый — HTML+DOCX тем же эндпоинтом
@@ -1226,6 +1203,40 @@ export class LimsView extends ItemView {
     return () => boxes.filter(b => b.el.checked).map(b => b.id);
   }
 
+  /** Сворачиваемая секция (2026-08-26, конфигуратор метода — перегружен 8 блоками
+   * подряд): заголовок-переключатель (шеврон) + тело, свёрнуто по умолчанию.
+   * Без onFirstOpen — тело рендерится СРАЗУ (только визуально скрыто), как нужно
+   * конфигуратору метода: редакторы атрибутов/правил держат замыкания
+   * (redrawAttrs/redrawRules/...), которые должны существовать с первого рендера
+   * формы, а не только после раскрытия. С onFirstOpen (карточки оборудования —
+   * не грузить калибровки/документы/методы для ВСЕХ карточек сразу при открытии
+   * вкладки) — тот же ленивый паттерн, что в sbe-apstore settings-tab: тело
+   * заполняется один раз, при первом раскрытии.
+   * Возвращает body — вызывающий код (без onFirstOpen) создаёт содержимое сразу в
+   * нём вместо родительского контейнера. */
+  private renderCollapsibleSection(parent: HTMLElement, title: string, onFirstOpen?: (body: HTMLElement) => void): HTMLElement {
+    const head = parent.createDiv({ cls: 'tn-lims-section-head', attr: { role: 'button', tabindex: '0' } });
+    const chevron = head.createSpan({ cls: 'tn-lims-section-chevron', text: '▸' });
+    head.createSpan({ text: title });
+    const body = parent.createDiv({ cls: 'tn-lims-section-body collapsed' });
+    let open = false;
+    let rendered = !onFirstOpen;
+    const setOpen = (value: boolean): void => {
+      open = value;
+      body.toggleClass('collapsed', !open);
+      chevron.setText(open ? '▾' : '▸');
+      if (open && !rendered && onFirstOpen) {
+        rendered = true;
+        onFirstOpen(body);
+      }
+    };
+    head.addEventListener('click', () => setOpen(!open));
+    head.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); setOpen(!open); }
+    });
+    return body;
+  }
+
   /** Форма создания метода — глобальный admin+, либо lab_admin (список лабораторий
    * ограничен своими, 2026-08-24 — не даёт даже попытаться привязать метод к чужой
    * лабе, хотя сервер и так это отклонит). Лаборатории — чекбоксы (метод может
@@ -1302,14 +1313,14 @@ export class LimsView extends ItemView {
     const getLabIDs = this.renderLabCheckboxes(form, method?.lab_ids || []);
 
     // ---- Показатели метода (determinable_indicators) — порядок = ранг ----
-    form.createEl('h4', { text: 'Показатели метода' });
-    form.createDiv({ cls: 'tn-lims-meta' }).setText(
+    const indicatorsBody = this.renderCollapsibleSection(form, 'Показатели метода');
+    indicatorsBody.createDiv({ cls: 'tn-lims-meta' }).setText(
       'Порядок задаёт ранг: первый показатель считается «выше»/«больше» остальных ' +
       '(напр. Г1, Г2, Г3, Г4 → Г1 > Г2 > Г3 > Г4) — используется в правилах ' +
       'классификации и в min_grade/max_grade. Если ошиблись при создании метода — ' +
       'поправьте порядок здесь стрелками.',
     );
-    const indicatorsListEl = form.createDiv();
+    const indicatorsListEl = indicatorsBody.createDiv();
     let redrawIndicators: () => void;
     redrawIndicators = () => {
       indicatorsListEl.empty();
@@ -1341,7 +1352,7 @@ export class LimsView extends ItemView {
       });
     };
     redrawIndicators();
-    const addIndicatorBtn = form.createEl('button', { text: '➕ Показатель', cls: 'tn-btn tn-btn-ghost' });
+    const addIndicatorBtn = indicatorsBody.createEl('button', { text: '➕ Показатель', cls: 'tn-btn tn-btn-ghost' });
     addIndicatorBtn.addEventListener('click', () => {
       determinableIndicators.push('');
       redrawIndicators();
@@ -1352,35 +1363,35 @@ export class LimsView extends ItemView {
     // DOM-элементы создаются здесь (чтобы блоки были визуально первыми), обработчики
     // click навешиваются ниже — после того, как attrs/rules/presentationFields и
     // их redraw-замыкания уже объявлены (нужны обработчикам).
-    form.createEl('h4', { text: '📄 Импортировать из стандарта (ИИ)' });
-    const importRow = form.createDiv({ cls: 'tn-lims-flex' });
+    const importBody = this.renderCollapsibleSection(form, '📄 Импортировать из стандарта (ИИ)');
+    const importRow = importBody.createDiv({ cls: 'tn-lims-flex' });
     const importFileInput = importRow.createEl('input', { attr: { type: 'file', accept: '.rtf,.txt' } });
     const importBtn = importRow.createEl('button', { text: '🤖 Сформировать проект', cls: 'tn-btn tn-btn-ghost' });
 
-    form.createEl('h4', { text: '📋 Загрузить атрибуты из JSON' });
-    const jsonImportArea = form.createEl('textarea', {
+    const jsonImportBody = this.renderCollapsibleSection(form, '📋 Загрузить атрибуты из JSON');
+    const jsonImportArea = jsonImportBody.createEl('textarea', {
       attr: { placeholder: 'Вставьте JSON-массив атрибутов (или объект с полем attributes/input_parameters)' },
       cls: 'tn-lims-input',
     });
     jsonImportArea.rows = 4;
-    const jsonImportBtn = form.createEl('button', { text: '⬆ Загрузить', cls: 'tn-btn tn-btn-ghost' });
+    const jsonImportBtn = jsonImportBody.createEl('button', { text: '⬆ Загрузить', cls: 'tn-btn tn-btn-ghost' });
 
     // ---- Блок 1: атрибуты метода ----
     const attrs: MethodAttribute[] = cfg.input_parameters.map(a => ({ ...a }));
-    form.createEl('h4', { text: 'Атрибуты метода' });
+    const attrsBody = this.renderCollapsibleSection(form, 'Атрибуты метода');
     // Справка "Системные атрибуты" (2026-08-23) — по прямому решению пользователя:
     // испытатель/даты/условия среды общие для ЛЮБОГО метода, заводить их отдельным
     // атрибутом на каждом методе не нужно — заполняются автоматически (email-импорт
     // результатов) и доступны как плейсхолдер в блочном редакторе представления И
     // автоматически показываются в форме для испытателя (см. renderOperatorFormPreview).
     // Один каталог на три поверхности — SYSTEM_PLACEHOLDERS (block-editor.ts).
-    const systemHint = form.createDiv({ cls: 'tn-lims-meta tn-lims-mb8' });
+    const systemHint = attrsBody.createDiv({ cls: 'tn-lims-meta tn-lims-mb8' });
     systemHint.createSpan({
       text: 'Системные данные (партия, материал, испытатель, даты, условия среды и т.п.) ' +
         'подставляются автоматически — не создавайте для них отдельный атрибут метода: ',
     });
     systemHint.createSpan({ text: SYSTEM_PLACEHOLDERS.map(s => s.label).join(', ') + '.' });
-    const attrsListEl = form.createDiv();
+    const attrsListEl = attrsBody.createDiv();
     // onChange у строки атрибута дополнительно обновляет правила/представление/
     // форму испытателя — их выпадающие списки атрибутов собираются при рендере,
     // не лениво, поэтому переименование/добавление/удаление атрибута иначе не
@@ -1391,7 +1402,7 @@ export class LimsView extends ItemView {
       this.renderAttributeRows(attrsListEl, attrs, methodId, determinableIndicators, onAttrsChanged);
     };
     redrawAttrs();
-    const addAttrBtn = form.createEl('button', { text: '➕ Добавить атрибут', cls: 'tn-btn tn-btn-ghost' });
+    const addAttrBtn = attrsBody.createEl('button', { text: '➕ Добавить атрибут', cls: 'tn-btn tn-btn-ghost' });
     addAttrBtn.addEventListener('click', () => {
       attrs.push({ id: '', name: '', data_type: 'text', fill_method: 'manual', level: 'experiment' });
       onAttrsChanged();
@@ -1415,22 +1426,22 @@ export class LimsView extends ItemView {
       })),
       subjects: r.subjects || [],
     }));
-    form.createEl('h4', { text: 'Правила классификации' });
-    const rulesListEl = form.createDiv();
+    const rulesBody = this.renderCollapsibleSection(form, 'Правила классификации');
+    const rulesListEl = rulesBody.createDiv();
     redrawRules = () => {
       rulesListEl.empty();
       this.renderClassificationRows(rulesListEl, rules, attrs, determinableIndicators, () => redrawRules());
     };
     redrawRules();
-    const addRuleBtn = form.createEl('button', { text: '➕ Добавить правило', cls: 'tn-btn tn-btn-ghost' });
+    const addRuleBtn = rulesBody.createEl('button', { text: '➕ Добавить правило', cls: 'tn-btn tn-btn-ghost' });
     addRuleBtn.addEventListener('click', () => {
       rules.push({ branches: [], subjects: [] });
       redrawRules();
     });
 
     // formulas — вычисляется сервером, только просмотр
-    form.createDiv({ cls: 'tn-lims-meta' }).setText('formulas (вычисляется сервером из атрибутов — только просмотр):');
-    const formulasPreview = form.createEl('pre', { cls: 'tn-lims-input' });
+    rulesBody.createDiv({ cls: 'tn-lims-meta' }).setText('formulas (вычисляется сервером из атрибутов — только просмотр):');
+    const formulasPreview = rulesBody.createEl('pre', { cls: 'tn-lims-input' });
     formulasPreview.setText(JSON.stringify(cfg.formulas, null, 2));
 
     // ---- Блок 3а: графики (chart_configs) — структурный редактор. Идёт ПЕРЕД
@@ -1469,15 +1480,15 @@ export class LimsView extends ItemView {
           .map(s => ({ ...s }))
         : undefined,
     }));
-    form.createEl('h4', { text: 'Графики' });
-    const chartsListEl = form.createDiv();
+    const chartsBody = this.renderCollapsibleSection(form, 'Графики');
+    const chartsListEl = chartsBody.createDiv();
     let redrawCharts: () => void;
     redrawCharts = () => {
       chartsListEl.empty();
       this.renderChartRows(chartsListEl, charts, attrs, () => redrawCharts());
     };
     redrawCharts();
-    const addChartBtn = form.createEl('button', { text: '➕ Добавить график', cls: 'tn-btn tn-btn-ghost' });
+    const addChartBtn = chartsBody.createEl('button', { text: '➕ Добавить график', cls: 'tn-btn tn-btn-ghost' });
     addChartBtn.addEventListener('click', () => {
       charts.push({ id: `chart_${Date.now()}`, chart_type: 'line', series_config: [] });
       redrawCharts();
@@ -1490,20 +1501,38 @@ export class LimsView extends ItemView {
     // вида вывода (Кратко/Выписка/Протокол) — по решению пользователя простые
     // галочки на каждом блоке, без отдельного списка шаблонов. ----
     const blocks: DocumentBlock[] = cfg.presentation.blocks.map(b => ({ ...b, content: b.content.map(n => ({ ...n })) }));
-    form.createEl('h4', { text: 'Представление данных (короткий вид / выписка / протокол)' });
-    form.createDiv({ cls: 'tn-lims-meta' }).setText(
+    // Авто-блоки графиков (2026-08-26, прямой запрос пользователя): раньше графики
+    // показывались в карточке заявки отдельной жёсткой панелью мимо системы блоков
+    // (без возможности скрыть/показать по видам вывода). Теперь каждый chart_config
+    // без своего блока (по chart_id) сразу получает блок здесь, в памяти — админ
+    // видит его в списке представления и решает, показывать/скрывать/окружить
+    // текстом; ничего не уходит на сервер, пока не нажата «Сохранить».
+    for (const chart of charts) {
+      if (blocks.some(b => b.chart_id === chart.id)) continue;
+      blocks.push({
+        id: `chart_${chart.id}`,
+        title: chart.title || chart.id,
+        content: [],
+        chart_id: chart.id,
+        show_in_ui: true,
+        show_in_excerpt: false,
+        show_in_protocol: true,
+      });
+    }
+    const presentationBody = this.renderCollapsibleSection(form, 'Представление данных (короткий вид / выписка / протокол)');
+    presentationBody.createDiv({ cls: 'tn-lims-meta' }).setText(
       'Блоки — форматированный текст с плейсхолдерами (системными — партия/материал/ЕКН и ' +
       'т.п., атрибутами метода). Динамические данные (несколько серий) — только в таблице; ' +
       'вне таблицы атрибут эксперимента сворачивается до одного значения (среднее/мин/макс/ ' +
       'первая/последняя серия). Три галочки на каждом блоке — в каком из трёх видов вывода он показывается.',
     );
-    const blocksListEl = form.createDiv();
+    const blocksListEl = presentationBody.createDiv();
     redrawBlocks = () => {
       blocksListEl.empty();
       this.renderBlocksList(blocksListEl, blocks, attrs, charts);
     };
     redrawBlocks();
-    const addBlockBtn = form.createEl('button', { text: '➕ Добавить блок', cls: 'tn-btn tn-btn-ghost' });
+    const addBlockBtn = presentationBody.createEl('button', { text: '➕ Добавить блок', cls: 'tn-btn tn-btn-ghost' });
     addBlockBtn.addEventListener('click', () => {
       blocks.push({ id: `blk_${Date.now()}`, title: 'Новый блок', content: [], show_in_ui: true, show_in_excerpt: false, show_in_protocol: true });
       redrawBlocks();
@@ -1581,20 +1610,20 @@ export class LimsView extends ItemView {
     const operatorFormFields: OperatorFormField[] = cfg.operator_form.fields
       .filter(f => attrs.some(a => a.id === f.attribute_id))
       .map(f => ({ ...f }));
-    form.createEl('h4', { text: 'Форма для испытателя (данные эксперимента)' });
-    form.createDiv({ cls: 'tn-lims-meta' }).setText(
+    const operatorFormBody = this.renderCollapsibleSection(form, 'Форма для испытателя (данные эксперимента)');
+    operatorFormBody.createDiv({ cls: 'tn-lims-meta' }).setText(
       'Какие атрибуты лаборант вводит при эксперименте — конструктор схемы; сам ввод ' +
       '(мобильный/веб-фронт для испытателя) появится позже, здесь только описание формы.',
     );
-    const operatorFormListEl = form.createDiv();
-    const operatorFormPreviewEl = form.createDiv();
+    const operatorFormListEl = operatorFormBody.createDiv();
+    const operatorFormPreviewEl = operatorFormBody.createDiv();
     redrawOperatorForm = () => {
       operatorFormListEl.empty();
       this.renderOperatorFormRows(operatorFormListEl, operatorFormFields, attrs, () => redrawOperatorForm());
       this.renderOperatorFormPreview(operatorFormPreviewEl, operatorFormFields, attrs);
     };
     redrawOperatorForm();
-    const addOperatorFieldBtn = form.createEl('button', { text: '➕ Поле формы', cls: 'tn-btn tn-btn-ghost' });
+    const addOperatorFieldBtn = operatorFormBody.createEl('button', { text: '➕ Поле формы', cls: 'tn-btn tn-btn-ghost' });
     addOperatorFieldBtn.addEventListener('click', () => {
       const free = attrs.find(a => a.id && !operatorFormFields.some(f => f.attribute_id === a.id));
       if (!free) { new Notice('Все атрибуты метода уже добавлены в форму испытателя'); return; }
@@ -2765,12 +2794,8 @@ export class LimsView extends ItemView {
         this.bodyEl.createDiv({ cls: 'tn-lims-meta tn-lims-p24' }).setText('Оборудования пока нет.');
         return;
       }
-      const table = this.bodyEl.createEl('table', { cls: 'tn-table' });
-      const thead = table.createEl('thead').createEl('tr');
-      for (const h of ['Код', 'Название', 'Расположение', 'Ответственный', 'Статус', '']) thead.createEl('th').setText(h);
-      const tbody = table.createEl('tbody');
       for (const eq of equipment) {
-        this.renderEquipmentRow(tbody, eq);
+        this.renderEquipmentCard(this.bodyEl, eq);
       }
     } catch (e: unknown) {
       this.bodyEl.empty();
@@ -2778,45 +2803,100 @@ export class LimsView extends ItemView {
     }
   }
 
-  private renderEquipmentRow(tbody: HTMLElement, eq: Equipment): void {
-    const tr = tbody.createEl('tr');
-    tr.createEl('td').setText(eq.code);
-    tr.createEl('td').setText(eq.name);
-    tr.createEl('td').setText(eq.location || '—');
-    tr.createEl('td').setText(eq.responsible || '—');
-    tr.createEl('td').setText(eq.status || '—');
-    const actions = tr.createEl('td');
-    if (!this.canEditRefs) return;
-    const editBtn = actions.createEl('button', { text: '✎', cls: 'tn-btn tn-btn-ghost' });
-    const delBtn = actions.createEl('button', { text: '✖', cls: 'tn-btn tn-btn-ghost' });
-    editBtn.addEventListener('click', () => this.renderEquipmentEditRow(tbody, tr, eq));
-    delBtn.addEventListener('click', async () => {
-      if (!window.confirm(`Удалить оборудование «${eq.name}»?`)) return;
-      try {
-        await this.plugin.syncService.deleteEquipment(eq.id);
-        new Notice('Оборудование удалено');
-        await this.renderEquipment();
-      } catch (e: unknown) {
-        new Notice(`Ошибка: ${errorMessage(e)}`);
-      }
+  /** Свёрнутая карточка — код/название/дата последней калибровки (если калибровок ещё
+   * не было — дата более свежей из поверок, сертификат/акт). Остальные поля, сканы,
+   * документация, журнал калибровок, привязка к методам — только в раскрытых деталях
+   * (2026-08-26, прямой запрос пользователя — не перегружать общий список). */
+  private renderEquipmentCard(container: HTMLElement, eq: Equipment): void {
+    const card = container.createDiv({ cls: 'tn-lims-method' });
+    const verificationDates = [eq.verification_cert_date, eq.verification_act_date].filter(Boolean).sort();
+    const latestVerification = verificationDates.length > 0 ? verificationDates[verificationDates.length - 1] : '';
+    const dateLabel = eq.last_calibration
+      ? `калибровка ${this.formatDate(eq.last_calibration)}`
+      : latestVerification
+        ? `поверка ${this.formatDate(latestVerification)}`
+        : 'нет данных о калибровке/поверке';
+    const header = `${eq.code} — ${eq.name || 'без названия'} · ${dateLabel}`;
+    this.renderCollapsibleSection(card, header, (body) => {
+      void this.renderEquipmentCardDetails(body, eq);
     });
   }
 
-  /** Заменяет строку таблицы на форму правки оборудования (по месту, без перехода). */
-  private renderEquipmentEditRow(tbody: HTMLElement, tr: HTMLElement, eq: Equipment): void {
-    tr.empty();
-    const codeInp = tr.createEl('td').createEl('input', { attr: { type: 'text' }, cls: 'tn-lims-input' });
+  private async renderEquipmentCardDetails(body: HTMLElement, eq: Equipment): Promise<void> {
+    body.createDiv({ cls: 'tn-lims-meta' }).setText('Загрузка…');
+    try {
+      const methodLinks = await this.plugin.syncService.listEquipmentMethods(eq.id);
+      body.empty();
+
+      this.renderEquipmentFieldsForm(body, eq);
+      this.renderEquipmentVerificationBlock(body, eq, 'verification_cert', 'Сертификат поверки',
+        eq.verification_cert_number, eq.verification_cert_date, eq.verification_cert_file_url);
+      this.renderEquipmentVerificationBlock(body, eq, 'verification_act', 'Акт поверки',
+        eq.verification_act_number, eq.verification_act_date, eq.verification_act_file_url);
+
+      const docsDiv = body.createDiv({ cls: 'tn-lims-mb12' });
+      void this.renderEquipmentDocuments(docsDiv, eq);
+
+      const methodsDiv = body.createDiv({ cls: 'tn-lims-mb12' });
+      this.renderEquipmentMethodLinks(methodsDiv, eq, methodLinks);
+
+      // Поля калибровки — только если карточка «Основное» хотя бы для одной связи
+      // (прямое решение пользователя, спека 2026-08-26).
+      if (methodLinks.some(l => l.role === 'main')) {
+        const calibDiv = body.createDiv({ cls: 'tn-lims-mb12' });
+        void this.renderEquipmentCalibrationBlock(calibDiv, eq);
+      }
+
+      if (this.canEditRefs) {
+        const delBtn = body.createEl('button', { text: '✖ Удалить оборудование', cls: 'tn-btn tn-btn-ghost' });
+        delBtn.addEventListener('click', async () => {
+          if (!window.confirm(`Удалить оборудование «${eq.name}»?`)) return;
+          try {
+            await this.plugin.syncService.deleteEquipment(eq.id);
+            new Notice('Оборудование удалено');
+            await this.renderEquipment();
+          } catch (e: unknown) {
+            new Notice(`Ошибка: ${errorMessage(e)}`);
+          }
+        });
+      }
+    } catch (e: unknown) {
+      body.empty();
+      body.createDiv({ cls: 'tn-lims-error' }).setText(`Ошибка: ${errorMessage(e)}`);
+    }
+  }
+
+  private renderEquipmentFieldsForm(body: HTMLElement, eq: Equipment): void {
+    if (!this.canEditRefs) {
+      body.createDiv({ cls: 'tn-lims-meta tn-lims-mb8' }).setText(
+        `Расположение: ${eq.location || '—'} · Ответственный: ${eq.responsible || '—'} · Статус: ${eq.status || '—'}` +
+        (eq.commissioned_at ? ` · Ввод в эксплуатацию: ${this.formatDate(eq.commissioned_at)}` : '') +
+        (eq.service_life ? ` · Нормативный срок эксплуатации: ${eq.service_life}` : ''),
+      );
+      return;
+    }
+    const form = body.createDiv({ cls: 'tn-lims-series-form' });
+    const row1 = form.createDiv({ cls: 'tn-lims-flex' });
+    const codeInp = row1.createEl('input', { attr: { type: 'text', placeholder: 'Код' }, cls: 'tn-lims-input' });
     codeInp.value = eq.code;
-    const nameInp = tr.createEl('td').createEl('input', { attr: { type: 'text' }, cls: 'tn-lims-input' });
+    const nameInp = row1.createEl('input', { attr: { type: 'text', placeholder: 'Название' }, cls: 'tn-lims-input' });
     nameInp.value = eq.name;
-    const locInp = tr.createEl('td').createEl('input', { attr: { type: 'text' }, cls: 'tn-lims-input' });
+    const statusInp = row1.createEl('input', { attr: { type: 'text', placeholder: 'Статус' }, cls: 'tn-lims-input' });
+    statusInp.value = eq.status;
+    const row2 = form.createDiv({ cls: 'tn-lims-flex' });
+    const locInp = row2.createEl('input', { attr: { type: 'text', placeholder: 'Расположение' }, cls: 'tn-lims-input' });
     locInp.value = eq.location;
-    const respInp = tr.createEl('td').createEl('input', { attr: { type: 'text' }, cls: 'tn-lims-input' });
+    const respInp = row2.createEl('input', { attr: { type: 'text', placeholder: 'Ответственный' }, cls: 'tn-lims-input' });
     respInp.value = eq.responsible;
-    tr.createEl('td').setText(eq.status || '—');
-    const actions = tr.createEl('td');
-    const saveBtn = actions.createEl('button', { text: '💾', cls: 'tn-btn tn-btn-primary' });
-    const cancelBtn = actions.createEl('button', { text: '✖', cls: 'tn-btn tn-btn-ghost' });
+    const row3 = form.createDiv({ cls: 'tn-lims-flex' });
+    row3.createSpan({ text: 'Дата ввода в эксплуатацию:', cls: 'tn-lims-meta' });
+    const commInp = row3.createEl('input', { attr: { type: 'date' }, cls: 'tn-lims-input' });
+    commInp.value = eq.commissioned_at;
+    const lifeInp = row3.createEl('input', {
+      attr: { type: 'text', placeholder: 'Нормативный срок эксплуатации, напр. 10 лет' }, cls: 'tn-lims-input',
+    });
+    lifeInp.value = eq.service_life;
+    const saveBtn = form.createEl('button', { text: '💾 Сохранить', cls: 'tn-btn tn-btn-primary' });
     saveBtn.addEventListener('click', async () => {
       if (!codeInp.value.trim() || !nameInp.value.trim()) { new Notice('Укажите код и название'); return; }
       try {
@@ -2825,6 +2905,9 @@ export class LimsView extends ItemView {
           name: nameInp.value.trim(),
           location: locInp.value.trim(),
           responsible: respInp.value.trim(),
+          status: statusInp.value.trim(),
+          commissioned_at: commInp.value,
+          service_life: lifeInp.value.trim(),
         });
         new Notice('Оборудование обновлено');
         await this.renderEquipment();
@@ -2832,7 +2915,242 @@ export class LimsView extends ItemView {
         new Notice(`Ошибка: ${errorMessage(e)}`);
       }
     });
-    cancelBtn.addEventListener('click', () => void this.renderEquipment());
+  }
+
+  /** Сертификат/акт поверки — номер+дата (обычный PATCH) + скан (отдельный multipart-
+   * эндпоинт). kind различает, какую пару колонок обновлять на сервере. */
+  private renderEquipmentVerificationBlock(
+    body: HTMLElement, eq: Equipment, kind: 'verification_cert' | 'verification_act', label: string,
+    number: string, date: string, fileUrl: string,
+  ): void {
+    const wrap = body.createDiv({ cls: 'tn-lims-mb8' });
+    wrap.createEl('strong', { text: label + ': ' });
+    if (!this.canEditRefs) {
+      wrap.createSpan({ text: `№ ${number || '—'} от ${date ? this.formatDate(date) : '—'}` });
+      if (fileUrl) wrap.createEl('a', { text: ' 📎 скан', attr: { href: fileUrl, target: '_blank' } });
+      return;
+    }
+    const row = wrap.createDiv({ cls: 'tn-lims-flex' });
+    const numInp = row.createEl('input', { attr: { type: 'text', placeholder: 'Номер' }, cls: 'tn-lims-input' });
+    numInp.value = number;
+    const dateInp = row.createEl('input', { attr: { type: 'date' }, cls: 'tn-lims-input' });
+    dateInp.value = date;
+    const saveBtn = row.createEl('button', { text: '💾', cls: 'tn-btn tn-btn-ghost' });
+    saveBtn.addEventListener('click', async () => {
+      try {
+        if (kind === 'verification_cert') {
+          await this.plugin.syncService.updateEquipment(eq.id, {
+            verification_cert_number: numInp.value.trim(), verification_cert_date: dateInp.value,
+          });
+        } else {
+          await this.plugin.syncService.updateEquipment(eq.id, {
+            verification_act_number: numInp.value.trim(), verification_act_date: dateInp.value,
+          });
+        }
+        new Notice('Сохранено');
+        await this.renderEquipment();
+      } catch (e: unknown) {
+        new Notice(`Ошибка: ${errorMessage(e)}`);
+      }
+    });
+    const fileInp = row.createEl('input', { attr: { type: 'file' } });
+    const uploadBtn = row.createEl('button', { text: '📎 Загрузить скан', cls: 'tn-btn tn-btn-ghost' });
+    uploadBtn.addEventListener('click', async () => {
+      const file = fileInp.files?.[0];
+      if (!file) { new Notice('Выберите файл'); return; }
+      try {
+        const data = await file.arrayBuffer();
+        await this.plugin.syncService.uploadEquipmentScan(eq.id, kind, data, file.name);
+        new Notice('Скан загружен');
+        await this.renderEquipment();
+      } catch (e: unknown) {
+        new Notice(`Ошибка: ${errorMessage(e)}`);
+      }
+    });
+    if (fileUrl) row.createEl('a', { text: '📎 текущий скан', attr: { href: fileUrl, target: '_blank' } });
+  }
+
+  private async renderEquipmentDocuments(container: HTMLElement, eq: Equipment): Promise<void> {
+    container.createDiv({ cls: 'tn-lims-meta' }).setText('Документация: загрузка…');
+    try {
+      const docs = await this.plugin.syncService.listEquipmentDocuments(eq.id);
+      container.empty();
+      container.createEl('strong', { text: 'Документация на оборудование' });
+      if (docs.length === 0) container.createDiv({ cls: 'tn-lims-meta' }).setText('Файлов нет.');
+      for (const d of docs) {
+        const row = container.createDiv({ cls: 'tn-lims-flex' });
+        row.createEl('a', { text: d.file_name, attr: { href: d.file_url, target: '_blank' } });
+        if (this.canEditRefs) {
+          const delBtn = row.createEl('button', { text: '✖', cls: 'tn-btn tn-btn-ghost' });
+          delBtn.addEventListener('click', async () => {
+            try {
+              await this.plugin.syncService.deleteEquipmentDocument(eq.id, d.id);
+              new Notice('Файл удалён');
+              await this.renderEquipment();
+            } catch (e: unknown) {
+              new Notice(`Ошибка: ${errorMessage(e)}`);
+            }
+          });
+        }
+      }
+      if (this.canEditRefs) {
+        const row = container.createDiv({ cls: 'tn-lims-flex' });
+        const fileInp = row.createEl('input', { attr: { type: 'file' } });
+        const uploadBtn = row.createEl('button', { text: '➕ Загрузить документ', cls: 'tn-btn tn-btn-ghost' });
+        uploadBtn.addEventListener('click', async () => {
+          const file = fileInp.files?.[0];
+          if (!file) { new Notice('Выберите файл'); return; }
+          try {
+            const data = await file.arrayBuffer();
+            await this.plugin.syncService.uploadEquipmentDocument(eq.id, data, file.name);
+            new Notice('Файл загружен');
+            await this.renderEquipment();
+          } catch (e: unknown) {
+            new Notice(`Ошибка: ${errorMessage(e)}`);
+          }
+        });
+      }
+    } catch (e: unknown) {
+      container.empty();
+      container.createDiv({ cls: 'tn-lims-error' }).setText(`Ошибка: ${errorMessage(e)}`);
+    }
+  }
+
+  private renderEquipmentMethodLinks(container: HTMLElement, eq: Equipment, links: EquipmentMethodLink[]): void {
+    container.createEl('strong', { text: 'Привязанные методы' });
+    if (links.length === 0) container.createDiv({ cls: 'tn-lims-meta' }).setText('Не привязано ни к одному методу.');
+    for (const link of links) {
+      const row = container.createDiv({ cls: 'tn-lims-flex' });
+      row.createSpan({ text: this.methodName(link.method_id) });
+      if (!this.canEditRefs) {
+        row.createSpan({ text: link.role === 'main' ? ' — Основное' : ' — Вспомогательное' });
+        continue;
+      }
+      const roleSelect = row.createEl('select', { cls: 'tn-lims-input' });
+      roleSelect.createEl('option', { value: 'main', text: 'Основное' });
+      roleSelect.createEl('option', { value: 'auxiliary', text: 'Вспомогательное' });
+      roleSelect.value = link.role;
+      roleSelect.addEventListener('change', async () => {
+        try {
+          await this.plugin.syncService.setEquipmentMethod(eq.id, link.method_id, roleSelect.value as 'main' | 'auxiliary');
+          new Notice('Роль обновлена');
+          await this.renderEquipment();
+        } catch (e: unknown) {
+          new Notice(`Ошибка: ${errorMessage(e)}`);
+        }
+      });
+      const delBtn = row.createEl('button', { text: '✖', cls: 'tn-btn tn-btn-ghost' });
+      delBtn.addEventListener('click', async () => {
+        try {
+          await this.plugin.syncService.deleteEquipmentMethod(eq.id, link.method_id);
+          new Notice('Связь удалена');
+          await this.renderEquipment();
+        } catch (e: unknown) {
+          new Notice(`Ошибка: ${errorMessage(e)}`);
+        }
+      });
+    }
+    if (this.canEditRefs) {
+      const linkedIds = new Set(links.map(l => l.method_id));
+      const available = this.plugin.methods.filter(m => !linkedIds.has(m.id));
+      if (available.length > 0) {
+        const addRow = container.createDiv({ cls: 'tn-lims-flex' });
+        const methodSelect = addRow.createEl('select', { cls: 'tn-lims-input' });
+        for (const m of available) {
+          methodSelect.createEl('option', { value: String(m.id), text: `${m.code} — ${m.name || 'без названия'}` });
+        }
+        const roleSelect = addRow.createEl('select', { cls: 'tn-lims-input' });
+        roleSelect.createEl('option', { value: 'main', text: 'Основное' });
+        roleSelect.createEl('option', { value: 'auxiliary', text: 'Вспомогательное' });
+        const addBtn = addRow.createEl('button', { text: '➕ Привязать метод', cls: 'tn-btn tn-btn-ghost' });
+        addBtn.addEventListener('click', async () => {
+          const methodId = Number(methodSelect.value);
+          if (!methodId) return;
+          try {
+            await this.plugin.syncService.setEquipmentMethod(eq.id, methodId, roleSelect.value as 'main' | 'auxiliary');
+            new Notice('Метод привязан');
+            await this.renderEquipment();
+          } catch (e: unknown) {
+            new Notice(`Ошибка: ${errorMessage(e)}`);
+          }
+        });
+      }
+    }
+  }
+
+  /** Только для карточек «Основное» хотя бы для одного метода: межкалибровочный
+   * период (своё значение на каждой единице оборудования), плановая дата следующей
+   * калибровки (только чтение — считает сервер), журнал калибровок. */
+  private async renderEquipmentCalibrationBlock(container: HTMLElement, eq: Equipment): Promise<void> {
+    container.createDiv({ cls: 'tn-lims-meta' }).setText('Калибровка: загрузка…');
+    try {
+      const calibrations = await this.plugin.syncService.listEquipmentCalibrations(eq.id);
+      container.empty();
+      container.createEl('strong', { text: 'Калибровка (основное оборудование)' });
+      const intervalRow = container.createDiv({ cls: 'tn-lims-flex' });
+      intervalRow.createSpan({ text: 'Межкалибровочный период, мес.:', cls: 'tn-lims-meta' });
+      if (this.canEditRefs) {
+        const intervalInp = intervalRow.createEl('input', { attr: { type: 'number', min: '1' }, cls: 'tn-lims-input' });
+        if (eq.calibration_interval_months) intervalInp.value = String(eq.calibration_interval_months);
+        const saveBtn = intervalRow.createEl('button', { text: '💾', cls: 'tn-btn tn-btn-ghost' });
+        saveBtn.addEventListener('click', async () => {
+          const n = Number(intervalInp.value);
+          if (!n || n <= 0) { new Notice('Укажите период в месяцах'); return; }
+          try {
+            await this.plugin.syncService.updateEquipment(eq.id, { calibration_interval_months: n });
+            new Notice('Сохранено');
+            await this.renderEquipment();
+          } catch (e: unknown) {
+            new Notice(`Ошибка: ${errorMessage(e)}`);
+          }
+        });
+      } else {
+        intervalRow.createSpan({ text: eq.calibration_interval_months ? String(eq.calibration_interval_months) : '—' });
+      }
+      container.createDiv({ cls: 'tn-lims-meta' }).setText(
+        `Плановая дата следующей калибровки: ${eq.next_calibration ? this.formatDate(eq.next_calibration) : '—'}`,
+      );
+      container.createEl('strong', { text: 'Журнал калибровок' });
+      if (calibrations.length === 0) container.createDiv({ cls: 'tn-lims-meta' }).setText('Записей ещё нет.');
+      else {
+        const table = container.createEl('table', { cls: 'tn-table' });
+        const thead = table.createEl('thead').createEl('tr');
+        for (const h of ['Дата', 'Результат', 'Файл', 'Кто внёс']) thead.createEl('th').setText(h);
+        const tbody = table.createEl('tbody');
+        for (const c of calibrations) {
+          const tr = tbody.createEl('tr');
+          tr.createEl('td').setText(this.formatDate(c.calibrated_at));
+          tr.createEl('td').setText(c.result || '—');
+          const fileTd = tr.createEl('td');
+          if (c.file_url) fileTd.createEl('a', { text: '📎', attr: { href: c.file_url, target: '_blank' } });
+          tr.createEl('td').setText(c.created_by || '—');
+        }
+      }
+      if (this.canEditRefs) {
+        const form = container.createDiv({ cls: 'tn-lims-flex' });
+        const dateInp = form.createEl('input', { attr: { type: 'date' }, cls: 'tn-lims-input' });
+        const resultInp = form.createEl('input', { attr: { type: 'text', placeholder: 'Результат' }, cls: 'tn-lims-input' });
+        const fileInp = form.createEl('input', { attr: { type: 'file' } });
+        const addBtn = form.createEl('button', { text: '➕ Добавить запись', cls: 'tn-btn tn-btn-primary' });
+        addBtn.addEventListener('click', async () => {
+          if (!dateInp.value) { new Notice('Укажите дату калибровки'); return; }
+          try {
+            const file = fileInp.files?.[0];
+            await this.plugin.syncService.createEquipmentCalibration(
+              eq.id, dateInp.value, resultInp.value.trim(),
+              file ? { data: await file.arrayBuffer(), fileName: file.name } : undefined,
+            );
+            new Notice('Запись добавлена');
+            await this.renderEquipment();
+          } catch (e: unknown) {
+            new Notice(`Ошибка: ${errorMessage(e)}`);
+          }
+        });
+      }
+    } catch (e: unknown) {
+      container.empty();
+      container.createDiv({ cls: 'tn-lims-error' }).setText(`Ошибка: ${errorMessage(e)}`);
+    }
   }
 
   private renderEquipmentForm(): void {

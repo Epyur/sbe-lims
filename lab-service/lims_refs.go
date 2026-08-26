@@ -288,23 +288,70 @@ func (s *Server) handleDeleteInventor(w http.ResponseWriter, r *http.Request) {
 
 // ---- Equipment ----
 
+// Equipment — last_calibration/next_calibration НЕ принимаются напрямую в create/update
+// (2026-08-26) — считаются сервером из equipment_calibrations, см. equipment_ext.go
+// recomputeCalibrationDates. Файловые поля (*_file_url) — только для чтения, заполняются
+// отдельным multipart-эндпоинтом POST /equipment/{id}/scan.
 type Equipment struct {
-	ID              int64  `json:"id"`
-	Code            string `json:"code"`
-	Name            string `json:"name"`
-	Location        string `json:"location"`
-	Responsible     string `json:"responsible"`
-	LastCalibration string `json:"last_calibration"`
-	NextCalibration string `json:"next_calibration"`
-	Status          string `json:"status"`
-	CreatedAt       string `json:"created_at"`
-	UpdatedAt       string `json:"updated_at"`
+	ID                        int64  `json:"id"`
+	Code                      string `json:"code"`
+	Name                      string `json:"name"`
+	Location                  string `json:"location"`
+	Responsible               string `json:"responsible"`
+	LastCalibration           string `json:"last_calibration"`
+	NextCalibration           string `json:"next_calibration"`
+	Status                    string `json:"status"`
+	CommissionedAt            string `json:"commissioned_at"`
+	ServiceLife               string `json:"service_life"`
+	VerificationCertNumber    string `json:"verification_cert_number"`
+	VerificationCertDate      string `json:"verification_cert_date"`
+	VerificationCertFileURL   string `json:"verification_cert_file_url"`
+	VerificationActNumber     string `json:"verification_act_number"`
+	VerificationActDate       string `json:"verification_act_date"`
+	VerificationActFileURL    string `json:"verification_act_file_url"`
+	CalibrationIntervalMonths *int   `json:"calibration_interval_months"`
+	CreatedAt                 string `json:"created_at"`
+	UpdatedAt                 string `json:"updated_at"`
+}
+
+const equipmentColumnsSQL = `id, code, name, location, responsible, last_calibration, next_calibration, status,
+	commissioned_at, service_life, verification_cert_number, verification_cert_date, verification_cert_file_url,
+	verification_act_number, verification_act_date, verification_act_file_url, calibration_interval_months,
+	created_at, updated_at`
+
+func scanEquipmentRow(row pgx.Row) (Equipment, error) {
+	var it Equipment
+	var lc, nc, commAt, certDate, actDate *time.Time
+	var ca, ua time.Time
+	err := row.Scan(&it.ID, &it.Code, &it.Name, &it.Location, &it.Responsible, &lc, &nc, &it.Status,
+		&commAt, &it.ServiceLife, &it.VerificationCertNumber, &certDate, &it.VerificationCertFileURL,
+		&it.VerificationActNumber, &actDate, &it.VerificationActFileURL, &it.CalibrationIntervalMonths,
+		&ca, &ua)
+	if err != nil {
+		return it, err
+	}
+	if lc != nil {
+		it.LastCalibration = lc.Format("2006-01-02")
+	}
+	if nc != nil {
+		it.NextCalibration = nc.Format("2006-01-02")
+	}
+	if commAt != nil {
+		it.CommissionedAt = commAt.Format("2006-01-02")
+	}
+	if certDate != nil {
+		it.VerificationCertDate = certDate.Format("2006-01-02")
+	}
+	if actDate != nil {
+		it.VerificationActDate = actDate.Format("2006-01-02")
+	}
+	it.CreatedAt = ca.Format(time.RFC3339)
+	it.UpdatedAt = ua.Format(time.RFC3339)
+	return it, nil
 }
 
 func (s *Server) handleListEquipment(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.pool.Query(r.Context(), `
-SELECT id, code, name, location, responsible, last_calibration, next_calibration, status,
-	created_at, updated_at FROM equipment ORDER BY code`)
+	rows, err := s.pool.Query(r.Context(), `SELECT `+equipmentColumnsSQL+` FROM equipment ORDER BY code`)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
 		return
@@ -312,21 +359,10 @@ SELECT id, code, name, location, responsible, last_calibration, next_calibration
 	defer rows.Close()
 	out := make([]Equipment, 0, 16)
 	for rows.Next() {
-		var it Equipment
-		var lc, nc *time.Time
-		var ca, ua time.Time
-		if err := rows.Scan(&it.ID, &it.Code, &it.Name, &it.Location, &it.Responsible,
-			&lc, &nc, &it.Status, &ca, &ua); err != nil {
+		it, err := scanEquipmentRow(rows)
+		if err != nil {
 			continue
 		}
-		if lc != nil {
-			it.LastCalibration = lc.Format("2006-01-02")
-		}
-		if nc != nil {
-			it.NextCalibration = nc.Format("2006-01-02")
-		}
-		it.CreatedAt = ca.Format(time.RFC3339)
-		it.UpdatedAt = ua.Format(time.RFC3339)
 		out = append(out, it)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"equipment": out})
@@ -334,12 +370,10 @@ SELECT id, code, name, location, responsible, last_calibration, next_calibration
 
 func (s *Server) handleCreateEquipment(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Code            string `json:"code"`
-		Name            string `json:"name"`
-		Location        string `json:"location"`
-		Responsible     string `json:"responsible"`
-		LastCalibration string `json:"last_calibration"`
-		NextCalibration string `json:"next_calibration"`
+		Code        string `json:"code"`
+		Name        string `json:"name"`
+		Location    string `json:"location"`
+		Responsible string `json:"responsible"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json"})
@@ -349,23 +383,33 @@ func (s *Server) handleCreateEquipment(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "code is required"})
 		return
 	}
-	var lc, nc *time.Time
-	if t, err := time.Parse("2006-01-02", req.LastCalibration); err == nil {
-		lc = &t
-	}
-	if t, err := time.Parse("2006-01-02", req.NextCalibration); err == nil {
-		nc = &t
-	}
 	var id int64
 	err := s.pool.QueryRow(r.Context(), `
-INSERT INTO equipment (code, name, location, responsible, last_calibration, next_calibration)
-VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (code) DO NOTHING RETURNING id`,
-		req.Code, req.Name, req.Location, req.Responsible, lc, nc).Scan(&id)
+INSERT INTO equipment (code, name, location, responsible)
+VALUES ($1, $2, $3, $4) ON CONFLICT (code) DO NOTHING RETURNING id`,
+		req.Code, req.Name, req.Location, req.Responsible).Scan(&id)
 	if err != nil {
 		writeJSON(w, http.StatusConflict, map[string]any{"error": "code already exists"})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"id": id})
+}
+
+// parseOptionalDate разбирает PATCH-поле даты: nil (поле не передано — не трогать колонку)
+// отличается от переданной пустой строки (present=true, value=nil — очистить колонку в
+// NULL). ok=false — некорректная дата, вызывающий код должен вернуть 400.
+func parseOptionalDate(s *string) (value *time.Time, present bool, ok bool) {
+	if s == nil {
+		return nil, false, true
+	}
+	if strings.TrimSpace(*s) == "" {
+		return nil, true, true
+	}
+	t, err := time.Parse("2006-01-02", *s)
+	if err != nil {
+		return nil, false, false
+	}
+	return &t, true, true
 }
 
 func (s *Server) handleUpdateEquipment(w http.ResponseWriter, r *http.Request) {
@@ -375,10 +419,18 @@ func (s *Server) handleUpdateEquipment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Code        *string `json:"code"`
-		Name        *string `json:"name"`
-		Location    *string `json:"location"`
-		Responsible *string `json:"responsible"`
+		Code                      *string `json:"code"`
+		Name                      *string `json:"name"`
+		Location                  *string `json:"location"`
+		Responsible               *string `json:"responsible"`
+		Status                    *string `json:"status"`
+		CommissionedAt            *string `json:"commissioned_at"`
+		ServiceLife               *string `json:"service_life"`
+		VerificationCertNumber    *string `json:"verification_cert_number"`
+		VerificationCertDate      *string `json:"verification_cert_date"`
+		VerificationActNumber     *string `json:"verification_act_number"`
+		VerificationActDate       *string `json:"verification_act_date"`
+		CalibrationIntervalMonths *int    `json:"calibration_interval_months"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json"})
@@ -388,11 +440,42 @@ func (s *Server) handleUpdateEquipment(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "code is required"})
 		return
 	}
+	commissionedAt, commissionedPresent, ok := parseOptionalDate(req.CommissionedAt)
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid commissioned_at (want YYYY-MM-DD)"})
+		return
+	}
+	certDate, certPresent, ok := parseOptionalDate(req.VerificationCertDate)
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid verification_cert_date (want YYYY-MM-DD)"})
+		return
+	}
+	actDate, actPresent, ok := parseOptionalDate(req.VerificationActDate)
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid verification_act_date (want YYYY-MM-DD)"})
+		return
+	}
 	tag, err := s.pool.Exec(r.Context(), `
 UPDATE equipment SET
 	code = COALESCE($2, code), name = COALESCE($3, name),
-	location = COALESCE($4, location), responsible = COALESCE($5, responsible), updated_at = now()
-WHERE id = $1`, id, req.Code, req.Name, req.Location, req.Responsible)
+	location = COALESCE($4, location), responsible = COALESCE($5, responsible),
+	status = COALESCE($6, status),
+	commissioned_at = CASE WHEN $7::boolean THEN $8::date ELSE commissioned_at END,
+	service_life = COALESCE($9, service_life),
+	verification_cert_number = COALESCE($10, verification_cert_number),
+	verification_cert_date = CASE WHEN $11::boolean THEN $12::date ELSE verification_cert_date END,
+	verification_act_number = COALESCE($13, verification_act_number),
+	verification_act_date = CASE WHEN $14::boolean THEN $15::date ELSE verification_act_date END,
+	calibration_interval_months = COALESCE($16, calibration_interval_months),
+	updated_at = now()
+WHERE id = $1`, id, req.Code, req.Name, req.Location, req.Responsible, req.Status,
+		commissionedPresent, commissionedAt,
+		req.ServiceLife,
+		req.VerificationCertNumber,
+		certPresent, certDate,
+		req.VerificationActNumber,
+		actPresent, actDate,
+		req.CalibrationIntervalMonths)
 	if err != nil {
 		if isUniqueViolation(err) {
 			writeJSON(w, http.StatusConflict, map[string]any{"error": "code already exists"})

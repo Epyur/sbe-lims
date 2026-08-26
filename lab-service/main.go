@@ -171,6 +171,15 @@ func main() {
 	mux.HandleFunc("POST /api/lab/equipment", s.requirePerm("editor")(s.handleCreateEquipment))
 	mux.HandleFunc("PATCH /api/lab/equipment/{id}", s.requirePerm("editor")(s.handleUpdateEquipment))
 	mux.HandleFunc("DELETE /api/lab/equipment/{id}", s.requirePerm("editor")(s.handleDeleteEquipment))
+	mux.HandleFunc("POST /api/lab/equipment/{id}/scan", s.requirePerm("editor")(s.handleEquipmentScan))
+	mux.HandleFunc("GET /api/lab/equipment/{id}/calibrations", s.requirePerm("viewer")(s.handleListEquipmentCalibrations))
+	mux.HandleFunc("POST /api/lab/equipment/{id}/calibrations", s.requirePerm("editor")(s.handleCreateEquipmentCalibration))
+	mux.HandleFunc("GET /api/lab/equipment/{id}/methods", s.requirePerm("viewer")(s.handleListEquipmentMethods))
+	mux.HandleFunc("POST /api/lab/equipment/{id}/methods", s.requirePerm("editor")(s.handleSetEquipmentMethod))
+	mux.HandleFunc("DELETE /api/lab/equipment/{id}/methods/{method_id}", s.requirePerm("editor")(s.handleDeleteEquipmentMethod))
+	mux.HandleFunc("GET /api/lab/equipment/{id}/documents", s.requirePerm("viewer")(s.handleListEquipmentDocuments))
+	mux.HandleFunc("POST /api/lab/equipment/{id}/documents", s.requirePerm("editor")(s.handleUploadEquipmentDocument))
+	mux.HandleFunc("DELETE /api/lab/equipment/{id}/documents/{file_id}", s.requirePerm("editor")(s.handleDeleteEquipmentDocument))
 	mux.HandleFunc("GET /api/lab/lab-members", s.requirePerm("viewer")(s.handleListLabMembers))
 	mux.HandleFunc("POST /api/lab/lab-members", s.requirePerm("editor")(s.handleSetLabMember))
 	mux.HandleFunc("DELETE /api/lab/lab-members/{lab_id}/{email}", s.requirePerm("editor")(s.handleRemoveLabMember))
@@ -476,6 +485,40 @@ func (s *Server) migrate(ctx context.Context) error {
 		// чистится автоматически при КАЖДОМ изменении status — во всех трёх местах
 		// записи (handleSetRequestStatus, handleKanbanMove, pushUpdate).
 		`ALTER TABLE requests ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ`,
+		// Расширение справочника «Оборудование» (2026-08-26, см. equipment_ext.go):
+		// эксплуатация/поверка/калибровка. last_calibration/next_calibration уже
+		// существовали (дормантные с первой миграции ЛИМС) — теперь пересчитываются
+		// сервером при каждой новой записи equipment_calibrations, не задаются вручную.
+		`ALTER TABLE equipment ADD COLUMN IF NOT EXISTS commissioned_at DATE`,
+		`ALTER TABLE equipment ADD COLUMN IF NOT EXISTS service_life TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE equipment ADD COLUMN IF NOT EXISTS verification_cert_number TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE equipment ADD COLUMN IF NOT EXISTS verification_cert_date DATE`,
+		`ALTER TABLE equipment ADD COLUMN IF NOT EXISTS verification_cert_file_key TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE equipment ADD COLUMN IF NOT EXISTS verification_cert_file_url TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE equipment ADD COLUMN IF NOT EXISTS verification_act_number TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE equipment ADD COLUMN IF NOT EXISTS verification_act_date DATE`,
+		`ALTER TABLE equipment ADD COLUMN IF NOT EXISTS verification_act_file_key TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE equipment ADD COLUMN IF NOT EXISTS verification_act_file_url TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE equipment ADD COLUMN IF NOT EXISTS calibration_interval_months INT`,
+		// role — 'main'|'auxiliary', на каждой связи оборудование↔метод отдельно (одно
+		// и то же оборудование может быть основным для одного метода и вспомогательным
+		// для другого). is_required — другая, уже существующая семантика, не трогаем.
+		`ALTER TABLE method_equipment ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'auxiliary'`,
+		`CREATE TABLE IF NOT EXISTS equipment_calibrations (
+			id BIGSERIAL PRIMARY KEY,
+			equipment_id BIGINT NOT NULL REFERENCES equipment(id) ON DELETE CASCADE,
+			calibrated_at DATE NOT NULL,
+			result TEXT NOT NULL DEFAULT '',
+			file_key TEXT NOT NULL DEFAULT '',
+			file_url TEXT NOT NULL DEFAULT '',
+			created_by TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+		)`,
+		// files — переиспользуется для «Документации на оборудование» (список файлов,
+		// не один сертификат/акт): request_id остаётся NULL, equipment_id заполнен,
+		// purpose='equipment_doc' отличает от файлов заявок при листинге.
+		`ALTER TABLE files ADD COLUMN IF NOT EXISTS equipment_id BIGINT REFERENCES equipment(id) ON DELETE CASCADE`,
+		`ALTER TABLE files ADD COLUMN IF NOT EXISTS purpose TEXT NOT NULL DEFAULT ''`,
 	}
 	for _, q := range stmts {
 		if _, err := s.pool.Exec(ctx, q); err != nil {

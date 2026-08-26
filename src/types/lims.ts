@@ -448,7 +448,9 @@ export interface Inventor {
   updated_at: string;
 }
 
-/** Оборудование. */
+/** Оборудование (2026-08-26 — эксплуатация/поверка/калибровка, см. AGENTS.md).
+ * last_calibration/next_calibration считает сервер из EquipmentCalibration —
+ * клиент их не редактирует напрямую. */
 export interface Equipment {
   id: number;
   code: string;
@@ -458,8 +460,45 @@ export interface Equipment {
   last_calibration: string;
   next_calibration: string;
   status: string;
+  commissioned_at: string;
+  service_life: string;
+  verification_cert_number: string;
+  verification_cert_date: string;
+  verification_cert_file_url: string;
+  verification_act_number: string;
+  verification_act_date: string;
+  verification_act_file_url: string;
+  calibration_interval_months: number | null;
   created_at: string;
   updated_at: string;
+}
+
+/** Запись журнала калибровок оборудования. */
+export interface EquipmentCalibration {
+  id: number;
+  equipment_id: number;
+  calibrated_at: string;
+  result: string;
+  file_url: string;
+  created_by: string;
+  created_at: string;
+}
+
+/** Связь оборудование↔метод — роль на каждой связи отдельно (одно и то же
+ * оборудование может быть основным для одного метода и вспомогательным для другого). */
+export interface EquipmentMethodLink {
+  method_id: number;
+  role: 'main' | 'auxiliary';
+}
+
+/** Файл документации на оборудование (не сертификат/акт поверки — те отдельными
+ * полями Equipment). */
+export interface EquipmentDocument {
+  id: number;
+  file_name: string;
+  file_url: string;
+  file_size: number;
+  created_at: string;
 }
 
 /** Сотрудник лаборатории. */

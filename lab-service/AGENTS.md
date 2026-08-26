@@ -78,7 +78,7 @@ chart_configs/input_parameters), расширенный ЖЦ заявки (recei
 | POST | `/requests` | editor |
 | GET | `/requests/{id}` | viewer (видимость) |
 | PATCH | `/requests/{id}` | editor+/владелец |
-| POST | `/requests/{id}/status` | editor (new/received/processing/completed) — legacy, авторизация не ужесточена (тоже используется sbe-requests) |
+| POST | `/requests/{id}/status` | владелец заявки ИЛИ `requireLabAccess` (lab_operator/lab_admin/app-admin+ этой лабы) — 2026-08-26, закрыт известный пробел (см. История), раньше проверялась только видимость |
 | POST | `/requests/{id}/kanban-move` | editor (2026-08-24, Kanban-доска sbe-lims: `{status?, assigned_to?}`, `canApplyKanbanMove` — admin+ свободно; lab_operator/lab_admin этой лабы — своя карточка между received/processing/completed, либо самозабор `new`→`received` СЕБЕ) |
 | GET | `/groups` | viewer (мои + где участник) |
 | POST | `/groups` | editor |
@@ -97,7 +97,11 @@ chart_configs/input_parameters), расширенный ЖЦ заявки (recei
 | GET/POST | `/inventors` | viewer / editor+ |
 | PATCH/DELETE | `/inventors/{id}` | editor+ |
 | GET/POST | `/equipment` | viewer / editor+ |
-| PATCH/DELETE | `/equipment/{id}` | editor+ |
+| PATCH/DELETE | `/equipment/{id}` | editor+ (2026-08-26 — расширено: эксплуатация/поверка/калибровка, см. История) |
+| POST | `/equipment/{id}/scan?kind=verification_cert\|verification_act` | editor+ (2026-08-26, multipart-файл → `*_file_key`/`*_file_url`) |
+| GET/POST | `/equipment/{id}/calibrations` | viewer / editor+ (2026-08-26, POST — multipart, пересчитывает `last_calibration`/`next_calibration`) |
+| GET/POST/DELETE | `/equipment/{id}/methods` | viewer / editor+ (2026-08-26, роль main/auxiliary на связи) |
+| GET/POST/DELETE | `/equipment/{id}/documents` | viewer / editor+ (2026-08-26, документация — список файлов, `files.purpose='equipment_doc'`) |
 | GET | `/lab-members` | admin (без `?lab_id=`) / любой участник лабы (с `?lab_id=`, 2026-08-24) |
 | POST | `/lab-members` | admin, ИЛИ lab_admin ИМЕННО этой лабы (2026-08-24, `requireLabAdminOf` — любая роль сотрудника своей лабы, включая назначение другого lab_admin) |
 | DELETE | `/lab-members/{lab_id}/{email}` | admin, ИЛИ lab_admin ИМЕННО этой лабы (2026-08-24) |
@@ -357,6 +361,57 @@ docker compose exec lab wget -qO- http://localhost:3000/api/lab/health   # вн�
 ```
 
 ## История
+
+- **2026-08-26 — расширение «Оборудование» (эксплуатация/поверка/калибровка/
+  методы/документация) + фикс безопасности write-роли на смену статуса заявки.**
+  Спека: `docs/superpowers/specs/2026-08-26-sbe-lims-configurator-equipment-design.md`.
+  Задеплоено на VDS (`docker compose up -d --build lab`), health ok.
+  1. **Миграции**: `equipment` — 11 новых колонок (эксплуатация/поверка/калибровка,
+     `last_calibration`/`next_calibration` существовали с первой миграции ЛИМС
+     дормантными — теперь под управлением сервера); `method_equipment.role`
+     ('main'/'auxiliary' на КАЖДОЙ связи отдельно — `is_required`, другая
+     семантика, не тронута); новая `equipment_calibrations` (журнал: дата,
+     результат, файл, кто внёс); `files.equipment_id`/`files.purpose` —
+     переиспользование общей таблицы файлов для документации на оборудование
+     (`purpose='equipment_doc'`) без отдельной таблицы.
+  2. **`equipment_ext.go` (новый файл)**: `uploadEquipmentFileBytes` — тот же
+     паттерн дедупа/S3-put/`file-redirect`, что `uploadFileBytes` (`files.go`,
+     заявки), но владелец — equipment, не request (отдельная функция, не
+     обобщение существующей — минимальный риск для уже проверенного пути заявок).
+     `recomputeCalibrationDates` — `last_calibration = MAX(calibrated_at)`,
+     `next_calibration = last + calibration_interval_months` (NULL без заданного
+     интервала) — вызывается после КАЖДОЙ новой записи журнала, единственное
+     место, где эти два поля пишутся.
+  3. **Реальный баг, найденный на живом E2E (не юнит-тестами)**: `PATCH
+     /equipment/{id}` падал с голой `{"error":"db error"}` на ЛЮБОМ запросе —
+     `handleUpdateEquipment` пропустил `req.VerificationCertNumber` в списке
+     аргументов `s.pool.Exec` (16 плейсхолдеров `$1..$16` в SQL, но передано
+     только 15 значений — pgx отклонял весь вызов). Найдено сразу первым же
+     живым тестом (`PATCH` с `calibration_interval_months`), исправлено,
+     передеплоено, весь сценарий (интервал → запись журнала → пересчёт дат →
+     сертификат/акт с номером-датой → скан → документация → отвязка метода)
+     повторно проверен end-to-end — теперь чисто.
+  4. **Фикс безопасности — `POST /requests/{id}/status`** (известный
+     задокументированный пробел, был в этом файле с 2026-08-19): проверялась
+     только видимость заявки (`requestVisible`), не право записи — участник
+     группы без роли lab_operator/lab_admin/владельца теоретически мог сменить
+     статус ЛЮБОЙ видимой ему заявки. Заменено на `existing.OwnerEmail == email
+     ИЛИ requireLabAccess` — та же функция, что уже гейтит ввод результатов/
+     расчёт этой же заявки (её собственный комментарий явно называл "статус" в
+     списке защищаемых действий — только этот эндпоинт её не вызывал).
+     **E2E на реальной заявке 1378**: неизвестный email → 403 (было бы 200 до
+     фикса, заявка видна как completed); временный `lab_operator` лабы 1 → 200;
+     статус возвращён в `completed` после проверки. Побочный эффект теста —
+     `completed_at` заявки 1378 обновился на момент теста (было
+     completed→processing→completed) — не восстанавливалось точное историческое
+     значение (не было сохранено до теста), тестовые `lab_members`/оборудование
+     удалены.
+  5. Тесты: `TestParseOptionalDate` (различает "поле не передано" от "передано
+     пустой строкой — очистить колонку"). `go build`/`vet`/`test` — чисто.
+     Юнит-тестов на сами HTTP-хендлеры оборудования/статуса нет (в проекте нет
+     инфраструктуры для мока БД — см. другие записи) — проверено живым E2E,
+     воспроизводящим находку п.3 выше (тот класс проверки, который и должен был
+     поймать баг раньше юнит-теста).
 
 - **2026-08-26 — учётка почты email-приёма (`LAB_MAIL_*`) теперь настраивается
   из плагина sbe-lims (администратор), не только правкой `.env` на сервере.**

@@ -133,3 +133,27 @@ func TestDeriveFormulasFromAttributesEmpty(t *testing.T) {
 		t.Errorf("got %s, want []", out)
 	}
 }
+
+// parseOptionalDate (2026-08-26, PATCH-поля дат оборудования) — три исхода должны
+// различаться: поле не пришло в запросе (nil, колонку не трогаем), пришло пустой
+// строкой (present=true, value=nil — явно очистить колонку), пришло валидной датой.
+func TestParseOptionalDate(t *testing.T) {
+	notProvided := func() *string { return nil }
+	empty := ""
+	valid := "2026-08-26"
+	invalid := "26-08-2026"
+
+	if v, present, ok := parseOptionalDate(notProvided()); present || !ok || v != nil {
+		t.Errorf("nil: got value=%v present=%v ok=%v, want nil/false/true", v, present, ok)
+	}
+	if v, present, ok := parseOptionalDate(&empty); !present || !ok || v != nil {
+		t.Errorf("empty: got value=%v present=%v ok=%v, want nil/true/true", v, present, ok)
+	}
+	v, present, ok := parseOptionalDate(&valid)
+	if !present || !ok || v == nil || v.Format("2006-01-02") != valid {
+		t.Errorf("valid: got value=%v present=%v ok=%v, want 2026-08-26/true/true", v, present, ok)
+	}
+	if _, _, ok := parseOptionalDate(&invalid); ok {
+		t.Error("invalid date must return ok=false")
+	}
+}

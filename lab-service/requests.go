@@ -652,13 +652,24 @@ func (s *Server) handleSetRequestStatus(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "request not found"})
 		return
 	}
-	visible, err := s.requestVisible(r.Context(), existing, email)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
-		return
+	// Write-право (2026-08-26, ревью безопасности — известный документированный пробел):
+	// раньше проверялась только ВИДИМОСТЬ (requestVisible) — участник группы без роли
+	// lab_operator/lab_admin/владельца мог сменить статус ЛЮБОЙ видимой ему заявки.
+	// requireLabAccess — та же проверка, что уже используется для ввода результатов/
+	// расчёта этой же заявки (её собственный комментарий явно упоминает "статус" в
+	// списке действий, которые она защищает — этот эндпоинт единственный, что её не
+	// вызывал). Владелец заявки сохраняет право менять статус своей заявки — сервис
+	// общий с sbe-requests, где именно владелец инициирует переходы.
+	canChangeStatus := existing.OwnerEmail == email
+	if !canChangeStatus {
+		canChangeStatus, err = s.requireLabAccess(r.Context(), email, id)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
+			return
+		}
 	}
-	if !visible {
-		writeJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden"})
+	if !canChangeStatus {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden: not owner or lab staff"})
 		return
 	}
 	_, err = s.pool.Exec(r.Context(), `

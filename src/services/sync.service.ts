@@ -4,6 +4,9 @@ import { errorMessage } from '../../../sbe-core/src/utils/errors';
 import type {
   AggregatedResult,
   Equipment,
+  EquipmentCalibration,
+  EquipmentDocument,
+  EquipmentMethodLink,
   Inventor,
   Lab,
   LabGroup,
@@ -329,13 +332,172 @@ export class LimsSyncService {
 
   async updateEquipment(
     id: number,
-    data: Partial<{ code: string; name: string; location: string; responsible: string }>,
+    data: Partial<{
+      code: string; name: string; location: string; responsible: string; status: string;
+      commissioned_at: string; service_life: string;
+      verification_cert_number: string; verification_cert_date: string;
+      verification_act_number: string; verification_act_date: string;
+      calibration_interval_months: number;
+    }>,
   ): Promise<void> {
     await this.patchEntity(`/api/lab/equipment/${id}`, data);
   }
 
   async deleteEquipment(id: number): Promise<void> {
     await this.deleteEntity(`/api/lab/equipment/${id}`);
+  }
+
+  /** Скан сертификата/акта поверки — обновляет соответствующую пару file_key/file_url. */
+  async uploadEquipmentScan(id: number, kind: 'verification_cert' | 'verification_act', data: ArrayBuffer, fileName: string): Promise<void> {
+    const token = await this.getToken();
+    const boundary = this.multipartBoundary();
+    const body = this.buildMultipart(boundary, {}, { field: 'file', data, fileName });
+    const res = await this.request({
+      url: `${this.baseUrl}/api/lab/equipment/${id}/scan?kind=${kind}`,
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': `multipart/form-data; boundary=${boundary}` },
+      body,
+    }, 120000);
+    this.assertOk(res);
+  }
+
+  async listEquipmentCalibrations(id: number): Promise<EquipmentCalibration[]> {
+    const token = await this.getToken();
+    const res = await this.request({
+      url: `${this.baseUrl}/api/lab/equipment/${id}/calibrations`,
+      method: 'GET',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    this.assertOk(res);
+    try {
+      const data = JSON.parse(res.text) as { calibrations?: EquipmentCalibration[] };
+      return Array.isArray(data.calibrations) ? data.calibrations : [];
+    } catch (e: unknown) {
+      console.warn('ЛИМС: не JSON в ответе equipment/calibrations:', errorMessage(e));
+      return [];
+    }
+  }
+
+  /** Новая запись журнала калибровок — сервер сам пересчитывает last_calibration/
+   * next_calibration оборудования. Файл необязателен. */
+  async createEquipmentCalibration(
+    id: number, calibratedAt: string, result: string, file?: { data: ArrayBuffer; fileName: string },
+  ): Promise<void> {
+    const token = await this.getToken();
+    const boundary = this.multipartBoundary();
+    const body = this.buildMultipart(
+      boundary,
+      { calibrated_at: calibratedAt, result },
+      file ? { field: 'file', data: file.data, fileName: file.fileName } : undefined,
+    );
+    const res = await this.request({
+      url: `${this.baseUrl}/api/lab/equipment/${id}/calibrations`,
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': `multipart/form-data; boundary=${boundary}` },
+      body,
+    }, 120000);
+    this.assertOk(res);
+  }
+
+  async listEquipmentMethods(id: number): Promise<EquipmentMethodLink[]> {
+    const token = await this.getToken();
+    const res = await this.request({
+      url: `${this.baseUrl}/api/lab/equipment/${id}/methods`,
+      method: 'GET',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    this.assertOk(res);
+    try {
+      const data = JSON.parse(res.text) as { methods?: EquipmentMethodLink[] };
+      return Array.isArray(data.methods) ? data.methods : [];
+    } catch (e: unknown) {
+      console.warn('ЛИМС: не JSON в ответе equipment/methods:', errorMessage(e));
+      return [];
+    }
+  }
+
+  async setEquipmentMethod(id: number, methodId: number, role: 'main' | 'auxiliary'): Promise<void> {
+    const token = await this.getToken();
+    const res = await this.request({
+      url: `${this.baseUrl}/api/lab/equipment/${id}/methods`,
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ method_id: methodId, role }),
+    });
+    this.assertOk(res);
+  }
+
+  async deleteEquipmentMethod(id: number, methodId: number): Promise<void> {
+    await this.deleteEntity(`/api/lab/equipment/${id}/methods/${methodId}`);
+  }
+
+  async listEquipmentDocuments(id: number): Promise<EquipmentDocument[]> {
+    const token = await this.getToken();
+    const res = await this.request({
+      url: `${this.baseUrl}/api/lab/equipment/${id}/documents`,
+      method: 'GET',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    this.assertOk(res);
+    try {
+      const data = JSON.parse(res.text) as { documents?: EquipmentDocument[] };
+      return Array.isArray(data.documents) ? data.documents : [];
+    } catch (e: unknown) {
+      console.warn('ЛИМС: не JSON в ответе equipment/documents:', errorMessage(e));
+      return [];
+    }
+  }
+
+  async uploadEquipmentDocument(id: number, data: ArrayBuffer, fileName: string): Promise<void> {
+    const token = await this.getToken();
+    const boundary = this.multipartBoundary();
+    const body = this.buildMultipart(boundary, {}, { field: 'file', data, fileName });
+    const res = await this.request({
+      url: `${this.baseUrl}/api/lab/equipment/${id}/documents`,
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': `multipart/form-data; boundary=${boundary}` },
+      body,
+    }, 120000);
+    this.assertOk(res);
+  }
+
+  async deleteEquipmentDocument(id: number, fileId: number): Promise<void> {
+    await this.deleteEntity(`/api/lab/equipment/${id}/documents/${fileId}`);
+  }
+
+  private multipartBoundary(): string {
+    return '----sbe-lims-' + Date.now().toString(36);
+  }
+
+  /** Собирает multipart/form-data: текстовые поля + опциональный файл. */
+  private buildMultipart(
+    boundary: string,
+    fields: Record<string, string>,
+    file?: { field: string; data: ArrayBuffer; fileName: string },
+  ): ArrayBuffer {
+    const enc = new TextEncoder();
+    const parts: Uint8Array[] = [];
+    for (const [name, value] of Object.entries(fields)) {
+      parts.push(enc.encode(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`));
+    }
+    if (file) {
+      parts.push(enc.encode(
+        `--${boundary}\r\nContent-Disposition: form-data; name="${file.field}"; filename="${file.fileName}"\r\nContent-Type: application/octet-stream\r\n\r\n`,
+      ));
+      parts.push(new Uint8Array(file.data));
+      parts.push(enc.encode('\r\n'));
+    }
+    parts.push(enc.encode(`--${boundary}--\r\n`));
+
+    let total = 0;
+    for (const p of parts) total += p.byteLength;
+    const out = new Uint8Array(total);
+    let off = 0;
+    for (const p of parts) {
+      out.set(p, off);
+      off += p.byteLength;
+    }
+    return out.buffer;
   }
 
   /** Без labId — полный список (только для руководителя лабы, «Настройки»). С
