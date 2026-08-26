@@ -346,3 +346,99 @@ func TestEvalAggregatedFormulasSkipsFailingFormulaContinuesRest(t *testing.T) {
 		t.Errorf("agg_burning_drops: got %v, want отсутствие в результате (формула нечисловая, должна быть пропущена)", result["agg_burning_drops"])
 	}
 }
+
+// Реальный инцидент (2026-08-26): заявка 287/2026, метод ГГ — combustibility_group
+// = min_grade(...) над 5 classification-выходами не считалась НИКОГДА, ни для одной
+// заявки метода, т.к. evalAggregatedFormulas (первый проход) вызывается ДО
+// applyAggregatedClassification — классификация ещё не записала свои значения, DSL
+// падает с "параметр не найден". retryPendingAggregatedFormulas — второй проход
+// ПОСЛЕ классификации, только для целей, которых нет в result.
+func TestRetryPendingAggregatedFormulasResolvesClassificationDependentFormula(t *testing.T) {
+	formulas := []map[string]any{
+		{"apply_level": "aggregated", "expression": "min_grade(smoke_group, drops_group)", "target_parameter": "combustibility_group"},
+	}
+	env := &FormulaEnv{Params: map[string]any{}, RankOrder: []string{"Г1", "Г2", "Г3", "Г4"}}
+	result := evalAggregatedFormulas(1378, 1, formulas, env)
+	if _, ok := result["combustibility_group"]; ok {
+		t.Fatalf("combustibility_group не должна посчитаться ДО классификации: %v", result)
+	}
+
+	// classification дописала свои значения прямо в result (как это реально
+	// делает applyAggregatedClassification через тот же map).
+	result["smoke_group"] = "Г4"
+	result["drops_group"] = "Г1"
+
+	retryPendingAggregatedFormulas(1378, 1, formulas, env, result)
+	if got := result["combustibility_group"]; got != "Г4" {
+		t.Errorf("combustibility_group: got %v, want Г4 (второй проход должен увидеть значения классификации)", got)
+	}
+}
+
+// Уже успевшую формулу второй проход не должен трогать заново (не только "не
+// портит" — pending вообще её не включает, evalAggregatedFormulas по ней не зовётся).
+func TestRetryPendingAggregatedFormulasSkipsAlreadyResolvedTargets(t *testing.T) {
+	formulas := []map[string]any{
+		{"apply_level": "aggregated", "expression": "avg(x)", "target_parameter": "already_done"},
+	}
+	env := &FormulaEnv{Params: map[string]any{}}
+	result := map[string]any{"already_done": 42.0}
+	retryPendingAggregatedFormulas(1378, 1, formulas, env, result)
+	if result["already_done"] != 42.0 {
+		t.Errorf("already_done изменился: %v, want 42.0 (не пересчитывать успевшие формулы)", result["already_done"])
+	}
+}
+
+// Реальный трёхуровневый сценарий, найденный на живом пересчёте заявки 287/2026
+// (метод ГГ, target_group_compliance) уже ПОСЛЕ фикса retryPendingAggregatedFormulas:
+// classification(группы) -> formula(combustibility_group = min_grade(групп)) ->
+// classification(target_group_compliance, сравнение combustibility_group с целью).
+// На первом проходе классификации subject target_group_compliance не находит
+// combustibility_group (тот появляется только в retryPendingAggregatedFormulas,
+// который выполняется ПОСЛЕ классификации) — воспроизводит именно ЭТУ ступень и
+// подтверждает, что второй проход applyRuleToSubjects после retry её закрывает
+// (то, что applyAggregatedFormulas теперь и делает).
+func TestThreeLevelDependencyChainNeedsSecondClassificationPass(t *testing.T) {
+	formulas := []map[string]any{
+		{"apply_level": "aggregated", "expression": "min_grade(group_a, group_b)", "target_parameter": "combustibility_group"},
+	}
+	groupRule := map[string]any{
+		"branches": []any{elseBranch("Г4")},
+		"subjects": []any{subject("raw_a", "group_a"), subject("raw_b", "group_b")},
+	}
+	complianceRule := map[string]any{
+		"branches": []any{
+			branch("Соответствует", clause(">=", targetOp())),
+			branch("Не соответствует", clause("<", targetOp())),
+			elseBranch("Не оценивается"),
+		},
+		"subjects": []any{subject("combustibility_group", "target_group_compliance")},
+	}
+	rankOrder := []string{"Г1", "Г2", "Г3", "Г4"}
+	loadTarget := func() (any, bool) { return "Г2", true }
+
+	env := &FormulaEnv{Params: map[string]any{}, RankOrder: rankOrder}
+	// raw_a/raw_b — как будто уже посчитанные формулы ПЕРВОГО прохода (напр.
+	// avg_temp_of_smog у реального метода ГГ) — то, что реально приходит в
+	// classification как result уже ДО вызова applyAggregatedClassification.
+	result := map[string]any{"raw_a": 1.0, "raw_b": 1.0}
+	ctx := classifyCtx{values: result, rankOrder: rankOrder, loadTarget: loadTarget}
+
+	// первый проход: группы считаются, compliance — ещё нет (combustibility_group
+	// на этот момент не существует).
+	applyRuleToSubjects(ctx, groupRule, nil, false)
+	applyRuleToSubjects(ctx, complianceRule, nil, false)
+	if _, ok := result["target_group_compliance"]; ok {
+		t.Fatalf("target_group_compliance не должен посчитаться до combustibility_group: %v", result)
+	}
+
+	retryPendingAggregatedFormulas(1378, 1, formulas, env, result)
+	if result["combustibility_group"] != "Г4" {
+		t.Fatalf("combustibility_group: got %v, want Г4", result["combustibility_group"])
+	}
+
+	// второй проход классификации — теперь compliance должен найти вход.
+	applyRuleToSubjects(ctx, complianceRule, nil, false)
+	if got := result["target_group_compliance"]; got != "Не соответствует" {
+		t.Errorf("target_group_compliance: got %v, want 'Не соответствует' (Г4 хуже цели Г2)", got)
+	}
+}

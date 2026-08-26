@@ -476,6 +476,41 @@ func evalAggregatedFormulas(requestID, methodID int64, formulas []map[string]any
 	return result
 }
 
+// retryPendingAggregatedFormulas — второй проход формул уровня "aggregated" (2026-08-26,
+// реальный инцидент — заявка 287/2026, метод ГГ: combustibility_group =
+// min_grade(smoke_temp_combustibility_group, damage_degree_combustibility_group, ...)
+// ссылается на 5 атрибутов, которые сама классификация ещё не посчитала на момент
+// ПЕРВОГО прохода формул (evalAggregatedFormulas вызывается ДО applyAggregatedClassification)
+// — формула детерминированно падает с "параметр не найден" и цель остаётся
+// неопределённой НАВСЕГДА, для любой заявки этого метода, не только 287/2026).
+// Здесь пересчитываются ТОЛЬКО формулы, чья цель ещё не в result (успевшие уже не
+// трогаем) — env.Params синхронизируется с уже готовым result (включая то, что
+// дописала классификация), затем evalAggregatedFormulas зовётся повторно с этим env.
+func retryPendingAggregatedFormulas(requestID, methodID int64, formulas []map[string]any, env *FormulaEnv, result map[string]any) {
+	pending := make([]map[string]any, 0)
+	for _, f := range formulas {
+		if lvl, _ := f["apply_level"].(string); lvl != "aggregated" {
+			continue
+		}
+		target, _ := f["target_parameter"].(string)
+		if target == "" {
+			continue
+		}
+		if _, ok := result[target]; !ok {
+			pending = append(pending, f)
+		}
+	}
+	if len(pending) == 0 {
+		return
+	}
+	for k, v := range result {
+		env.Params[k] = v
+	}
+	for k, v := range evalAggregatedFormulas(requestID, methodID, pending, env) {
+		result[k] = v
+	}
+}
+
 // applyAggregatedFormulas выполняет формулы уровня "aggregated" (например, итоговая
 // оценка по всем сериям заявки+метода) И классификацию, чьи subjects читают/пишут
 // aggregated-атрибуты (applyAggregatedClassification, 2026-08-23 — см. там; нужно
@@ -531,6 +566,20 @@ ruleLoop:
 	env := buildFormulaEnv(seriesValues, map[string]any{}, rankOrder)
 	result := evalAggregatedFormulas(requestID, methodID, cfg.Formulas, env)
 	if hasAggregatedClassification {
+		if err := s.applyAggregatedClassification(ctx, requestID, methodID, cfg, result); err != nil {
+			return err
+		}
+		retryPendingAggregatedFormulas(requestID, methodID, cfg.Formulas, env, result)
+		// Второй проход классификации (2026-08-26, найдено на живом пересчёте
+		// заявки 287/2026): бывает трёхуровневая цепочка — classification(5 групп)
+		// -> formula(combustibility_group, min_grade по этим группам) ->
+		// classification(target_group_compliance, сравнение combustibility_group
+		// с целевым показателем). На ПЕРВОМ проходе classification subject
+		// target_group_compliance не находит combustibility_group (тот ещё не
+		// досчитан — см. retryPendingAggregatedFormulas выше) и молча
+		// пропускается. Повторный вызов идемпотентен для уже решённых subjects
+		// (тот же вход -> тот же grade) и подхватывает то, что появилось после
+		// retry.
 		if err := s.applyAggregatedClassification(ctx, requestID, methodID, cfg, result); err != nil {
 			return err
 		}

@@ -341,6 +341,12 @@ COALESCE($6, description), ...` (не перетирает, если поле н
 Email-ingestion (см. раздел выше, все опциональны — без них воркер не стартует):
 `LAB_MAIL_ENABLED`, `LAB_MAIL_IMAP_SERVER`, `LAB_MAIL_LOGIN`, `LAB_MAIL_PASSWORD`,
 `LAB_MAIL_POLL_INTERVAL_SECONDS`, `LAB_MAIL_METHOD_MAP`.
+**2026-08-26**: эти 6 переменных теперь меняются через настройки sbe-lims (раздел
+«Приём результатов по email», admin) — не только ручной правкой `.env` на сервере.
+Механизм общий для всего проекта (`sbe-core/auth-service`, `env_admin.go` +
+`app_env_pending`) — см. `sbe-core/auth-service/AGENTS.md`. Загружаются процессом
+только при старте (`loadEmailIngestConfig`, вызывается один раз) — после смены
+через UI сервис автоматически пересоздаётся хост-скриптом, ручной рестарт не нужен.
 
 ## Сборка / проверка
 
@@ -351,6 +357,67 @@ docker compose exec lab wget -qO- http://localhost:3000/api/lab/health   # вн�
 ```
 
 ## История
+
+- **2026-08-26 — учётка почты email-приёма (`LAB_MAIL_*`) теперь настраивается
+  из плагина sbe-lims (администратор), не только правкой `.env` на сервере.**
+  Часть общей задачи по закрытию ревью безопасности (`plugins/secrev.md`, план
+  `docs/superpowers/plans/2026-08-25-sbe-secrets-cup-plan.md`, раздел A1 —
+  `LAB_MAIL_PASSWORD` был отмечен как отложенный, «ротация вручную»). Реализовано
+  расширением общего механизма ЦУП (см. `sbe-core/auth-service/AGENTS.md`,
+  запись 2026-08-26): новый `POST/GET /auth/apps/env` (admin) с белым списком
+  разрешённых ключей на приложение (`env_admin.go`, для `lab` — все 6
+  `LAB_MAIL_*`), очередь `app_env_pending`, применяет тот же хост-скрипт
+  `secret-applier.sh`, что и `service_secret` — пишет `.env`, пересоздаёт
+  контейнер `lab`. lab-service сам не менялся (конфиг как читался при старте
+  через `os.Getenv`, так и читается — обновление применяется рестартом
+  контейнера, не hot-reload). UI — `sbe-lims/src/ui/settings-tab.ts`, раздел
+  «Приём результатов по email» (только admin/superadmin): переключатель
+  включения, IMAP-сервер, логин, пароль (никогда не подтягивается обратно с
+  сервера — только запись; пустое поле = «не менять»), интервал опроса, карта
+  методов (JSON). Проверено end-to-end на сервере (тестовая заявка на смену
+  `LAB_MAIL_POLL_INTERVAL_SECONDS` — значение появилось в `.env`, контейнер
+  `lab` пересоздан, health ok, строка в `app_env_pending` помечена `applied`
+  с обнулённым `value`).
+
+- **2026-08-26 — фикс: `combustibility_group`/`target_group_compliance` не
+  считались НИ ДЛЯ ОДНОЙ заявки метода ГГ (найдено на заявке 287/2026, id=1378).**
+  Реальная находка при разборе жалобы «не считается target_group_compliance»:
+  такого атрибута/правила у метода ГГ вообще не было (существовал только у
+  ГВ) — но заодно вскрылся код-баг у УЖЕ существующей формулы
+  `combustibility_group = min_grade(smoke_temp_combustibility_group,
+  damage_degree_combustibility_group, agg_damage_degree_combustibility_group,
+  combustion_time_group, burning_drops_group)` — все 5 аргументов являются
+  ВЫХОДАМИ классификации, а `applyAggregatedFormulas` (`results.go`) считал
+  формулы уровня `aggregated` (`evalAggregatedFormulas`) ДО классификации
+  (`applyAggregatedClassification`) в рамках одного прохода — на момент
+  вычисления `combustibility_group` ни один из 5 аргументов ещё не существовал
+  в среде, DSL детерминированно падал с «параметр не найден», ошибка тихо
+  логировалась и пропускалась (v0.2.8 fix) — цель навсегда оставалась
+  неопределённой для ЛЮБОЙ заявки метода ГГ, не только 287/2026.
+  - Фикс — `retryPendingAggregatedFormulas` (`results.go`): после
+    `applyAggregatedClassification` формулы, чья цель ещё не в `result`,
+    пересчитываются повторно с уже готовыми classification-значениями в
+    `env.Params`. На живом пересчёте нашлась ЕЩЁ одна ступень зависимости —
+    `target_group_compliance` (добавлен как раз в этой сессии) сам зависит от
+    `combustibility_group`, который на первом проходе классификации ещё не
+    существовал — понадобился ВТОРОЙ проход `applyAggregatedClassification`
+    после retry формул (трёхуровневая цепочка classification→formula→
+    classification). Оба прохода идемпотентны для уже решённых subjects.
+  - `target_group_compliance` для метода ГГ добавлен вручную (append-only
+    `UPDATE methods` — новый атрибут `level:aggregated, fill_method:
+    classification` + правило классификации `combustibility_group` →
+    `target_group_compliance`, сравнение с `kind:target_indicator` по тому же
+    паттерну, что уже был спроектирован для ГВ, см. sbe-lims `AGENTS.md`,
+    «Правило: системные атрибуты» и запись 2026-08-23 ниже).
+  - Тесты: `TestRetryPendingAggregatedFormulasResolvesClassificationDependentFormula`,
+    `TestRetryPendingAggregatedFormulasSkipsAlreadyResolvedTargets`,
+    `TestThreeLevelDependencyChainNeedsSecondClassificationPass` (результат:
+    `combustibility_group`) — все три через `applyRuleToSubjects`/
+    `retryPendingAggregatedFormulas` напрямую, без БД. `go build`/`vet`/`test`
+    — чисто. Задеплоено на VDS, health ok. Проверено на живых данных заявки
+    1378: после пересчёта `aggregated_results` содержит и
+    `combustibility_group: "Г4"`, и `target_group_compliance: "Не
+    соответствует"` (целевая группа объекта — Г2, Г4 хуже — верно).
 
 - **2026-08-24 — lab_admin: реальный делегированный админ своей лабы (не синоним
   lab_operator).** Найдено пользователем: у shoya.vs@tn.ru роль `lab_admin`
