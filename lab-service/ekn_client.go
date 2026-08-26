@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -15,13 +16,6 @@ import (
 
 const missingNamePlaceholder = "Без названия"
 
-// eknLookupEmail — служебная учётная запись для вызовов lab-service → ekn-service
-// (2026-08-22, по согласованию с пользователем): переиспользуем уже
-// существующего владельца приложения ekn (admin в ekn_permissions), а не
-// заводим отдельную служебную запись — только для чтения карточки товара по
-// номеру ЕКН, ничего не меняет на стороне ekn-service.
-const eknLookupEmail = "polishchuk@tn.ru"
-
 // eknProduct — только поля, нужные для имени продукта (полная карточка шире,
 // см. sbe-ekn/src/types/ekn.ts EknProduct).
 type eknProduct struct {
@@ -33,6 +27,47 @@ func eknServiceURL() string {
 		return strings.TrimRight(v, "/")
 	}
 	return "http://ekn:3000"
+}
+
+// serviceToken — короткий служебный токен от auth-service для вызова ЦЕЛЕВОГО
+// приложения (Блок D, ревью 1.2). Вместо прежнего mintServiceJWT (подпись общим
+// JWT_SECRET) токен выпускает auth-service: он подписан КЛЮЧОМ ЦЕЛИ, вызывающий
+// аутентифицируется своим LAB_SERVICE_SECRET. Эндпоинт /internal/service-token
+// доступен только в docker-сети (Caddy его не проксирует).
+func serviceToken(ctx context.Context, targetAppID string) (string, error) {
+	base := strings.TrimRight(os.Getenv("AUTH_SERVICE_URL"), "/")
+	if base == "" {
+		base = "http://auth-service:3000"
+	}
+	body, err := json.Marshal(map[string]string{"target_app_id": targetAppID})
+	if err != nil {
+		return "", err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/internal/service-token", bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Service-Secret", os.Getenv("LAB_SERVICE_SECRET"))
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("service-token status %d", resp.StatusCode)
+	}
+	var out struct {
+		JWT string `json:"jwt"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", err
+	}
+	if out.JWT == "" {
+		return "", fmt.Errorf("service-token: empty jwt")
+	}
+	return out.JWT, nil
 }
 
 // lookupEknProductName — имя продукта из справочника ЕКН (ekn-service) по
@@ -47,9 +82,9 @@ func lookupEknProductName(ctx context.Context, ekn string) string {
 	if ekn == "" {
 		return ""
 	}
-	token, err := mintServiceJWT("ekn", eknLookupEmail, 2*time.Minute)
+	token, err := serviceToken(ctx, "ekn")
 	if err != nil {
-		log.Printf("ekn lookup: mint token: %v", err)
+		log.Printf("ekn lookup: service token: %v", err)
 		return ""
 	}
 	endpoint := fmt.Sprintf("%s/api/ekn/product/%s", eknServiceURL(), url.PathEscape(ekn))
