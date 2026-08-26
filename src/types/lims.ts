@@ -400,6 +400,9 @@ export interface LabMethod {
   input_parameters: MethodAttribute[];
   presentation: MethodPresentation;
   operator_form: MethodOperatorForm;
+  /** «Параметры калибровки» (2026-08-26) — см. CalibrationAttribute. */
+  calibration_attributes: CalibrationAttribute[];
+  calibration_operator_form: MethodOperatorForm;
   created_at: string;
   updated_at: string;
 }
@@ -473,11 +476,20 @@ export interface Equipment {
   updated_at: string;
 }
 
-/** Запись журнала калибровок оборудования. */
+/** Запись журнала калибровок оборудования. method_id — чьи calibration_attributes
+ * применялись (оборудование может быть «Основное» сразу для нескольких методов).
+ * amb_temp/amb_pres/amb_moist — универсальные системные поля калибровки (см.
+ * AGENTS.md, «Правило: системные атрибуты» — тот же принцип, что у requests.amb_*
+ * обычных результатов). values — значения calibration_attributes ВЫБРАННОГО метода. */
 export interface EquipmentCalibration {
   id: number;
   equipment_id: number;
+  method_id: number;
   calibrated_at: string;
+  amb_temp: string;
+  amb_pres: string;
+  amb_moist: string;
+  values: Record<string, unknown>;
   result: string;
   file_url: string;
   created_by: string;
@@ -489,6 +501,26 @@ export interface EquipmentCalibration {
 export interface EquipmentMethodLink {
   method_id: number;
   role: 'main' | 'auxiliary';
+}
+
+/** Атрибут «Параметры калибровки» метода (конфигуратор, 2026-08-26) — заполняется
+ * испытателем при калибровке; проще MethodAttribute — без fill_method/level/
+ * formula/aggregation (значение калибровки всегда вводится вручную один раз за
+ * запись журнала, расчётов/агрегации нет). */
+export interface CalibrationAttribute {
+  id: string;
+  name: string;
+  data_type: AttributeDataType;
+}
+
+/** Привязка оборудование↔оборудование (2026-08-26) — физическое прикрепление
+ * вспомогательного прибора к основному, независимо от EquipmentMethodLink (тот
+ * решает видимость блока калибровки для метода; это — только группировку/
+ * отображение в общем списке). many-to-many — один вспомогательный прибор может
+ * быть привязан к нескольким основным. */
+export interface EquipmentLink {
+  main_equipment_id: number;
+  auxiliary_equipment_id: number;
 }
 
 /** Файл документации на оборудование (не сертификат/акт поверки — те отдельными
@@ -517,6 +549,9 @@ export interface MethodConfig {
   input_parameters: MethodAttribute[];
   presentation: MethodPresentation;
   operator_form: MethodOperatorForm;
+  /** «Параметры калибровки» (2026-08-26) — см. CalibrationAttribute. */
+  calibration_attributes: CalibrationAttribute[];
+  calibration_operator_form: MethodOperatorForm;
 }
 
 /** Протокол / выписка / краткий вид заявки — HTML+DOCX, вид задаёт kind

@@ -6,11 +6,13 @@ import type {
   AttributeDataType,
   AttributeFillMethod,
   AttributeLevel,
+  CalibrationAttribute,
   ChartConfig,
   ClassificationRule,
   ComparisonOperator,
   DocumentBlock,
   Equipment,
+  EquipmentLink,
   EquipmentMethodLink,
   Inventor,
   Lab,
@@ -1631,6 +1633,53 @@ export class LimsView extends ItemView {
       redrawOperatorForm();
     });
 
+    // ---- Блок 4: параметры калибровки (2026-08-26) — атрибуты, которые
+    // испытатель заполняет ПРИ калибровке оборудования (см. equipment_ext.go,
+    // handleCreateEquipmentCalibration) + форма для испытателя (та же схема, что
+    // у обычных результатов, но свой список атрибутов и свои системные поля:
+    // Дата калибровки/Температура воздуха в лаборатории/Атмосферное давление/
+    // Влажность воздуха — универсальны для ЛЮБОГО метода, не заводятся здесь). ----
+    const calibrationAttrs: CalibrationAttribute[] = cfg.calibration_attributes.map(a => ({ ...a }));
+    const calibrationBody = this.renderCollapsibleSection(form, 'Параметры калибровки');
+    calibrationBody.createDiv({ cls: 'tn-lims-meta' }).setText(
+      'Атрибуты и форма для испытателя, применяемые при калибровке оборудования, для которого этот метод — «Основной» (см. вкладку «Оборудование»).',
+    );
+    calibrationBody.createEl('h4', { text: 'Атрибуты калибровки' });
+    const calibrationAttrsListEl = calibrationBody.createDiv();
+    let redrawCalibrationAttrs: () => void = () => {};
+    const onCalibrationAttrsChanged = (): void => { redrawCalibrationAttrs(); redrawCalibrationOperatorForm(); };
+    redrawCalibrationAttrs = () => {
+      calibrationAttrsListEl.empty();
+      this.renderCalibrationAttributeRows(calibrationAttrsListEl, calibrationAttrs, onCalibrationAttrsChanged);
+    };
+    redrawCalibrationAttrs();
+    const addCalibrationAttrBtn = calibrationBody.createEl('button', { text: '➕ Добавить атрибут', cls: 'tn-btn tn-btn-ghost' });
+    addCalibrationAttrBtn.addEventListener('click', () => {
+      calibrationAttrs.push({ id: '', name: '', data_type: 'text' });
+      onCalibrationAttrsChanged();
+    });
+
+    const calibrationOperatorFormFields: OperatorFormField[] = cfg.calibration_operator_form.fields
+      .filter(f => calibrationAttrs.some(a => a.id === f.attribute_id))
+      .map(f => ({ ...f }));
+    calibrationBody.createEl('h4', { text: 'Форма для испытателя' });
+    const calibrationOperatorFormListEl = calibrationBody.createDiv();
+    const calibrationOperatorFormPreviewEl = calibrationBody.createDiv();
+    let redrawCalibrationOperatorForm: () => void = () => {};
+    redrawCalibrationOperatorForm = () => {
+      calibrationOperatorFormListEl.empty();
+      this.renderCalibrationOperatorFormRows(calibrationOperatorFormListEl, calibrationOperatorFormFields, calibrationAttrs, () => redrawCalibrationOperatorForm());
+      this.renderCalibrationOperatorFormPreview(calibrationOperatorFormPreviewEl, calibrationOperatorFormFields, calibrationAttrs);
+    };
+    redrawCalibrationOperatorForm();
+    const addCalibrationFieldBtn = calibrationBody.createEl('button', { text: '➕ Поле формы', cls: 'tn-btn tn-btn-ghost' });
+    addCalibrationFieldBtn.addEventListener('click', () => {
+      const free = calibrationAttrs.find(a => a.id && !calibrationOperatorFormFields.some(f => f.attribute_id === a.id));
+      if (!free) { new Notice('Все атрибуты калибровки уже добавлены в форму испытателя'); return; }
+      calibrationOperatorFormFields.push({ attribute_id: free.id, required: false });
+      redrawCalibrationOperatorForm();
+    });
+
     // buildPatch/performSave вынесены в переиспользуемые замыкания — их же
     // использует проверка несохранённых изменений при закрытии окна
     // (MethodConfigModal.close, 2026-08-23 — прямой запрос пользователя: не
@@ -1645,6 +1694,10 @@ export class LimsView extends ItemView {
         chart_configs: charts,
         presentation: { blocks },
         operator_form: { fields: operatorFormFields.filter(f => attrIds.has(f.attribute_id)) },
+        calibration_attributes: calibrationAttrs,
+        calibration_operator_form: {
+          fields: calibrationOperatorFormFields.filter(f => calibrationAttrs.some(a => a.id === f.attribute_id)),
+        },
         determinable_indicators: determinableIndicators.filter(Boolean),
       };
     };
@@ -1822,6 +1875,89 @@ export class LimsView extends ItemView {
       const input = row.createEl('input', { attr: { type: 'text', disabled: true }, cls: 'tn-lims-input' });
       input.placeholder = attr?.data_type === 'photo' ? '[фото]' : attr?.data_type || '';
       if (f.help_text) row.createSpan({ text: f.help_text, cls: 'tn-lims-meta' });
+    }
+  }
+
+  /** Универсальные системные поля калибровки (2026-08-26) — одни и те же для
+   * ЛЮБОГО метода, тот же принцип, что SYSTEM_PLACEHOLDERS у обычных результатов
+   * (см. AGENTS.md, «Правило: системные атрибуты»): не заводятся как
+   * CalibrationAttribute метода, заполняются испытателем всегда, автоматически
+   * показываются в форме. Дата калибровки — отдельное обязательное поле формы
+   * (не входит в этот список — оно не «системное дополнение», а сама суть записи). */
+  private static readonly CALIBRATION_SYSTEM_FIELDS = [
+    'Температура воздуха в лаборатории', 'Атмосферное давление', 'Влажность воздуха',
+  ];
+
+  /** Построчный редактор «Атрибуты калибровки» — проще renderAttributeRows: без
+   * fill_method/level/formula/aggregation/synonyms — значение калибровки всегда
+   * вводится вручную испытателем ровно один раз за запись журнала, ни расчётов,
+   * ни агрегации по сериям здесь нет. */
+  private renderCalibrationAttributeRows(
+    container: HTMLElement, attrs: CalibrationAttribute[], onChange: () => void,
+  ): void {
+    attrs.forEach((attr, idx) => {
+      const row = container.createDiv({ cls: 'tn-lims-method tn-lims-flex' });
+      const idInput = row.createEl('input', { attr: { type: 'text', placeholder: 'id (напр. deviation)' }, cls: 'tn-lims-input' });
+      idInput.value = attr.id;
+      idInput.addEventListener('change', () => { attr.id = idInput.value.trim(); onChange(); });
+      const nameInput = row.createEl('input', { attr: { type: 'text', placeholder: 'Название' }, cls: 'tn-lims-input' });
+      nameInput.value = attr.name;
+      nameInput.addEventListener('change', () => { attr.name = nameInput.value.trim(); onChange(); });
+      const typeSelect = row.createEl('select', { cls: 'tn-lims-select' });
+      const typeOptions: Array<[AttributeDataType, string]> = [
+        ['text', 'Текст'], ['int', 'Целое число'], ['float', 'Дробное число'], ['date', 'Дата'],
+      ];
+      for (const [val, label] of typeOptions) typeSelect.createEl('option', { attr: { value: val }, text: label });
+      typeSelect.value = attr.data_type;
+      typeSelect.addEventListener('change', () => { attr.data_type = typeSelect.value as AttributeDataType; onChange(); });
+      const delBtn = row.createEl('button', { text: '✖', cls: 'tn-btn tn-btn-ghost' });
+      delBtn.addEventListener('click', () => { attrs.splice(idx, 1); onChange(); });
+    });
+  }
+
+  /** «Форма для испытателя» калибровки — тот же паттерн, что renderOperatorFormRows/
+   * renderOperatorFormPreview у обычных результатов, но список атрибутов —
+   * CalibrationAttribute (проще MethodAttribute), и системная подсказка — про
+   * калибровочные универсальные поля, не про обычные (SYSTEM_PLACEHOLDERS). */
+  private renderCalibrationOperatorFormRows(
+    container: HTMLElement, fields: OperatorFormField[], attrs: CalibrationAttribute[], onChange: () => void,
+  ): void {
+    fields.forEach((f, idx) => {
+      const row = container.createDiv({ cls: 'tn-lims-method' });
+      const rowFlex = row.createDiv({ cls: 'tn-lims-flex' });
+      const attrSelect = rowFlex.createEl('select', { cls: 'tn-lims-select' });
+      for (const a of attrs) {
+        if (!a.id) continue;
+        attrSelect.createEl('option', { attr: { value: a.id }, text: a.name || a.id });
+      }
+      attrSelect.value = f.attribute_id;
+      attrSelect.addEventListener('change', () => { f.attribute_id = attrSelect.value; onChange(); });
+      const reqLabel = rowFlex.createEl('label', { cls: 'tn-lims-flex' });
+      const reqCb = reqLabel.createEl('input', { attr: { type: 'checkbox' } });
+      reqCb.checked = f.required;
+      reqLabel.createSpan({ text: 'обязательное' });
+      reqCb.addEventListener('change', () => { f.required = reqCb.checked; onChange(); });
+      const delBtn = rowFlex.createEl('button', { text: '✖', cls: 'tn-btn tn-btn-ghost' });
+      delBtn.addEventListener('click', () => { fields.splice(idx, 1); onChange(); });
+    });
+  }
+
+  private renderCalibrationOperatorFormPreview(
+    container: HTMLElement, fields: OperatorFormField[], attrs: CalibrationAttribute[],
+  ): void {
+    container.empty();
+    container.createDiv({ cls: 'tn-lims-meta' }).setText('Всегда в форме (заполняются при каждой калибровке, настраивать не нужно):');
+    container.createDiv({ cls: 'tn-lims-flex tn-lims-mb8' }).createSpan({
+      text: ['Дата калибровки', ...LimsView.CALIBRATION_SYSTEM_FIELDS].join(', ') + '.',
+    });
+    if (fields.length === 0) return;
+    container.createDiv({ cls: 'tn-lims-meta' }).setText('Предпросмотр — как увидит испытатель:');
+    for (const f of fields) {
+      const attr = attrs.find(a => a.id === f.attribute_id);
+      const row = container.createDiv({ cls: 'tn-lims-flex' });
+      row.createSpan({ text: (attr?.name || f.attribute_id) + (f.required ? ' *' : '') });
+      const input = row.createEl('input', { attr: { type: 'text', disabled: true }, cls: 'tn-lims-input' });
+      input.placeholder = attr?.data_type || '';
     }
   }
 
@@ -2785,7 +2921,10 @@ export class LimsView extends ItemView {
   private async renderEquipment(): Promise<void> {
     this.bodyEl.createDiv({ cls: 'tn-lims-meta', text: 'Загрузка…' });
     try {
-      const equipment = await this.plugin.syncService.listEquipment();
+      const [equipment, links] = await Promise.all([
+        this.plugin.syncService.listEquipment(),
+        this.plugin.syncService.listAllEquipmentLinks(),
+      ]);
       this.bodyEl.empty();
       if (this.canEditRefs) {
         this.renderEquipmentForm();
@@ -2794,8 +2933,14 @@ export class LimsView extends ItemView {
         this.bodyEl.createDiv({ cls: 'tn-lims-meta tn-lims-p24' }).setText('Оборудования пока нет.');
         return;
       }
+      // Оборудование, привязанное хотя бы к одному основному (equipment_links,
+      // 2026-08-26), не показывается отдельной карточкой верхнего уровня — только
+      // внутри карточки(-ек) своего основного прибора, как документы (см.
+      // renderEquipmentRelated).
+      const auxiliaryIds = new Set(links.map(l => l.auxiliary_equipment_id));
       for (const eq of equipment) {
-        this.renderEquipmentCard(this.bodyEl, eq);
+        if (auxiliaryIds.has(eq.id)) continue;
+        this.renderEquipmentCard(this.bodyEl, eq, equipment, links);
       }
     } catch (e: unknown) {
       this.bodyEl.empty();
@@ -2805,9 +2950,14 @@ export class LimsView extends ItemView {
 
   /** Свёрнутая карточка — код/название/дата последней калибровки (если калибровок ещё
    * не было — дата более свежей из поверок, сертификат/акт). Остальные поля, сканы,
-   * документация, журнал калибровок, привязка к методам — только в раскрытых деталях
-   * (2026-08-26, прямой запрос пользователя — не перегружать общий список). */
-  private renderEquipmentCard(container: HTMLElement, eq: Equipment): void {
+   * документация, журнал калибровок, привязка к методам/оборудованию — только в
+   * раскрытых деталях (2026-08-26, прямой запрос пользователя — не перегружать общий
+   * список). nested — карточка вспомогательного прибора внутри карточки основного:
+   * та же полная детализация, но БЕЗ собственного списка вспомогательных (один
+   * уровень вложенности, без рекурсии — см. renderEquipmentRelated). */
+  private renderEquipmentCard(
+    container: HTMLElement, eq: Equipment, allEquipment: Equipment[], links: EquipmentLink[], nested = false,
+  ): void {
     const card = container.createDiv({ cls: 'tn-lims-method' });
     const verificationDates = [eq.verification_cert_date, eq.verification_act_date].filter(Boolean).sort();
     const latestVerification = verificationDates.length > 0 ? verificationDates[verificationDates.length - 1] : '';
@@ -2818,18 +2968,20 @@ export class LimsView extends ItemView {
         : 'нет данных о калибровке/поверке';
     const header = `${eq.code} — ${eq.name || 'без названия'} · ${dateLabel}`;
     this.renderCollapsibleSection(card, header, (body) => {
-      void this.renderEquipmentCardDetails(body, eq);
+      void this.renderEquipmentCardDetails(body, eq, allEquipment, links, nested);
     });
   }
 
-  private async renderEquipmentCardDetails(body: HTMLElement, eq: Equipment): Promise<void> {
+  private async renderEquipmentCardDetails(
+    body: HTMLElement, eq: Equipment, allEquipment: Equipment[], links: EquipmentLink[], nested: boolean,
+  ): Promise<void> {
     body.createDiv({ cls: 'tn-lims-meta' }).setText('Загрузка…');
     try {
       const methodLinks = await this.plugin.syncService.listEquipmentMethods(eq.id);
       body.empty();
 
       this.renderEquipmentFieldsForm(body, eq);
-      this.renderEquipmentVerificationBlock(body, eq, 'verification_cert', 'Сертификат поверки',
+      this.renderEquipmentVerificationBlock(body, eq, 'verification_cert', 'Сертификат аттестации',
         eq.verification_cert_number, eq.verification_cert_date, eq.verification_cert_file_url);
       this.renderEquipmentVerificationBlock(body, eq, 'verification_act', 'Акт поверки',
         eq.verification_act_number, eq.verification_act_date, eq.verification_act_file_url);
@@ -2840,11 +2992,14 @@ export class LimsView extends ItemView {
       const methodsDiv = body.createDiv({ cls: 'tn-lims-mb12' });
       this.renderEquipmentMethodLinks(methodsDiv, eq, methodLinks);
 
+      const relatedDiv = body.createDiv({ cls: 'tn-lims-mb12' });
+      this.renderEquipmentRelated(relatedDiv, eq, allEquipment, links, nested);
+
       // Поля калибровки — только если карточка «Основное» хотя бы для одной связи
       // (прямое решение пользователя, спека 2026-08-26).
       if (methodLinks.some(l => l.role === 'main')) {
         const calibDiv = body.createDiv({ cls: 'tn-lims-mb12' });
-        void this.renderEquipmentCalibrationBlock(calibDiv, eq);
+        void this.renderEquipmentCalibrationBlock(calibDiv, eq, methodLinks);
       }
 
       if (this.canEditRefs) {
@@ -3078,15 +3233,121 @@ export class LimsView extends ItemView {
     }
   }
 
+  /** Привязка оборудование↔оборудование (2026-08-26, независимо от
+   * EquipmentMethodLink — тот определяет видимость блока калибровки для метода,
+   * этот — только группировку/отображение в общем списке): вспомогательные
+   * приборы, прикреплённые к этому как к основному (nested-карточки, скрыты из
+   * общего списка верхнего уровня — см. renderEquipment), и основные приборы, к
+   * которым прикреплён этот (если он сам чей-то вспомогательный — many-to-many,
+   * можно быть привязанным к нескольким основным). Вложенные карточки (nested)
+   * не показывают свой собственный список вспомогательных — один уровень
+   * вложенности, без рекурсии. */
+  private renderEquipmentRelated(
+    container: HTMLElement, eq: Equipment, allEquipment: Equipment[], links: EquipmentLink[], nested: boolean,
+  ): void {
+    const byId = new Map(allEquipment.map(e => [e.id, e]));
+    container.createEl('strong', { text: 'Связанное оборудование' });
+
+    if (!nested) {
+      const auxiliaries = links.filter(l => l.main_equipment_id === eq.id);
+      container.createDiv({ cls: 'tn-lims-meta' }).setText('Вспомогательное оборудование:');
+      if (auxiliaries.length === 0) container.createDiv({ cls: 'tn-lims-meta' }).setText('Не привязано.');
+      for (const link of auxiliaries) {
+        const auxEq = byId.get(link.auxiliary_equipment_id);
+        if (!auxEq) continue;
+        const row = container.createDiv();
+        this.renderEquipmentCard(row, auxEq, allEquipment, links, /* nested */ true);
+        if (this.canEditRefs) {
+          const detachBtn = row.createEl('button', { text: '✖ Отвязать', cls: 'tn-btn tn-btn-ghost' });
+          detachBtn.addEventListener('click', async () => {
+            try {
+              await this.plugin.syncService.removeEquipmentAuxiliary(eq.id, auxEq.id);
+              new Notice('Связь удалена');
+              await this.renderEquipment();
+            } catch (e: unknown) {
+              new Notice(`Ошибка: ${errorMessage(e)}`);
+            }
+          });
+        }
+      }
+      if (this.canEditRefs) {
+        const linkedAuxIds = new Set(auxiliaries.map(l => l.auxiliary_equipment_id));
+        const candidates = allEquipment.filter(e => e.id !== eq.id && !linkedAuxIds.has(e.id));
+        if (candidates.length > 0) {
+          const addRow = container.createDiv({ cls: 'tn-lims-flex' });
+          const select = addRow.createEl('select', { cls: 'tn-lims-input' });
+          for (const c of candidates) select.createEl('option', { value: String(c.id), text: `${c.code} — ${c.name || 'без названия'}` });
+          const addBtn = addRow.createEl('button', { text: '➕ Прикрепить вспомогательный прибор', cls: 'tn-btn tn-btn-ghost' });
+          addBtn.addEventListener('click', async () => {
+            const auxId = Number(select.value);
+            if (!auxId) return;
+            try {
+              await this.plugin.syncService.addEquipmentAuxiliary(eq.id, auxId);
+              new Notice('Прибор привязан');
+              await this.renderEquipment();
+            } catch (e: unknown) {
+              new Notice(`Ошибка: ${errorMessage(e)}`);
+            }
+          });
+        }
+      }
+    }
+
+    const mains = links.filter(l => l.auxiliary_equipment_id === eq.id);
+    container.createDiv({ cls: 'tn-lims-meta' }).setText('Прикреплено к основным приборам:');
+    if (mains.length === 0) container.createDiv({ cls: 'tn-lims-meta' }).setText('Ни к одному не прикреплено.');
+    for (const link of mains) {
+      const mainEq = byId.get(link.main_equipment_id);
+      const row = container.createDiv({ cls: 'tn-lims-flex' });
+      row.createSpan({ text: mainEq ? `${mainEq.code} — ${mainEq.name || 'без названия'}` : `#${link.main_equipment_id}` });
+      if (this.canEditRefs) {
+        const detachBtn = row.createEl('button', { text: '✖', cls: 'tn-btn tn-btn-ghost' });
+        detachBtn.addEventListener('click', async () => {
+          try {
+            await this.plugin.syncService.removeEquipmentAuxiliary(link.main_equipment_id, eq.id);
+            new Notice('Связь удалена');
+            await this.renderEquipment();
+          } catch (e: unknown) {
+            new Notice(`Ошибка: ${errorMessage(e)}`);
+          }
+        });
+      }
+    }
+    if (this.canEditRefs) {
+      const linkedMainIds = new Set(mains.map(l => l.main_equipment_id));
+      const candidates = allEquipment.filter(e => e.id !== eq.id && !linkedMainIds.has(e.id));
+      if (candidates.length > 0) {
+        const addRow = container.createDiv({ cls: 'tn-lims-flex' });
+        const select = addRow.createEl('select', { cls: 'tn-lims-input' });
+        for (const c of candidates) select.createEl('option', { value: String(c.id), text: `${c.code} — ${c.name || 'без названия'}` });
+        const addBtn = addRow.createEl('button', { text: '➕ Прикрепить к основному прибору', cls: 'tn-btn tn-btn-ghost' });
+        addBtn.addEventListener('click', async () => {
+          const mainId = Number(select.value);
+          if (!mainId) return;
+          try {
+            await this.plugin.syncService.addEquipmentAuxiliary(mainId, eq.id);
+            new Notice('Прибор привязан');
+            await this.renderEquipment();
+          } catch (e: unknown) {
+            new Notice(`Ошибка: ${errorMessage(e)}`);
+          }
+        });
+      }
+    }
+  }
+
   /** Только для карточек «Основное» хотя бы для одного метода: межкалибровочный
    * период (своё значение на каждой единице оборудования), плановая дата следующей
    * калибровки (только чтение — считает сервер), журнал калибровок. */
-  private async renderEquipmentCalibrationBlock(container: HTMLElement, eq: Equipment): Promise<void> {
+  private async renderEquipmentCalibrationBlock(
+    container: HTMLElement, eq: Equipment, methodLinks: EquipmentMethodLink[],
+  ): Promise<void> {
     container.createDiv({ cls: 'tn-lims-meta' }).setText('Калибровка: загрузка…');
     try {
       const calibrations = await this.plugin.syncService.listEquipmentCalibrations(eq.id);
       container.empty();
       container.createEl('strong', { text: 'Калибровка (основное оборудование)' });
+      const mainMethodIds = methodLinks.filter(l => l.role === 'main').map(l => l.method_id);
       const intervalRow = container.createDiv({ cls: 'tn-lims-flex' });
       intervalRow.createSpan({ text: 'Межкалибровочный период, мес.:', cls: 'tn-lims-meta' });
       if (this.canEditRefs) {
@@ -3115,11 +3376,22 @@ export class LimsView extends ItemView {
       else {
         const table = container.createEl('table', { cls: 'tn-table' });
         const thead = table.createEl('thead').createEl('tr');
-        for (const h of ['Дата', 'Результат', 'Файл', 'Кто внёс']) thead.createEl('th').setText(h);
+        for (const h of ['Дата', 'Метод', 'Параметры', 'Результат', 'Файл', 'Кто внёс']) thead.createEl('th').setText(h);
         const tbody = table.createEl('tbody');
         for (const c of calibrations) {
           const tr = tbody.createEl('tr');
           tr.createEl('td').setText(this.formatDate(c.calibrated_at));
+          tr.createEl('td').setText(c.method_id ? this.methodName(c.method_id) : '—');
+          const cfg = c.method_id ? this.methodConfigOf(c.method_id) : null;
+          const paramsParts: string[] = [];
+          if (c.amb_temp) paramsParts.push(`t=${c.amb_temp}`);
+          if (c.amb_pres) paramsParts.push(`P=${c.amb_pres}`);
+          if (c.amb_moist) paramsParts.push(`φ=${c.amb_moist}`);
+          for (const [k, v] of Object.entries(c.values || {})) {
+            const attrName = cfg?.calibration_attributes.find(a => a.id === k)?.name || k;
+            paramsParts.push(`${attrName}=${String(v)}`);
+          }
+          tr.createEl('td').setText(paramsParts.join(', ') || '—');
           tr.createEl('td').setText(c.result || '—');
           const fileTd = tr.createEl('td');
           if (c.file_url) fileTd.createEl('a', { text: '📎', attr: { href: c.file_url, target: '_blank' } });
@@ -3127,30 +3399,85 @@ export class LimsView extends ItemView {
         }
       }
       if (this.canEditRefs) {
-        const form = container.createDiv({ cls: 'tn-lims-flex' });
-        const dateInp = form.createEl('input', { attr: { type: 'date' }, cls: 'tn-lims-input' });
-        const resultInp = form.createEl('input', { attr: { type: 'text', placeholder: 'Результат' }, cls: 'tn-lims-input' });
-        const fileInp = form.createEl('input', { attr: { type: 'file' } });
-        const addBtn = form.createEl('button', { text: '➕ Добавить запись', cls: 'tn-btn tn-btn-primary' });
-        addBtn.addEventListener('click', async () => {
-          if (!dateInp.value) { new Notice('Укажите дату калибровки'); return; }
-          try {
-            const file = fileInp.files?.[0];
-            await this.plugin.syncService.createEquipmentCalibration(
-              eq.id, dateInp.value, resultInp.value.trim(),
-              file ? { data: await file.arrayBuffer(), fileName: file.name } : undefined,
-            );
-            new Notice('Запись добавлена');
-            await this.renderEquipment();
-          } catch (e: unknown) {
-            new Notice(`Ошибка: ${errorMessage(e)}`);
-          }
-        });
+        this.renderEquipmentCalibrationForm(container, eq, mainMethodIds);
       }
     } catch (e: unknown) {
       container.empty();
       container.createDiv({ cls: 'tn-lims-error' }).setText(`Ошибка: ${errorMessage(e)}`);
     }
+  }
+
+  /** Форма новой записи журнала — поля, заданные в конфигураторе ВЫБРАННОГО метода
+   * (calibration_attributes), плюс универсальные системные поля (Температура
+   * воздуха в лаборатории/Атмосферное давление/Влажность воздуха — одни и те же
+   * для ЛЮБОГО метода, тот же принцип, что у системных атрибутов обычных
+   * результатов испытаний). Оборудование «Основное» сразу для нескольких методов —
+   * select метода, переключение перестраивает динамические поля. */
+  private renderEquipmentCalibrationForm(container: HTMLElement, eq: Equipment, mainMethodIds: number[]): void {
+    const form = container.createDiv({ cls: 'tn-lims-series-form' });
+    form.createDiv({ cls: 'tn-lims-meta' }).setText('Дата калибровки:');
+    const dateInp = form.createEl('input', { attr: { type: 'date' }, cls: 'tn-lims-input' });
+
+    let methodSelect: HTMLSelectElement | undefined;
+    if (mainMethodIds.length > 1) {
+      form.createDiv({ cls: 'tn-lims-meta' }).setText('Метод (чьи параметры калибровки использовать):');
+      methodSelect = form.createEl('select', { cls: 'tn-lims-input' });
+      for (const mid of mainMethodIds) methodSelect.createEl('option', { value: String(mid), text: this.methodName(mid) });
+    }
+    const currentMethodId = (): number => (methodSelect ? Number(methodSelect.value) : mainMethodIds[0]);
+
+    form.createDiv({ cls: 'tn-lims-meta' }).setText('Температура воздуха в лаборатории / Атмосферное давление / Влажность воздуха:');
+    const envRow = form.createDiv({ cls: 'tn-lims-flex' });
+    const tempInp = envRow.createEl('input', { attr: { type: 'text', placeholder: 'Температура' }, cls: 'tn-lims-input' });
+    const presInp = envRow.createEl('input', { attr: { type: 'text', placeholder: 'Давление' }, cls: 'tn-lims-input' });
+    const moistInp = envRow.createEl('input', { attr: { type: 'text', placeholder: 'Влажность' }, cls: 'tn-lims-input' });
+
+    const attrsDiv = form.createDiv();
+    let attrInputs: Array<{ id: string; el: HTMLInputElement }> = [];
+    const redrawAttrs = (): void => {
+      attrsDiv.empty();
+      attrInputs = [];
+      if (mainMethodIds.length === 0) return;
+      const cfg = this.methodConfigOf(currentMethodId());
+      if (cfg.calibration_attributes.length > 0) attrsDiv.createDiv({ cls: 'tn-lims-meta' }).setText('Атрибуты калибровки метода:');
+      for (const attr of cfg.calibration_attributes) {
+        const row = attrsDiv.createDiv({ cls: 'tn-lims-flex' });
+        row.createSpan({ text: attr.name + ':', cls: 'tn-lims-meta' });
+        const inputType = attr.data_type === 'date' ? 'date' : attr.data_type === 'int' || attr.data_type === 'float' ? 'number' : 'text';
+        const inp = row.createEl('input', { attr: { type: inputType }, cls: 'tn-lims-input' });
+        attrInputs.push({ id: attr.id, el: inp });
+      }
+    };
+    redrawAttrs();
+    methodSelect?.addEventListener('change', redrawAttrs);
+
+    form.createDiv({ cls: 'tn-lims-meta' }).setText('Результат:');
+    const resultInp = form.createEl('input', { attr: { type: 'text', placeholder: 'Результат' }, cls: 'tn-lims-input' });
+    const fileInp = form.createEl('input', { attr: { type: 'file' } });
+    const addBtn = form.createEl('button', { text: '➕ Добавить запись', cls: 'tn-btn tn-btn-primary' });
+    addBtn.addEventListener('click', async () => {
+      if (!dateInp.value) { new Notice('Укажите дату калибровки'); return; }
+      const values: Record<string, unknown> = {};
+      for (const { id, el } of attrInputs) {
+        if (el.value.trim()) values[id] = el.value.trim();
+      }
+      try {
+        const file = fileInp.files?.[0];
+        await this.plugin.syncService.createEquipmentCalibration(eq.id, {
+          calibratedAt: dateInp.value,
+          methodId: mainMethodIds.length > 0 ? currentMethodId() : undefined,
+          ambTemp: tempInp.value.trim(),
+          ambPres: presInp.value.trim(),
+          ambMoist: moistInp.value.trim(),
+          values,
+          result: resultInp.value.trim(),
+        }, file ? { data: await file.arrayBuffer(), fileName: file.name } : undefined);
+        new Notice('Запись добавлена');
+        await this.renderEquipment();
+      } catch (e: unknown) {
+        new Notice(`Ошибка: ${errorMessage(e)}`);
+      }
+    });
   }
 
   private renderEquipmentForm(): void {
@@ -3270,6 +3597,9 @@ export class LimsView extends ItemView {
       input_parameters: Array.isArray(m?.input_parameters) ? m.input_parameters : [],
       presentation: m?.presentation && Array.isArray(m.presentation.blocks) ? m.presentation : { blocks: [] },
       operator_form: m?.operator_form && Array.isArray(m.operator_form.fields) ? m.operator_form : { fields: [] },
+      calibration_attributes: Array.isArray(m?.calibration_attributes) ? m.calibration_attributes : [],
+      calibration_operator_form: m?.calibration_operator_form && Array.isArray(m.calibration_operator_form.fields)
+        ? m.calibration_operator_form : { fields: [] },
     };
   }
 

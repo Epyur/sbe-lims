@@ -6,6 +6,7 @@ import type {
   Equipment,
   EquipmentCalibration,
   EquipmentDocument,
+  EquipmentLink,
   EquipmentMethodLink,
   Inventor,
   Lab,
@@ -381,13 +382,27 @@ export class LimsSyncService {
   /** Новая запись журнала калибровок — сервер сам пересчитывает last_calibration/
    * next_calibration оборудования. Файл необязателен. */
   async createEquipmentCalibration(
-    id: number, calibratedAt: string, result: string, file?: { data: ArrayBuffer; fileName: string },
+    id: number,
+    data: {
+      calibratedAt: string; methodId?: number; ambTemp?: string; ambPres?: string; ambMoist?: string;
+      values?: Record<string, unknown>; result?: string;
+    },
+    file?: { data: ArrayBuffer; fileName: string },
   ): Promise<void> {
     const token = await this.getToken();
     const boundary = this.multipartBoundary();
+    const fields: Record<string, string> = {
+      calibrated_at: data.calibratedAt,
+      amb_temp: data.ambTemp || '',
+      amb_pres: data.ambPres || '',
+      amb_moist: data.ambMoist || '',
+      result: data.result || '',
+      values: JSON.stringify(data.values || {}),
+    };
+    if (data.methodId) fields.method_id = String(data.methodId);
     const body = this.buildMultipart(
       boundary,
-      { calibrated_at: calibratedAt, result },
+      fields,
       file ? { field: 'file', data: file.data, fileName: file.fileName } : undefined,
     );
     const res = await this.request({
@@ -429,6 +444,45 @@ export class LimsSyncService {
 
   async deleteEquipmentMethod(id: number, methodId: number): Promise<void> {
     await this.deleteEntity(`/api/lab/equipment/${id}/methods/${methodId}`);
+  }
+
+  /** Все связи оборудование↔оборудование одним запросом (не по одной единице —
+   * общий список строит из этого множество "скрыть из верхнего уровня" и вложенные
+   * списки без N+1 запроса на каждую карточку). */
+  async listAllEquipmentLinks(): Promise<EquipmentLink[]> {
+    const token = await this.getToken();
+    const res = await this.request({
+      url: `${this.baseUrl}/api/lab/equipment-links`,
+      method: 'GET',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    this.assertOk(res);
+    try {
+      const data = JSON.parse(res.text) as { links?: EquipmentLink[] };
+      return Array.isArray(data.links) ? data.links : [];
+    } catch (e: unknown) {
+      console.warn('ЛИМС: не JSON в ответе equipment-links:', errorMessage(e));
+      return [];
+    }
+  }
+
+  /** mainId становится ОСНОВНЫМ для auxiliaryId. Один и тот же вызов обслуживает
+   * оба направления UI ("привязать вспомогательный к этому основному" и "привязать
+   * этот вспомогательный к основному" — во втором случае auxiliaryId = собственный
+   * id прибора со своей карточки, mainId — выбранный основной). */
+  async addEquipmentAuxiliary(mainId: number, auxiliaryId: number): Promise<void> {
+    const token = await this.getToken();
+    const res = await this.request({
+      url: `${this.baseUrl}/api/lab/equipment/${mainId}/auxiliaries`,
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ auxiliary_equipment_id: auxiliaryId }),
+    });
+    this.assertOk(res);
+  }
+
+  async removeEquipmentAuxiliary(mainId: number, auxiliaryId: number): Promise<void> {
+    await this.deleteEntity(`/api/lab/equipment/${mainId}/auxiliaries/${auxiliaryId}`);
   }
 
   async listEquipmentDocuments(id: number): Promise<EquipmentDocument[]> {
