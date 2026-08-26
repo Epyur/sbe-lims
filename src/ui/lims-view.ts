@@ -1650,7 +1650,7 @@ export class LimsView extends ItemView {
     const onCalibrationAttrsChanged = (): void => { redrawCalibrationAttrs(); redrawCalibrationOperatorForm(); };
     redrawCalibrationAttrs = () => {
       calibrationAttrsListEl.empty();
-      this.renderCalibrationAttributeRows(calibrationAttrsListEl, calibrationAttrs, onCalibrationAttrsChanged);
+      this.renderCalibrationAttributeRows(calibrationAttrsListEl, calibrationAttrs, methodId, onCalibrationAttrsChanged);
     };
     redrawCalibrationAttrs();
     const addCalibrationAttrBtn = calibrationBody.createEl('button', { text: '➕ Добавить атрибут', cls: 'tn-btn tn-btn-ghost' });
@@ -1893,7 +1893,7 @@ export class LimsView extends ItemView {
    * вводится вручную испытателем ровно один раз за запись журнала, ни расчётов,
    * ни агрегации по сериям здесь нет. */
   private renderCalibrationAttributeRows(
-    container: HTMLElement, attrs: CalibrationAttribute[], onChange: () => void,
+    container: HTMLElement, attrs: CalibrationAttribute[], methodId: number, onChange: () => void,
   ): void {
     attrs.forEach((attr, idx) => {
       const row = container.createDiv({ cls: 'tn-lims-method tn-lims-flex' });
@@ -1902,7 +1902,13 @@ export class LimsView extends ItemView {
       idInput.addEventListener('change', () => { attr.id = idInput.value.trim(); onChange(); });
       const nameInput = row.createEl('input', { attr: { type: 'text', placeholder: 'Название' }, cls: 'tn-lims-input' });
       nameInput.value = attr.name;
-      nameInput.addEventListener('change', () => { attr.name = nameInput.value.trim(); onChange(); });
+      nameInput.addEventListener('change', () => { attr.name = nameInput.value.trim(); });
+      const suggestIdBtn = row.createEl('button', { text: '🤖', cls: 'tn-btn tn-btn-ghost' });
+      suggestIdBtn.setAttribute('title', 'Предложить id по названию (или найти уже существующий атрибут калибровки)');
+      suggestIdBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        void this.suggestCalibrationAttributeId(idInput, nameInput, attr, methodId, attrs, suggestIdBtn).then(() => onChange());
+      });
       const typeSelect = row.createEl('select', { cls: 'tn-lims-select' });
       const typeOptions: Array<[AttributeDataType, string]> = [
         ['text', 'Текст'], ['int', 'Целое число'], ['float', 'Дробное число'], ['date', 'Дата'],
@@ -2409,6 +2415,73 @@ export class LimsView extends ItemView {
       }
     } catch (e: unknown) {
       console.error('ЛИМС: ошибка подбора id атрибута:', e);
+      new Notice(`Ошибка ИИ-помощника: ${errorMessage(e)}`);
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  /** Атрибуты калибровки других методов — тот же принцип переиспользования по
+   * смыслу, что у collectExistingAttributeSummaries (обычные атрибуты метода),
+   * но свой, отдельный список: калибровочный атрибут "Отклонение" одного метода
+   * не должно путать с обычным измеряемым показателем метода при подборе ИИ.
+   * fill_method/level у CalibrationAttribute нет вовсе (см. тип) — передаются
+   * пустой строкой, ExistingAttributeSummary их не требует строго типизированными. */
+  private collectExistingCalibrationAttributeSummaries(
+    methodId: number, currentAttrs: CalibrationAttribute[],
+  ): ExistingAttributeSummary[] {
+    const seenIds = new Set<string>();
+    const out: ExistingAttributeSummary[] = [];
+    for (const a of currentAttrs) {
+      if (!a.id || seenIds.has(a.id)) continue;
+      seenIds.add(a.id);
+      out.push({ id: a.id, name: a.name, data_type: a.data_type, fill_method: '', level: '' });
+    }
+    for (const m of this.plugin.methods) {
+      if (m.id === methodId) continue;
+      for (const a of this.methodConfigOf(m.id).calibration_attributes) {
+        if (!a.id || seenIds.has(a.id)) continue;
+        seenIds.add(a.id);
+        out.push({ id: a.id, name: a.name, data_type: a.data_type, fill_method: '', level: '' });
+      }
+    }
+    return out;
+  }
+
+  /** Значок-помощник в строке атрибута калибровки — тот же паттерн, что
+   * suggestAttributeId у обычных атрибутов метода (переиспользует тот же
+   * серверный вызов suggestAttributesFromNames: он не завязан на fill_method/
+   * level строго, только на id/name/data_type для сопоставления по смыслу).
+   * Драфт может прийти с fill_method/level, не имеющими смысла для калибровки —
+   * они игнорируются, копируется только id. */
+  private async suggestCalibrationAttributeId(
+    idInput: HTMLInputElement,
+    nameInput: HTMLInputElement,
+    attr: CalibrationAttribute,
+    methodId: number,
+    attrs: CalibrationAttribute[],
+    btn: HTMLButtonElement,
+  ): Promise<void> {
+    const name = nameInput.value.trim();
+    if (!name) { new Notice('Сначала введите название атрибута'); return; }
+    btn.disabled = true;
+    try {
+      const existingAttributes = this.collectExistingCalibrationAttributeSummaries(methodId, attrs);
+      const { matched, drafted } = await this.plugin.llmAssist.suggestAttributesFromNames([name], existingAttributes);
+      if (matched.length > 0) {
+        const ex = matched[0].existing;
+        idInput.value = ex.id;
+        attr.id = ex.id;
+        new Notice(`Уже есть такой атрибут калибровки: «${ex.name}» (${ex.id}) — id скопирован`);
+      } else if (drafted.length > 0) {
+        idInput.value = drafted[0].id;
+        attr.id = drafted[0].id;
+        new Notice(`Предложен новый id: ${drafted[0].id}`);
+      } else {
+        new Notice('Не удалось предложить id — попробуйте переформулировать название');
+      }
+    } catch (e: unknown) {
+      console.error('ЛИМС: ошибка подбора id атрибута калибровки:', e);
       new Notice(`Ошибка ИИ-помощника: ${errorMessage(e)}`);
     } finally {
       btn.disabled = false;
