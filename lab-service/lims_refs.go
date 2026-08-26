@@ -831,22 +831,24 @@ func (s *Server) handleUpdateMethodConfig(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var req struct {
-		Formulas               *json.RawMessage `json:"formulas"`
-		Classification         *json.RawMessage `json:"classification"`
-		ChartConfigs           *json.RawMessage `json:"chart_configs"`
-		InputParams            *json.RawMessage `json:"input_parameters"`
-		Presentation           *json.RawMessage `json:"presentation"`
-		OperatorForm           *json.RawMessage `json:"operator_form"`
-		LabIDs                 *[]int64         `json:"lab_ids"`
-		Description            *string          `json:"description"`
-		DeterminableIndicators *[]string        `json:"determinable_indicators"`
+		Formulas                *json.RawMessage `json:"formulas"`
+		Classification          *json.RawMessage `json:"classification"`
+		ChartConfigs            *json.RawMessage `json:"chart_configs"`
+		InputParams             *json.RawMessage `json:"input_parameters"`
+		Presentation            *json.RawMessage `json:"presentation"`
+		OperatorForm            *json.RawMessage `json:"operator_form"`
+		CalibrationAttributes   *json.RawMessage `json:"calibration_attributes"`
+		CalibrationOperatorForm *json.RawMessage `json:"calibration_operator_form"`
+		LabIDs                  *[]int64         `json:"lab_ids"`
+		Description             *string          `json:"description"`
+		DeterminableIndicators  *[]string        `json:"determinable_indicators"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json"})
 		return
 	}
 	// валидация JSON-массивов
-	for _, v := range []*json.RawMessage{req.Formulas, req.Classification, req.ChartConfigs, req.InputParams} {
+	for _, v := range []*json.RawMessage{req.Formulas, req.Classification, req.ChartConfigs, req.InputParams, req.CalibrationAttributes} {
 		if v == nil {
 			continue
 		}
@@ -925,6 +927,15 @@ func (s *Server) handleUpdateMethodConfig(w http.ResponseWriter, r *http.Request
 			return
 		}
 	}
+	calibAttrsParam := rawOrNil(req.CalibrationAttributes)
+	calibFormParam := rawOrNil(req.CalibrationOperatorForm)
+	if req.CalibrationOperatorForm != nil {
+		var form MethodOperatorForm
+		if err := json.Unmarshal(*req.CalibrationOperatorForm, &form); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "calibration_operator_form: expected JSON object with \"fields\" array"})
+			return
+		}
+	}
 	var indicatorsParam any
 	if req.DeterminableIndicators != nil {
 		b, err := json.Marshal(*req.DeterminableIndicators)
@@ -952,8 +963,11 @@ UPDATE methods SET
 	description = COALESCE($7, description),
 	determinable_indicators = COALESCE($8::jsonb, determinable_indicators),
 	operator_form = COALESCE($9::jsonb, operator_form),
+	calibration_attributes = COALESCE($10::jsonb, calibration_attributes),
+	calibration_operator_form = COALESCE($11::jsonb, calibration_operator_form),
 	updated_at = now()
-WHERE id = $1`, id, formulasParam, classParam, chartsParam, inputParam, presParam, req.Description, indicatorsParam, opFormParam); err != nil {
+WHERE id = $1`, id, formulasParam, classParam, chartsParam, inputParam, presParam, req.Description, indicatorsParam, opFormParam,
+		calibAttrsParam, calibFormParam); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
 		return
 	}

@@ -180,6 +180,9 @@ func main() {
 	mux.HandleFunc("GET /api/lab/equipment/{id}/documents", s.requirePerm("viewer")(s.handleListEquipmentDocuments))
 	mux.HandleFunc("POST /api/lab/equipment/{id}/documents", s.requirePerm("editor")(s.handleUploadEquipmentDocument))
 	mux.HandleFunc("DELETE /api/lab/equipment/{id}/documents/{file_id}", s.requirePerm("editor")(s.handleDeleteEquipmentDocument))
+	mux.HandleFunc("GET /api/lab/equipment-links", s.requirePerm("viewer")(s.handleListAllEquipmentLinks))
+	mux.HandleFunc("POST /api/lab/equipment/{id}/auxiliaries", s.requirePerm("editor")(s.handleAddEquipmentAuxiliary))
+	mux.HandleFunc("DELETE /api/lab/equipment/{id}/auxiliaries/{auxiliary_id}", s.requirePerm("editor")(s.handleRemoveEquipmentAuxiliary))
 	mux.HandleFunc("GET /api/lab/lab-members", s.requirePerm("viewer")(s.handleListLabMembers))
 	mux.HandleFunc("POST /api/lab/lab-members", s.requirePerm("editor")(s.handleSetLabMember))
 	mux.HandleFunc("DELETE /api/lab/lab-members/{lab_id}/{email}", s.requirePerm("editor")(s.handleRemoveLabMember))
@@ -519,6 +522,39 @@ func (s *Server) migrate(ctx context.Context) error {
 		// purpose='equipment_doc' отличает от файлов заявок при листинге.
 		`ALTER TABLE files ADD COLUMN IF NOT EXISTS equipment_id BIGINT REFERENCES equipment(id) ON DELETE CASCADE`,
 		`ALTER TABLE files ADD COLUMN IF NOT EXISTS purpose TEXT NOT NULL DEFAULT ''`,
+		// equipment_links (2026-08-26) — привязка оборудование↔оборудование (физическое
+		// прикрепление вспомогательного прибора к основному, напр. датчик к анализатору);
+		// ОТДЕЛЬНО и независимо от method_equipment.role (тот определяет видимость блока
+		// калибровки для метода, этот — только группировку/отображение в общем списке
+		// оборудования). many-to-many: один вспомогательный прибор может быть привязан
+		// к нескольким основным (CHECK исключает привязку прибора к самому себе).
+		`CREATE TABLE IF NOT EXISTS equipment_links (
+			main_equipment_id BIGINT NOT NULL REFERENCES equipment(id) ON DELETE CASCADE,
+			auxiliary_equipment_id BIGINT NOT NULL REFERENCES equipment(id) ON DELETE CASCADE,
+			PRIMARY KEY (main_equipment_id, auxiliary_equipment_id),
+			CHECK (main_equipment_id <> auxiliary_equipment_id)
+		)`,
+		// Параметры калибровки метода (2026-08-26) — конфигуратор метода, новый раздел:
+		// calibration_attributes — атрибуты, которые заполняет испытатель ПРИ калибровке
+		// (простая форма id/название/тип — без fill_method/formula/aggregation, как у
+		// input_parameters: значение калибровки всегда вводится вручную ровно один раз
+		// за запись журнала, ни расчётов, ни агрегации по сериям здесь нет);
+		// calibration_operator_form — та же структура {fields:[{attribute_id,required}]},
+		// что operator_form, но какие ИЗ calibration_attributes показывать испытателю.
+		`ALTER TABLE methods ADD COLUMN IF NOT EXISTS calibration_attributes JSONB NOT NULL DEFAULT '[]'`,
+		`ALTER TABLE methods ADD COLUMN IF NOT EXISTS calibration_operator_form JSONB NOT NULL DEFAULT '{}'`,
+		// equipment_calibrations — привязка к методу (чьи calibration_attributes
+		// применялись — оборудование может быть "Основное" сразу для нескольких методов,
+		// см. method_equipment.role) + универсальные системные поля (одни и те же для
+		// ЛЮБОГО метода, тот же принцип, что requests.amb_temp/amb_pres/amb_moist у
+		// обычных результатов испытаний — см. sbe-lims/AGENTS.md, "Правило: системные
+		// атрибуты") + values — значения calibration_attributes ЭТОГО метода (JSONB,
+		// та же роль, что measurement_results.values).
+		`ALTER TABLE equipment_calibrations ADD COLUMN IF NOT EXISTS method_id BIGINT REFERENCES methods(id)`,
+		`ALTER TABLE equipment_calibrations ADD COLUMN IF NOT EXISTS amb_temp TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE equipment_calibrations ADD COLUMN IF NOT EXISTS amb_pres TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE equipment_calibrations ADD COLUMN IF NOT EXISTS amb_moist TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE equipment_calibrations ADD COLUMN IF NOT EXISTS values JSONB NOT NULL DEFAULT '{}'`,
 	}
 	for _, q := range stmts {
 		if _, err := s.pool.Exec(ctx, q); err != nil {

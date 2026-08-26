@@ -261,8 +261,12 @@ type Method struct {
 	Presentation MethodPresentation `json:"presentation"`
 	// OperatorForm — схема формы для испытателя (конструктор, 2026-08-22).
 	OperatorForm MethodOperatorForm `json:"operator_form"`
-	CreatedAt    string             `json:"created_at"`
-	UpdatedAt    string             `json:"updated_at"`
+	// CalibrationAttributes/CalibrationOperatorForm (2026-08-26) — «Параметры
+	// калибровки»: см. results.go MethodConfig за подробным комментарием.
+	CalibrationAttributes   []map[string]any   `json:"calibration_attributes"`
+	CalibrationOperatorForm MethodOperatorForm `json:"calibration_operator_form"`
+	CreatedAt               string             `json:"created_at"`
+	UpdatedAt               string             `json:"updated_at"`
 }
 
 // unmarshalJSONBArray разбирает JSONB-массив объектов (formulas/classification/
@@ -342,7 +346,8 @@ func (s *Server) validateLabIDs(ctx context.Context, ids []int64) ([]int64, erro
 func (s *Server) handleListMethods(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.pool.Query(r.Context(), `
 SELECT id, code, name, description, determinable_indicators, formulas, classification,
-	chart_configs, input_parameters, presentation, operator_form, created_at, updated_at FROM methods ORDER BY id`)
+	chart_configs, input_parameters, presentation, operator_form,
+	calibration_attributes, calibration_operator_form, created_at, updated_at FROM methods ORDER BY id`)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
 		return
@@ -353,9 +358,10 @@ SELECT id, code, name, description, determinable_indicators, formulas, classific
 	for rows.Next() {
 		var m Method
 		var ca, ua time.Time
-		var indsRaw, formulasRaw, classRaw, chartsRaw, inputsRaw, presRaw, opFormRaw []byte
+		var indsRaw, formulasRaw, classRaw, chartsRaw, inputsRaw, presRaw, opFormRaw, calibAttrsRaw, calibFormRaw []byte
 		if err := rows.Scan(&m.ID, &m.Code, &m.Name, &m.Description, &indsRaw,
-			&formulasRaw, &classRaw, &chartsRaw, &inputsRaw, &presRaw, &opFormRaw, &ca, &ua); err != nil {
+			&formulasRaw, &classRaw, &chartsRaw, &inputsRaw, &presRaw, &opFormRaw,
+			&calibAttrsRaw, &calibFormRaw, &ca, &ua); err != nil {
 			log.Printf("methods scan: %v", err)
 			continue
 		}
@@ -369,6 +375,8 @@ SELECT id, code, name, description, determinable_indicators, formulas, classific
 		m.InputParams = unmarshalJSONBArray(inputsRaw)
 		m.Presentation = parseMethodPresentation(presRaw)
 		m.OperatorForm = parseMethodOperatorForm(opFormRaw)
+		m.CalibrationAttributes = unmarshalJSONBArray(calibAttrsRaw)
+		m.CalibrationOperatorForm = parseMethodOperatorForm(calibFormRaw)
 		m.CreatedAt = ca.Format(time.RFC3339)
 		m.UpdatedAt = ua.Format(time.RFC3339)
 		methods = append(methods, m)

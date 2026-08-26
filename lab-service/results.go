@@ -53,6 +53,14 @@ type MethodConfig struct {
 	InputParams    []map[string]any   `json:"input_parameters"`
 	Presentation   MethodPresentation `json:"presentation"`
 	OperatorForm   MethodOperatorForm `json:"operator_form"`
+	// CalibrationAttributes/CalibrationOperatorForm (2026-08-26) — «Параметры
+	// калибровки»: атрибуты, которые испытатель заполняет ПРИ калибровке
+	// оборудования (см. equipment_ext.go, handleCreateEquipmentCalibration).
+	// Простая форма id/name/data_type — без fill_method/level/formula/
+	// aggregation, как у InputParams: значение калибровки всегда вводится
+	// вручную, ровно один раз за запись журнала, расчётов/агрегации нет.
+	CalibrationAttributes   []map[string]any   `json:"calibration_attributes"`
+	CalibrationOperatorForm MethodOperatorForm `json:"calibration_operator_form"`
 }
 
 // InlineNode — текстовый узел форматированного текста ИЛИ плейсхолдер-чип
@@ -158,20 +166,24 @@ type MethodOperatorForm struct {
 
 // loadMethodConfig читает конфиги метода.
 func (s *Server) loadMethodConfig(ctx context.Context, methodID int64) (*MethodConfig, error) {
-	var formulas, classification, charts, inputs, presentation, operatorForm []byte
+	var formulas, classification, charts, inputs, presentation, operatorForm, calibAttrs, calibForm []byte
 	err := s.pool.QueryRow(ctx, `
-SELECT formulas, classification, chart_configs, input_parameters, presentation, operator_form
-FROM methods WHERE id = $1`, methodID).Scan(&formulas, &classification, &charts, &inputs, &presentation, &operatorForm)
+SELECT formulas, classification, chart_configs, input_parameters, presentation, operator_form,
+	calibration_attributes, calibration_operator_form
+FROM methods WHERE id = $1`, methodID).Scan(&formulas, &classification, &charts, &inputs, &presentation, &operatorForm,
+		&calibAttrs, &calibForm)
 	if err != nil {
 		return nil, err
 	}
 	cfg := &MethodConfig{
-		Formulas:       []map[string]any{},
-		Classification: []map[string]any{},
-		ChartConfigs:   []map[string]any{},
-		InputParams:    []map[string]any{},
-		Presentation:   parseMethodPresentation(presentation),
-		OperatorForm:   parseMethodOperatorForm(operatorForm),
+		Formulas:                []map[string]any{},
+		Classification:          []map[string]any{},
+		ChartConfigs:            []map[string]any{},
+		InputParams:             []map[string]any{},
+		Presentation:            parseMethodPresentation(presentation),
+		OperatorForm:            parseMethodOperatorForm(operatorForm),
+		CalibrationAttributes:   []map[string]any{},
+		CalibrationOperatorForm: parseMethodOperatorForm(calibForm),
 	}
 	if len(formulas) > 0 && string(formulas) != "[]" {
 		_ = json.Unmarshal(formulas, &cfg.Formulas)
@@ -184,6 +196,9 @@ FROM methods WHERE id = $1`, methodID).Scan(&formulas, &classification, &charts,
 	}
 	if len(inputs) > 0 && string(inputs) != "[]" {
 		_ = json.Unmarshal(inputs, &cfg.InputParams)
+	}
+	if len(calibAttrs) > 0 && string(calibAttrs) != "[]" {
+		_ = json.Unmarshal(calibAttrs, &cfg.CalibrationAttributes)
 	}
 	return cfg, nil
 }

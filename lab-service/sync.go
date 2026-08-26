@@ -85,7 +85,8 @@ FROM labs ORDER BY id`)
 	methods := make([]Method, 0, 16)
 	rows, err = s.pool.Query(r.Context(), `
 SELECT id, code, name, description, determinable_indicators, formulas, classification,
-	chart_configs, input_parameters, presentation, operator_form, created_at, updated_at FROM methods ORDER BY id`)
+	chart_configs, input_parameters, presentation, operator_form,
+	calibration_attributes, calibration_operator_form, created_at, updated_at FROM methods ORDER BY id`)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
 		return
@@ -93,9 +94,10 @@ SELECT id, code, name, description, determinable_indicators, formulas, classific
 	for rows.Next() {
 		var m Method
 		var ca, ua time.Time
-		var indsRaw, formulasRaw, classRaw, chartsRaw, inputsRaw, presRaw, opFormRaw []byte
+		var indsRaw, formulasRaw, classRaw, chartsRaw, inputsRaw, presRaw, opFormRaw, calibAttrsRaw, calibFormRaw []byte
 		if err := rows.Scan(&m.ID, &m.Code, &m.Name, &m.Description, &indsRaw,
-			&formulasRaw, &classRaw, &chartsRaw, &inputsRaw, &presRaw, &opFormRaw, &ca, &ua); err != nil {
+			&formulasRaw, &classRaw, &chartsRaw, &inputsRaw, &presRaw, &opFormRaw,
+			&calibAttrsRaw, &calibFormRaw, &ca, &ua); err != nil {
 			log.Printf("pull methods scan: %v", err)
 			continue
 		}
@@ -109,6 +111,8 @@ SELECT id, code, name, description, determinable_indicators, formulas, classific
 		m.InputParams = unmarshalJSONBArray(inputsRaw)
 		m.Presentation = parseMethodPresentation(presRaw)
 		m.OperatorForm = parseMethodOperatorForm(opFormRaw)
+		m.CalibrationAttributes = unmarshalJSONBArray(calibAttrsRaw)
+		m.CalibrationOperatorForm = parseMethodOperatorForm(calibFormRaw)
 		m.CreatedAt = ca.Format(time.RFC3339)
 		m.UpdatedAt = ua.Format(time.RFC3339)
 		methods = append(methods, m)

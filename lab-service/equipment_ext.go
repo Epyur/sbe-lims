@@ -111,14 +111,25 @@ func (s *Server) handleEquipmentScan(w http.ResponseWriter, r *http.Request) {
 
 // ---- Журнал калибровок ----
 
+// MethodID (2026-08-26) — чьи calibration_attributes применялись (оборудование
+// может быть "Основное" сразу для нескольких методов). AmbTemp/AmbPres/AmbMoist —
+// универсальные системные поля калибровки, одни и те же для ЛЮБОГО метода (тот же
+// принцип, что requests.amb_temp/amb_pres/amb_moist у обычных результатов — см.
+// sbe-lims/AGENTS.md, "Правило: системные атрибуты"). Values — значения
+// calibration_attributes ВЫБРАННОГО метода (ключ — id атрибута).
 type EquipmentCalibration struct {
-	ID           int64  `json:"id"`
-	EquipmentID  int64  `json:"equipment_id"`
-	CalibratedAt string `json:"calibrated_at"`
-	Result       string `json:"result"`
-	FileURL      string `json:"file_url"`
-	CreatedBy    string `json:"created_by"`
-	CreatedAt    string `json:"created_at"`
+	ID           int64          `json:"id"`
+	EquipmentID  int64          `json:"equipment_id"`
+	MethodID     int64          `json:"method_id"`
+	CalibratedAt string         `json:"calibrated_at"`
+	AmbTemp      string         `json:"amb_temp"`
+	AmbPres      string         `json:"amb_pres"`
+	AmbMoist     string         `json:"amb_moist"`
+	Values       map[string]any `json:"values"`
+	Result       string         `json:"result"`
+	FileURL      string         `json:"file_url"`
+	CreatedBy    string         `json:"created_by"`
+	CreatedAt    string         `json:"created_at"`
 }
 
 func (s *Server) handleListEquipmentCalibrations(w http.ResponseWriter, r *http.Request) {
@@ -128,7 +139,8 @@ func (s *Server) handleListEquipmentCalibrations(w http.ResponseWriter, r *http.
 		return
 	}
 	rows, err := s.pool.Query(r.Context(), `
-SELECT id, equipment_id, calibrated_at, result, file_url, created_by, created_at
+SELECT id, equipment_id, COALESCE(method_id, 0), calibrated_at, amb_temp, amb_pres, amb_moist, values,
+	result, file_url, created_by, created_at
 FROM equipment_calibrations WHERE equipment_id = $1 ORDER BY calibrated_at DESC, id DESC`, id)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
@@ -140,19 +152,29 @@ FROM equipment_calibrations WHERE equipment_id = $1 ORDER BY calibrated_at DESC,
 		var it EquipmentCalibration
 		var calibratedAt time.Time
 		var createdAt time.Time
-		if err := rows.Scan(&it.ID, &it.EquipmentID, &calibratedAt, &it.Result, &it.FileURL, &it.CreatedBy, &createdAt); err != nil {
+		var valuesRaw []byte
+		if err := rows.Scan(&it.ID, &it.EquipmentID, &it.MethodID, &calibratedAt, &it.AmbTemp, &it.AmbPres, &it.AmbMoist,
+			&valuesRaw, &it.Result, &it.FileURL, &it.CreatedBy, &createdAt); err != nil {
 			continue
 		}
 		it.CalibratedAt = calibratedAt.Format("2006-01-02")
 		it.CreatedAt = createdAt.Format(time.RFC3339)
+		it.Values = map[string]any{}
+		if len(valuesRaw) > 0 && string(valuesRaw) != "{}" {
+			_ = json.Unmarshal(valuesRaw, &it.Values)
+		}
 		out = append(out, it)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"calibrations": out})
 }
 
-// handleCreateEquipmentCalibration — POST /equipment/{id}/calibrations, multipart
-// (файл необязателен: поля calibrated_at/result + опциональный "file"). После вставки
-// пересчитывает equipment.last_calibration/next_calibration (recomputeCalibrationDates).
+// handleCreateEquipmentCalibration — POST /equipment/{id}/calibrations, multipart:
+// calibrated_at (обязательно), method_id (обязательно, если равнодоступно НЕСКОЛЬКО
+// методов "Основное" для этого оборудования — какого метода calibration_attributes
+// использовать; при ровно одном — клиент передаёт его же), amb_temp/amb_pres/
+// amb_moist (универсальные, всегда), values (JSON-объект — значения
+// calibration_attributes выбранного метода), result, опциональный "file". После
+// вставки пересчитывает equipment.last_calibration/next_calibration.
 func (s *Server) handleCreateEquipmentCalibration(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
@@ -168,7 +190,25 @@ func (s *Server) handleCreateEquipmentCalibration(w http.ResponseWriter, r *http
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "calibrated_at is required (YYYY-MM-DD)"})
 		return
 	}
+	var methodID *int64
+	if v := strings.TrimSpace(r.FormValue("method_id")); v != "" {
+		if parsed, perr := strconv.ParseInt(v, 10, 64); perr == nil && parsed > 0 {
+			methodID = &parsed
+		}
+	}
+	ambTemp := strings.TrimSpace(r.FormValue("amb_temp"))
+	ambPres := strings.TrimSpace(r.FormValue("amb_pres"))
+	ambMoist := strings.TrimSpace(r.FormValue("amb_moist"))
 	result := strings.TrimSpace(r.FormValue("result"))
+	valuesJSON := strings.TrimSpace(r.FormValue("values"))
+	if valuesJSON == "" {
+		valuesJSON = "{}"
+	}
+	var valuesCheck map[string]any
+	if err := json.Unmarshal([]byte(valuesJSON), &valuesCheck); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "values: expected JSON object"})
+		return
+	}
 	email := currentEmail(r)
 
 	var fileURL string
@@ -190,8 +230,9 @@ func (s *Server) handleCreateEquipmentCalibration(w http.ResponseWriter, r *http
 
 	var calID int64
 	err = s.pool.QueryRow(r.Context(), `
-INSERT INTO equipment_calibrations (equipment_id, calibrated_at, result, file_url, created_by)
-VALUES ($1, $2, $3, $4, $5) RETURNING id`, id, calibratedAt, result, fileURL, email).Scan(&calID)
+INSERT INTO equipment_calibrations (equipment_id, method_id, calibrated_at, amb_temp, amb_pres, amb_moist, values, result, file_url, created_by)
+VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10) RETURNING id`,
+		id, methodID, calibratedAt, ambTemp, ambPres, ambMoist, valuesJSON, result, fileURL, email).Scan(&calID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
 		return
@@ -383,6 +424,99 @@ func (s *Server) handleDeleteEquipmentDocument(w http.ResponseWriter, r *http.Re
 	}
 	if _, err := s.pool.Exec(r.Context(),
 		`DELETE FROM files WHERE id = $1 AND equipment_id = $2 AND purpose = 'equipment_doc'`, fileID, id); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// ---- Привязка оборудование↔оборудование (2026-08-26) ----
+//
+// Физическое прикрепление вспомогательного прибора к основному (напр. датчик
+// к анализатору) — ОТДЕЛЬНО и независимо от method_equipment.role (тот решает,
+// показывается ли блок калибровки для КОНКРЕТНОГО метода; этот — только
+// группировку/отображение в общем списке оборудования, "как у документов":
+// прибор, привязанный хотя бы к одному основному, больше не показывается
+// отдельной карточкой верхнего уровня, только внутри карточки(-ек) своего
+// основного прибора(-ов)). many-to-many — один вспомогательный прибор может
+// быть привязан к нескольким основным.
+
+type EquipmentLink struct {
+	MainEquipmentID      int64 `json:"main_equipment_id"`
+	AuxiliaryEquipmentID int64 `json:"auxiliary_equipment_id"`
+}
+
+// handleListAllEquipmentLinks — ВСЯ таблица связей одним запросом (не по одной
+// единице оборудования) — клиент строит из неё и списки "мои вспомогательные"/
+// "я вспомогательное для", и множество "скрыть из общего списка" за один проход,
+// без N+1 запроса на каждую карточку верхнего уровня.
+func (s *Server) handleListAllEquipmentLinks(w http.ResponseWriter, r *http.Request) {
+	rows, err := s.pool.Query(r.Context(),
+		`SELECT main_equipment_id, auxiliary_equipment_id FROM equipment_links ORDER BY main_equipment_id`)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
+		return
+	}
+	defer rows.Close()
+	out := make([]EquipmentLink, 0, 8)
+	for rows.Next() {
+		var it EquipmentLink
+		if err := rows.Scan(&it.MainEquipmentID, &it.AuxiliaryEquipmentID); err != nil {
+			continue
+		}
+		out = append(out, it)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"links": out})
+}
+
+// handleAddEquipmentAuxiliary — POST /equipment/{id}/auxiliaries: {id} становится
+// ОСНОВНЫМ для указанного auxiliary_equipment_id. Тот же вызов обслуживает оба
+// сценария UI ("привязать вспомогательный к этому основному" — {id} = основной;
+// "привязать этот вспомогательный к основному" — {id} = выбранный основной,
+// auxiliary_equipment_id = собственный id прибора со своей карточки).
+func (s *Server) handleAddEquipmentAuxiliary(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid id"})
+		return
+	}
+	var req struct {
+		AuxiliaryEquipmentID int64 `json:"auxiliary_equipment_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json"})
+		return
+	}
+	if req.AuxiliaryEquipmentID <= 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "auxiliary_equipment_id is required"})
+		return
+	}
+	if req.AuxiliaryEquipmentID == id {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "оборудование не может быть привязано само к себе"})
+		return
+	}
+	if _, err := s.pool.Exec(r.Context(), `
+INSERT INTO equipment_links (main_equipment_id, auxiliary_equipment_id) VALUES ($1, $2)
+ON CONFLICT (main_equipment_id, auxiliary_equipment_id) DO NOTHING`, id, req.AuxiliaryEquipmentID); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) handleRemoveEquipmentAuxiliary(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid id"})
+		return
+	}
+	auxID, err := strconv.ParseInt(r.PathValue("auxiliary_id"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid auxiliary_id"})
+		return
+	}
+	if _, err := s.pool.Exec(r.Context(),
+		`DELETE FROM equipment_links WHERE main_equipment_id = $1 AND auxiliary_equipment_id = $2`, id, auxID); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
 		return
 	}

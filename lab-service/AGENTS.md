@@ -105,7 +105,9 @@ chart_configs/input_parameters), расширенный ЖЦ заявки (recei
 | GET | `/lab-members` | admin (без `?lab_id=`) / любой участник лабы (с `?lab_id=`, 2026-08-24) |
 | POST | `/lab-members` | admin, ИЛИ lab_admin ИМЕННО этой лабы (2026-08-24, `requireLabAdminOf` — любая роль сотрудника своей лабы, включая назначение другого lab_admin) |
 | DELETE | `/lab-members/{lab_id}/{email}` | admin, ИЛИ lab_admin ИМЕННО этой лабы (2026-08-24) |
-| PATCH | `/methods/{id}` | admin, ИЛИ lab_admin ХОТЯ БЫ ОДНОЙ из ТЕКУЩИХ лаб метода (2026-08-24, `requireLabAdminOfAny`; при смене `lab_ids` — lab_admin ВСЕХ новых лаб, `requireLabAdminOfAll`) (formulas/classification/chart_configs/input_parameters/presentation/operator_form/lab_ids/description) |
+| PATCH | `/methods/{id}` | admin, ИЛИ lab_admin ХОТЯ БЫ ОДНОЙ из ТЕКУЩИХ лаб метода (2026-08-24, `requireLabAdminOfAny`; при смене `lab_ids` — lab_admin ВСЕХ новых лаб, `requireLabAdminOfAll`) (formulas/classification/chart_configs/input_parameters/presentation/operator_form/lab_ids/description/calibration_attributes/calibration_operator_form, 2026-08-26) |
+| GET | `/equipment-links` | viewer (2026-08-26, вся таблица `equipment_links` одним запросом) |
+| POST/DELETE | `/equipment/{id}/auxiliaries` | editor+ (2026-08-26, `{id}` становится ОСНОВНЫМ для `auxiliary_equipment_id` — many-to-many, независимо от `method_equipment.role`) |
 | DELETE | `/methods/{id}` | admin, ИЛИ lab_admin хотя бы одной из лаб метода (2026-08-24, `requireLabAdminOfAny`) |
 | GET | `/requests/{id}/chart/{cfg_id}` | viewer |
 | POST | `/requests/{id}/protocol?template=&format=` | editor+ |
@@ -361,6 +363,68 @@ docker compose exec lab wget -qO- http://localhost:3000/api/lab/health   # вн�
 ```
 
 ## История
+
+- **2026-08-26 — привязка оборудование↔оборудование; параметры калибровки в
+  конфигураторе метода.** Три прямых запроса пользователя, продолжение записи
+  ниже (v0.2.11) в той же сессии. Задеплоено на VDS, health ok.
+  1. **`equipment_links`** (новая таблица, `main_equipment_id, auxiliary_equipment_id`,
+     PK на паре, CHECK против самопривязки) — физическое прикрепление
+     вспомогательного прибора к основному, ОТДЕЛЬНО и независимо от
+     `method_equipment.role` (тот — видимость блока калибровки ДЛЯ МЕТОДА; этот —
+     только группировка/отображение в общем списке оборудования). many-to-many —
+     один вспомогательный прибор привязывается к нескольким основным (проверено
+     E2E). Заметка: у `method_equipment.equipment_id` FK БЕЗ `ON DELETE CASCADE`
+     (в отличие от `equipment_links`, где cascade есть на обеих сторонах) —
+     удаление оборудования, всё ещё привязанного к методу, корректно отвечает
+     409 (та же дисциплина, что у остальных справочников), но при E2E-очистке
+     это нужно помнить: сначала отвязать от метода, потом удалять.
+  2. **`GET /equipment-links`** — вся таблица одним запросом (не по одной
+     единице оборудования) — клиент строит из неё оба множества («мои
+     вспомогательные»/«я вспомогательное для») и «скрыть с верхнего уровня» за
+     один проход, без N+1 на каждую карточку. `POST/DELETE
+     /equipment/{id}/auxiliaries` — один и тот же вызов обслуживает оба
+     направления UI (привязать вспомогательный к этому основному ИЛИ привязать
+     этот вспомогательный к выбранному основному — разница только в том, чей id
+     идёт в `{id}`, а чей — в `auxiliary_equipment_id`).
+  3. **Параметры калибровки метода** — прямое продолжение записи ниже
+     («калибровка проводится сотрудниками лаборатории... так же как результаты
+     испытаний, далее добавим блок настроек калибровки»). Новые JSONB-колонки
+     `methods.calibration_attributes` (проще `input_parameters` — только
+     id/name/data_type, без fill_method/level/formula/aggregation: калибровочное
+     значение всегда вводится вручную ровно один раз за запись журнала) и
+     `methods.calibration_operator_form` (тип `MethodOperatorForm` переиспользован
+     как есть — та же форма {fields:[{attribute_id,required}]}, что у обычных
+     результатов). `handleUpdateMethodConfig` — тот же COALESCE-партиал паттерн,
+     что у остальных полей конфига. `loadMethodConfig`/`handleListMethods`/
+     `sync.go` pull — все три места разбора конфига метода (см. запись
+     2026-08-21 ниже про этот же класс риска у presentation) обновлены синхронно
+     в этом же коммите.
+  4. **`equipment_calibrations`** — новые колонки `method_id` (чьи
+     `calibration_attributes` применялись — оборудование может быть «Основное»
+     сразу для нескольких методов, см. `method_equipment.role`),
+     `amb_temp`/`amb_pres`/`amb_moist` (универсальные системные поля калибровки —
+     тот же принцип, что `requests.amb_temp`/`amb_pres`/`amb_moist` у обычных
+     результатов испытаний, см. sbe-lims `AGENTS.md`, «Правило: системные
+     атрибуты» — одни и те же для ЛЮБОГО метода, не заводятся как
+     calibration_attributes), `values` JSONB (значения calibration_attributes
+     ВЫБРАННОГО метода, та же роль, что `measurement_results.values`).
+     `recomputeCalibrationDates` не менялся — по-прежнему просто
+     `MAX(calibrated_at)`/`+interval`, независимо от метода записи.
+  5. **E2E на сервере** (тестовые equipment id 3/4, метод 1=ГГ временно получил
+     тестовый `calibration_attributes`): создание main+auxiliary → привязка →
+     подтверждена в `GET /equipment-links` → many-to-many (aux привязан ко ВТОРОМУ
+     main) → отвязка → самопривязка корректно отклонена (400). Метод 1 временно
+     получил `calibration_attributes=[{id:"deviation",...}]` → оборудование 3
+     привязано к методу 1 с ролью main → добавлена запись калибровки с
+     `method_id`+`values`+`amb_*` → `GET .../calibrations` вернул всё корректно,
+     `last_calibration` пересчитан. **Тестовая конфигурация метода 1 (ГГ, реальный
+     производственный метод) откачена обратно на `calibration_attributes: []`**
+     сразу после проверки — временное состояние не оставлено. Тестовое
+     оборудование удалено (сначала отвязано от метода — см. заметку в п.1 выше).
+  6. `go build`/`go vet`/`go test` — чисто (новых юнит-тестов на этот раунд не
+     добавлено — вся логика либо тривиальный CRUD/JSONB passthrough по
+     существующим паттернам, либо БД-зависимый агрегат, уже покрытый классом
+     проверки «живой E2E», см. соседние записи).
 
 - **2026-08-26 — расширение «Оборудование» (эксплуатация/поверка/калибровка/
   методы/документация) + фикс безопасности write-роли на смену статуса заявки.**
