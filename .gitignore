@@ -1,3 +1,14 @@
 node_modules/
 data.json
 *.log
+
+# --- бэк (lab-service, ветка backend; общий для sbe-lims/sbe-requests) ---
+.env
+.env.*
+!.env.example
+*.exe
+*.pem
+*.key
+*.crt
+*.p12
+**/rclone.conf
