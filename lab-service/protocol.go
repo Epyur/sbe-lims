@@ -54,10 +54,13 @@ type placeholderCtx struct {
 	objectChars     map[string]any
 	targetIndicator string
 	inventorName    string // req.InventorID резолвится в имя один раз в buildProtocol
-	attrsByID       map[string]MethodAttribute
-	series          []map[string]any
-	stats           map[string]any
-	agg             map[string]any
+	methodName      string // 2026-08-27: плейсхолдер method_name — админ сам решает,
+	// показывать ли название метода (жёсткого "Метод: ..." заголовка больше нет,
+	// см. AGENTS.md "Метод: ... — теперь просто плейсхолдер").
+	attrsByID map[string]MethodAttribute
+	series    []map[string]any
+	stats     map[string]any
+	agg       map[string]any
 	// photoRegistry — только при рендере DOCX (2026-08-24, см. docxPhotoRegistry): при
 	// рендере HTML остаётся nil, фото-атрибуты рендерятся прямой ссылкой (renderTableHTML/
 	// renderInlineHTML), сеть не нужна. Общий на ВЕСЬ протокол объект (передаётся всем
@@ -146,6 +149,8 @@ func resolveSystemPlaceholder(ctx *placeholderCtx, id string) string {
 	switch id {
 	case "title":
 		return ctx.req.Title
+	case "method_name":
+		return ctx.methodName
 	case "number":
 		// Полный номер (2026-08-24, по прямому запросу пользователя — "везде...
 		// всегда должен фигурировать полный номер заявки (с кодом проекта,
@@ -450,17 +455,15 @@ func protocolHTML(p *protocolData, kind string) string {
 	b.WriteString("h1{font-size:20px}h2{font-size:16px;margin-top:16px}h3{font-size:14px;margin-top:12px}h4{font-size:13px;margin:8px 0 4px}")
 	b.WriteString("table{border-collapse:collapse;margin:8px 0}")
 	b.WriteString("td,th{border:1px solid #999;padding:4px 8px;font-size:13px;text-align:center}th{background:#f0f0f0}</style></head><body>")
-	fmt.Fprintf(&b, "<h1>%s № %s</h1>", docTitle(kind), html.EscapeString(p.Number))
-	b.WriteString("<table>")
-	fieldRow(&b, "Наименование", p.Title)
-	fieldRow(&b, "Объект", p.Object)
-	fieldRow(&b, "ЕКН", p.EKN)
-	fieldRow(&b, "Заказчик", p.Owner)
-	fieldRow(&b, "Статус", p.Status)
-	fieldRow(&b, "Создана", p.CreatedAt)
-	b.WriteString("</table>")
+	// Жёсткий заголовок (номер/наименование/объект/ЕКН/заказчик/статус/дата +
+	// "Метод: ...") убран (2026-08-27, прямое требование пользователя: "в
+	// протоколы/выписки/UI не должно ничего попадать, что не может быть
+	// настроено пользователем в конфигураторе"). Всё это уже доступно как
+	// обычные плейсхолдеры ({number}/{title}/{object_name}/{ekn}/{owner_email}/
+	// {status}/{created_at}/{method_name}) — админ сам решает, какой блок с
+	// каким текстом добавить в presentation.blocks, без миграции старых
+	// методов (см. AGENTS.md).
 	for _, m := range p.Methods {
-		fmt.Fprintf(&b, "<h2>Метод: %s</h2>", html.EscapeString(m.MethodName))
 		renderChart := renderBlockChartHTML(&b, m)
 		for _, blk := range m.Blocks {
 			for _, node := range blk.Content {
@@ -482,10 +485,6 @@ func docTitle(kind string) string {
 	default:
 		return "Протокол испытаний"
 	}
-}
-
-func fieldRow(b *strings.Builder, label, value string) {
-	fmt.Fprintf(b, "<tr><td><b>%s</b></td><td>%s</td></tr>", html.EscapeString(label), html.EscapeString(value))
 }
 
 func fmtVal(v any) string {
@@ -802,16 +801,8 @@ func (s *Server) protocolDocx(ctx context.Context, p *protocolData, kind string)
 	doc.WriteString(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>`)
 	doc.WriteString(`<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">`)
 	doc.WriteString(`<w:body>`)
-	fmt.Fprintf(&doc, `<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>%s</w:t></w:r></w:p>`,
-		xmlEscape(docTitle(kind)+" № "+p.Number))
-	docxTableRow(&doc, "Наименование", p.Title)
-	docxTableRow(&doc, "Объект", p.Object)
-	docxTableRow(&doc, "ЕКН", p.EKN)
-	docxTableRow(&doc, "Заказчик", p.Owner)
-	docxTableRow(&doc, "Статус", p.Status)
+	// Жёсткий заголовок убран (2026-08-27) — см. тот же комментарий в protocolHTML.
 	for _, m := range p.Methods {
-		fmt.Fprintf(&doc, `<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>%s</w:t></w:r></w:p>`,
-			xmlEscape("Метод: "+m.MethodName))
 		for _, blk := range m.Blocks {
 			for _, node := range blk.Content {
 				doc.WriteString(renderNodeDocx(m.Ctx, node))
@@ -905,11 +896,6 @@ func (s *Server) protocolDocx(ctx context.Context, p *protocolData, kind string)
 		return nil, err
 	}
 	return buf.Bytes(), nil
-}
-
-func docxTableRow(b *strings.Builder, label, value string) {
-	fmt.Fprintf(b, `<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>%s: </w:t></w:r><w:r><w:t>%s</w:t></w:r></w:p>`,
-		xmlEscape(label), xmlEscape(value))
 }
 
 func xmlEscape(s string) string {
@@ -1024,7 +1010,7 @@ JOIN methods m ON m.id = r.method_id WHERE r.id = $1 ORDER BY m.id`, requestID)
 		targetIndicator, _ := s.loadTargetIndicator(ctx, requestID, m.id)
 		pctx := &placeholderCtx{
 			req: req, objectName: objectName, objectChars: objectChars,
-			targetIndicator: targetIndicator, inventorName: inventorName,
+			targetIndicator: targetIndicator, inventorName: inventorName, methodName: m.name,
 			attrsByID: methodAttributesByID(cfg),
 			series:    series, stats: stats, agg: agg,
 		}

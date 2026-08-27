@@ -1,6 +1,7 @@
 import { App, Modal } from 'obsidian';
 import { toggleSubSupPalette } from './subsup';
 import type {
+  AttributeDataType,
   ChartConfig,
   DocumentBlock,
   InlineNode,
@@ -11,15 +12,24 @@ import type {
   TableColumn,
 } from '../types/lims';
 
-/** Каталог системных плейсхолдеров (заявка/объект) — резолвится сервером из
- * уже загруженных данных при рендере (см. lab-service/protocol.go
+/** Каталог системных плейсхолдеров (заявка/объект/метод) — резолвится сервером
+ * из уже загруженных данных при рендере (см. lab-service/protocol.go
  * resolveSystemPlaceholder). Список держим синхронизированным вручную с Go —
  * добавление нового системного поля требует правки в обоих местах (и в
  * systemRequestFields/email_ingest.go, если поле заполняется из письма).
- * Экспортирован — переиспользуется справкой конфигуратора методов и
- * автоматическим разделом формы для испытателя (lims-view.ts), см.
- * sbe-lims/AGENTS.md, "Системные атрибуты". */
-export const SYSTEM_PLACEHOLDERS: Array<{ id: string; label: string }> = [
+ * Экспортирован — переиспользуется пикером плейсхолдеров в редакторе блоков
+ * представления и пикером полей «Форма для испытателя» (lims-view.ts), см.
+ * sbe-lims/AGENTS.md, "Системные атрибуты".
+ *
+ * `data_type` заполнен ТОЛЬКО у полей, которые реально вводит испытатель
+ * вручную во время эксперимента (даты/условия среды) — это же поле решает,
+ * предлагать ли плейсхолдер в пикере «Форма для испытателя» (см.
+ * OPERATOR_FORM_SYSTEM_IDS ниже): у остальных (реквизиты заявки/объекта,
+ * не заполняемые испытателем) data_type не задан — они годятся только для
+ * блоков представления, не для формы ввода. `inventor` (ФИО испытателя) —
+ * ссылочный тип (inventor_id заявки), не текстовое поле, поэтому data_type
+ * не задан — сейчас как поле формы ввода не поддерживается. */
+export const SYSTEM_PLACEHOLDERS: Array<{ id: string; label: string; data_type?: AttributeDataType }> = [
   { id: 'title', label: 'Наименование заявки' },
   { id: 'number', label: 'Номер заявки' },
   { id: 'object_name', label: 'Материал (объект)' },
@@ -35,17 +45,26 @@ export const SYSTEM_PLACEHOLDERS: Array<{ id: string; label: string }> = [
   { id: 'batch_number', label: 'Номер партии' },
   { id: 'sample_id', label: 'Идентификатор образца' },
   { id: 'thickness', label: 'Толщина образца' },
+  // Название метода (2026-08-27) — раньше жёстко печаталось "Метод: ..." в
+  // начале каждого протокола/выписки/краткого вида без права убрать/подвинуть/
+  // переформулировать; теперь обычный плейсхолдер, как и всё остальное.
+  { id: 'method_name', label: 'Название метода' },
   // Универсальные для ЛЮБОГО метода (2026-08-23) — испытатель/даты/условия среды
-  // при испытании; заполняются автоматически из письма-результата (email-импорт),
-  // не заводятся как атрибут конкретного метода (см. AGENTS.md).
+  // при испытании; заполняются автоматически из письма-результата (email-импорт)
+  // ИЛИ вручную испытателем через форму (2026-08-27) — не заводятся как атрибут
+  // конкретного метода (см. AGENTS.md).
   { id: 'inventor', label: 'Испытатель (ФИО)' },
-  { id: 'report_date', label: 'Дата протокола' },
-  { id: 'samples_in_date', label: 'Дата поступления материала' },
-  { id: 'exp_date', label: 'Дата эксперимента' },
-  { id: 'amb_temp', label: 'Температура воздуха при испытании, °C' },
-  { id: 'amb_pres', label: 'Атмосферное давление при испытании, мм.рт.ст' },
-  { id: 'amb_moist', label: 'Влажность воздуха при испытании, %' },
+  { id: 'report_date', label: 'Дата протокола', data_type: 'date' },
+  { id: 'samples_in_date', label: 'Дата поступления материала', data_type: 'date' },
+  { id: 'exp_date', label: 'Дата эксперимента', data_type: 'date' },
+  { id: 'amb_temp', label: 'Температура воздуха при испытании, °C', data_type: 'float' },
+  { id: 'amb_pres', label: 'Атмосферное давление при испытании, мм.рт.ст', data_type: 'float' },
+  { id: 'amb_moist', label: 'Влажность воздуха при испытании, %', data_type: 'float' },
 ];
+
+/** Подмножество SYSTEM_PLACEHOLDERS, годное как поле «Форма для испытателя» —
+ * см. комментарий над SYSTEM_PLACEHOLDERS. */
+export const OPERATOR_FORM_SYSTEM_FIELDS = SYSTEM_PLACEHOLDERS.filter(s => s.data_type);
 
 const AGG_LABELS: Record<PlaceholderAgg, string> = {
   avg: 'среднее', min: 'минимальное', max: 'максимальное', first: 'первая серия', last: 'последняя серия',

@@ -1065,6 +1065,18 @@ func (s *Server) handleCreateResult(w http.ResponseWriter, r *http.Request) {
 		Values      map[string]any `json:"values"`
 		PhotoBefore string         `json:"photo_before"`
 		PhotoAfter  string         `json:"photo_after"`
+		// Системные поля заявки (2026-08-27) — испытатель заполняет их вручную
+		// через «Форму для испытателя» (мобильный/десктоп), если админ явно
+		// добавил их в operator_form.fields конфигуратора; раньше эти колонки
+		// заполнялись ТОЛЬКО автоматически из письма-результата (email_ingest.go,
+		// свой независимый путь — не трогаем). Пустая строка = не менять текущее
+		// значение.
+		ReportDate    string `json:"report_date"`
+		SamplesInDate string `json:"samples_in_date"`
+		ExpDate       string `json:"exp_date"`
+		AmbTemp       string `json:"amb_temp"`
+		AmbPres       string `json:"amb_pres"`
+		AmbMoist      string `json:"amb_moist"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json"})
@@ -1089,8 +1101,39 @@ func (s *Server) handleCreateResult(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
 		return
 	}
+	if err := s.updateRequestSystemFields(r.Context(), requestID,
+		req.ReportDate, req.SamplesInDate, req.ExpDate, req.AmbTemp, req.AmbPres, req.AmbMoist); err != nil {
+		// Результаты уже сохранены — не проваливаем весь ответ из-за этого, просто логируем
+		// (тот же принцип, что у recomputeStatistics/applyAggregatedFormulas в saveResultSeries).
+		log.Printf("update request system fields: %v", err)
+	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"id": id, "series_num": seriesNum, "values": req.Values})
+}
+
+// updateRequestSystemFields пишет вручную введённые системные поля заявки
+// (см. комментарий в handleCreateResult) — те же колонки requests, что и
+// email_ingest.go, но по прямому вводу испытателя через форму. Пустая строка =
+// не менять текущее значение (NULLIF+COALESCE — не даёт случайно затереть уже
+// пришедшее из письма).
+func (s *Server) updateRequestSystemFields(
+	ctx context.Context, requestID int64, reportDate, samplesInDate, expDate, ambTemp, ambPres, ambMoist string,
+) error {
+	if reportDate == "" && samplesInDate == "" && expDate == "" && ambTemp == "" && ambPres == "" && ambMoist == "" {
+		return nil
+	}
+	_, err := s.pool.Exec(ctx, `
+UPDATE requests SET
+	report_date = COALESCE(NULLIF($2, ''), report_date),
+	samples_in_date = COALESCE(NULLIF($3, ''), samples_in_date),
+	exp_date = COALESCE(NULLIF($4, ''), exp_date),
+	amb_temp = COALESCE(NULLIF($5, ''), amb_temp),
+	amb_pres = COALESCE(NULLIF($6, ''), amb_pres),
+	amb_moist = COALESCE(NULLIF($7, ''), amb_moist),
+	updated_at = now()
+WHERE id = $1`,
+		requestID, reportDate, samplesInDate, expDate, ambTemp, ambPres, ambMoist)
+	return err
 }
 
 // formulaApplyError оборачивает ошибку DSL-формулы, чтобы HTTP-хендлер мог отличить
