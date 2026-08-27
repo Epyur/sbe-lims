@@ -35,7 +35,7 @@ import { downloadBase64File } from '../../../sbe-core/src/utils/download';
 import { sanitizeAttributesWithRename } from '../services/llm-assist.service';
 import type { ExistingAttributeSummary } from '../services/llm-assist.service';
 import { extractStandardText } from '../services/rtf-to-text';
-import { buildMobileDeepLink, mobileQrDataUrl, renderMobileQr } from '../utils/mobile-link';
+import { mobileQrDataUrl, renderMobileQr } from '../utils/mobile-link';
 
 export const SBE_LIMS_VIEW_TYPE = 'sbe-lims-view';
 
@@ -984,13 +984,14 @@ export class LimsView extends ItemView {
     meta.createDiv({ text: `Статус: ${STATUS_LABELS[req.status] || req.status}` });
     meta.createDiv({ text: `👷 Исполнитель: ${req.assigned_to || 'не назначен'}` });
 
-    // QR для мобильного ввода результатов (2026-08-27) — тот же диплинк, что
-    // печатает sbe-requests на этикетку образца; показывается и здесь на
-    // случай, если этикетку нужно переклеить/распечатать заново.
+    // QR для мобильного ввода результатов (2026-08-27) — кодирует номер заявки
+    // (тем же текстом, что и подпись под ним), не ссылку: Obsidian mobile не
+    // имеет доступа к камере, сканирует внешнее приложение телефона, а номер
+    // испытатель вставляет вручную в sbe-lims-mobile.
     const qrBlock = this.bodyEl.createDiv({ cls: 'tn-lims-qr-block tn-lims-mb12' });
     const qrCanvas = qrBlock.createEl('canvas');
-    void renderMobileQr(qrCanvas, buildMobileDeepLink(this.app, 'request', req.id));
-    qrBlock.createDiv({ cls: 'tn-lims-meta', text: 'QR для мобильного ввода результатов' });
+    void renderMobileQr(qrCanvas, fullRequestNumber(req));
+    qrBlock.createDiv({ cls: 'tn-lims-meta', text: 'QR с номером заявки — для мобильного ввода результатов' });
 
     if (req.description) {
       this.bodyEl.createDiv({ cls: 'tn-lims-meta tn-lims-mb12' }).createDiv({ text: `📝 ${req.description}` });
@@ -3072,13 +3073,14 @@ export class LimsView extends ItemView {
       // QR-этикетка оборудования (2026-08-27) — постоянная, клеится один раз на
       // прибор сразу после создания записи (не только для «Основного» для
       // метода — этикетка нужна раньше, чем настроена привязка к методу, чтобы
-      // физически промаркировать прибор). Каждое сканирование на мобильном
-      // открывает форму новой записи журнала калибровки для этого оборудования
-      // (buildMobileDeepLink); кнопка ничего не создаёт на сервере — просто
+      // физически промаркировать прибор). Кодирует код оборудования (тем же
+      // текстом, что подпись под ним), не ссылку — см. renderMobileQr; сканирует
+      // внешнее приложение телефона, код испытатель вставляет вручную в
+      // sbe-lims-mobile. Кнопка ничего не создаёт на сервере — просто
       // показывает/печатает ту же самую этикетку.
       const qrRow = body.createDiv({ cls: 'tn-lims-qr-block tn-lims-mb12' });
       const qrCanvas = qrRow.createEl('canvas');
-      void renderMobileQr(qrCanvas, buildMobileDeepLink(this.app, 'equipment', eq.id));
+      void renderMobileQr(qrCanvas, eq.code || `#${eq.id}`);
       const qrInfo = qrRow.createDiv();
       qrInfo.createDiv({ cls: 'tn-lims-meta', text: 'QR-этикетка для мобильной калибровки' });
       const qrPrintBtn = qrInfo.createEl('button', { text: '🖶 Печать этикетки', cls: 'tn-btn tn-btn-ghost' });
@@ -3517,9 +3519,9 @@ export class LimsView extends ItemView {
    * (скрытый узел + @media print прямо в окне Obsidian) на практике печатала
    * пустой документ. */
   private async printEquipmentQrLabel(eq: Equipment): Promise<void> {
-    const link = buildMobileDeepLink(this.app, 'equipment', eq.id);
-    const dataUrl = await mobileQrDataUrl(link);
-    const number = escapeHtml(eq.code || `#${eq.id}`);
+    const code = eq.code || `#${eq.id}`;
+    const dataUrl = await mobileQrDataUrl(code);
+    const number = escapeHtml(code);
     const title = escapeHtml(eq.name || '');
     const html = `<!DOCTYPE html>
 <html lang="ru"><head><meta charset="utf-8"><title>QR-этикетка оборудования</title>
