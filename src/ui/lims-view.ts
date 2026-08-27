@@ -1,4 +1,4 @@
-import { FileSystemAdapter, ItemView, Modal, Notice, WorkspaceLeaf } from 'obsidian';
+import { FileSystemAdapter, ItemView, Menu, Modal, Notice, WorkspaceLeaf } from 'obsidian';
 import type { App } from 'obsidian';
 import type SbeLimsPlugin from '../main';
 import type {
@@ -28,7 +28,7 @@ import type {
   PresentationKind,
   TimeseriesSeriesConfig,
 } from '../types/lims';
-import { renderBlockEditor, SYSTEM_PLACEHOLDERS } from './block-editor';
+import { OPERATOR_FORM_SYSTEM_FIELDS, renderBlockEditor, SYSTEM_PLACEHOLDERS } from './block-editor';
 import { toggleSubSupPalette } from './subsup';
 import { errorMessage } from '../../../sbe-core/src/utils/errors';
 import { downloadBase64File } from '../../../sbe-core/src/utils/download';
@@ -1554,6 +1554,36 @@ export class LimsView extends ItemView {
       blocks.push({ id: `blk_${Date.now()}`, title: 'Новый блок', content: [], show_in_ui: true, show_in_excerpt: false, show_in_protocol: true });
       redrawBlocks();
     });
+    // Копирование блока из другого метода (2026-08-27, прямой запрос пользователя —
+    // после того как жёсткий заголовок "Метод: ..." убрали из протокола/выписки/
+    // короткого вида без миграции, у методов нет общих блоков автоматически;
+    // копирование — способ быстро завести одинаковый блок сразу в нескольких
+    // методах, а не набирать текст заново). Глубокая копия с НОВЫМ id — совпадение
+    // id с уже существующим блоком текущего метода не допускается.
+    const copyBlockBtn = presentationBody.createEl('button', {
+      text: '📋 Скопировать блок из другого метода', cls: 'tn-btn tn-btn-ghost',
+    });
+    copyBlockBtn.addEventListener('click', (ev) => {
+      const otherMethods = this.plugin.methods.filter(m => m.id !== methodId && m.presentation.blocks.length > 0);
+      if (otherMethods.length === 0) { new Notice('У других методов нет блоков представления для копирования'); return; }
+      const methodMenu = new Menu();
+      for (const m of otherMethods) {
+        methodMenu.addItem(item => item.setTitle(`${m.code}${m.name ? ' — ' + m.name : ''}`).onClick((evt: MouseEvent | KeyboardEvent) => {
+          const blockMenu = new Menu();
+          for (const b of m.presentation.blocks) {
+            blockMenu.addItem(item2 => item2.setTitle(b.title || b.id).onClick(() => {
+              const clone = JSON.parse(JSON.stringify(b)) as DocumentBlock;
+              clone.id = `blk_${Date.now()}`;
+              blocks.push(clone);
+              redrawBlocks();
+              new Notice(`Блок «${clone.title || clone.id}» скопирован из ${m.code}`);
+            }));
+          }
+          blockMenu.showAtMouseEvent(evt instanceof MouseEvent ? evt : ev);
+        }));
+      }
+      methodMenu.showAtMouseEvent(ev);
+    });
 
     importBtn.addEventListener('click', async () => {
       const file = importFileInput.files?.[0];
@@ -1621,16 +1651,20 @@ export class LimsView extends ItemView {
       }
     });
 
-    // ---- Блок 3в: форма для испытателя — только конструктор схемы (2026-08-22).
-    // Реальный фронт ввода данных лаборантом (мобильный/веб) пока не разрабатывается —
-    // здесь описывается только, какие атрибуты он будет заполнять. ----
+    // ---- Блок 3в: форма для испытателя — конструктор схемы; реальный ввод —
+    // мобильный плагин sbe-lims-mobile (с 2026-08-27, v0.1.0). Поля — атрибуты
+    // метода И/ИЛИ системные (дата эксперимента/поступления материала/протокола,
+    // температура/давление/влажность воздуха) — раньше системные считались
+    // "подставляются сами" без права выбора, теперь явно добавляются сюда: без
+    // этого мобильной форме неоткуда взять их название/тип, а серверу — куда их
+    // сохранить (см. sbe-lims/AGENTS.md, "системные атрибуты формы испытателя"). ----
     const operatorFormFields: OperatorFormField[] = cfg.operator_form.fields
-      .filter(f => attrs.some(a => a.id === f.attribute_id))
+      .filter(f => attrs.some(a => a.id === f.attribute_id) || OPERATOR_FORM_SYSTEM_FIELDS.some(s => s.id === f.attribute_id))
       .map(f => ({ ...f }));
     const operatorFormBody = this.renderCollapsibleSection(form, 'Форма для испытателя (данные эксперимента)');
     operatorFormBody.createDiv({ cls: 'tn-lims-meta' }).setText(
-      'Какие атрибуты лаборант вводит при эксперименте — конструктор схемы; сам ввод ' +
-      '(мобильный/веб-фронт для испытателя) появится позже, здесь только описание формы.',
+      'Какие поля испытатель заполняет при эксперименте (мобильный ввод — ЛИМС Мобайл): ' +
+      'атрибуты метода и/или системные (даты, температура/давление/влажность воздуха).',
     );
     const operatorFormListEl = operatorFormBody.createDiv();
     const operatorFormPreviewEl = operatorFormBody.createDiv();
@@ -1641,11 +1675,29 @@ export class LimsView extends ItemView {
     };
     redrawOperatorForm();
     const addOperatorFieldBtn = operatorFormBody.createEl('button', { text: '➕ Поле формы', cls: 'tn-btn tn-btn-ghost' });
-    addOperatorFieldBtn.addEventListener('click', () => {
-      const free = attrs.find(a => a.id && !operatorFormFields.some(f => f.attribute_id === a.id));
-      if (!free) { new Notice('Все атрибуты метода уже добавлены в форму испытателя'); return; }
-      operatorFormFields.push({ attribute_id: free.id, required: false });
-      redrawOperatorForm();
+    addOperatorFieldBtn.addEventListener('click', (ev) => {
+      const menu = new Menu();
+      let any = false;
+      for (const a of attrs.filter(a => a.id && !operatorFormFields.some(f => f.attribute_id === a.id))) {
+        any = true;
+        menu.addItem(item => item.setTitle(a.name || a.id).onClick(() => {
+          operatorFormFields.push({ attribute_id: a.id, required: false });
+          redrawOperatorForm();
+        }));
+      }
+      const freeSystem = OPERATOR_FORM_SYSTEM_FIELDS.filter(s => !operatorFormFields.some(f => f.attribute_id === s.id));
+      if (freeSystem.length > 0) {
+        if (any) menu.addSeparator();
+        for (const s of freeSystem) {
+          any = true;
+          menu.addItem(item => item.setTitle(`⚙ ${s.label}`).onClick(() => {
+            operatorFormFields.push({ attribute_id: s.id, required: false });
+            redrawOperatorForm();
+          }));
+        }
+      }
+      if (!any) { new Notice('Все доступные поля уже добавлены в форму испытателя'); return; }
+      menu.showAtMouseEvent(ev);
     });
 
     // ---- Блок 4: параметры калибровки (2026-08-26) — атрибуты, которые
@@ -1838,9 +1890,14 @@ export class LimsView extends ItemView {
       const rowFlex = row.createDiv({ cls: 'tn-lims-flex' });
       rowFlex.createSpan({ text: '⠿', cls: 'tn-lims-meta' });
       const attrSelect = rowFlex.createEl('select', { cls: 'tn-lims-select' });
+      const attrGroup = attrSelect.createEl('optgroup', { attr: { label: 'Атрибуты метода' } });
       for (const a of attrs) {
         if (!a.id) continue;
-        attrSelect.createEl('option', { attr: { value: a.id }, text: a.name || a.id });
+        attrGroup.createEl('option', { attr: { value: a.id }, text: a.name || a.id });
+      }
+      const systemGroup = attrSelect.createEl('optgroup', { attr: { label: 'Системные' } });
+      for (const s of OPERATOR_FORM_SYSTEM_FIELDS) {
+        systemGroup.createEl('option', { attr: { value: s.id }, text: s.label });
       }
       attrSelect.value = f.attribute_id;
       attrSelect.addEventListener('change', () => { f.attribute_id = attrSelect.value; onChange(); });
@@ -1871,24 +1928,30 @@ export class LimsView extends ItemView {
   }
 
   /** Read-only предпросмотр «как увидит испытатель» — поля формы отрисованы
-   * disabled, только layout. Системные данные (2026-08-23) показаны ВСЕГДА, даже
-   * если метод-специфичных полей нет — испытатель получает их автоматически
-   * (заполняются из письма-результата или позже из фронта ввода), в
-   * operator_form.fields их заводить не нужно (правило: системные атрибуты
-   * автоматически попадают в форму испытателя, см. AGENTS.md). */
+   * disabled, только layout. Реквизиты заявки/объекта (2026-08-23, без
+   * data_type в SYSTEM_PLACEHOLDERS — см. block-editor.ts) сюда добавить
+   * нельзя, испытатель их не вводит, они уже известны из самой заявки;
+   * показаны отдельной справочной строкой. Остальные системные (даты/условия
+   * среды) — обычные добавляемые поля формы наравне с атрибутами метода
+   * (2026-08-27, раньше считались "подставляются сами" без права выбора). */
   private renderOperatorFormPreview(container: HTMLElement, fields: OperatorFormField[], attrs: MethodAttribute[]): void {
     container.empty();
-    container.createDiv({ cls: 'tn-lims-meta' }).setText('Системные данные (заполняются автоматически, настраивать не нужно):');
+    const referenceOnly = SYSTEM_PLACEHOLDERS.filter(s => !s.data_type);
+    container.createDiv({ cls: 'tn-lims-meta' }).setText(
+      'Справочно (уже известно из заявки, испытатель не вводит — доступно только как плейсхолдер в блоках представления):',
+    );
     const sysRow = container.createDiv({ cls: 'tn-lims-flex tn-lims-mb8' });
-    sysRow.createSpan({ text: SYSTEM_PLACEHOLDERS.map(s => s.label).join(', ') + '.' });
+    sysRow.createSpan({ text: referenceOnly.map(s => s.label).join(', ') + '.' });
     if (fields.length === 0) return;
     container.createDiv({ cls: 'tn-lims-meta' }).setText('Предпросмотр — как увидит испытатель:');
     for (const f of fields) {
       const attr = attrs.find(a => a.id === f.attribute_id);
+      const sys = OPERATOR_FORM_SYSTEM_FIELDS.find(s => s.id === f.attribute_id);
       const row = container.createDiv({ cls: 'tn-lims-flex' });
-      row.createSpan({ text: (f.label || attr?.name || f.attribute_id) + (f.required ? ' *' : '') });
+      row.createSpan({ text: (f.label || attr?.name || sys?.label || f.attribute_id) + (f.required ? ' *' : '') });
       const input = row.createEl('input', { attr: { type: 'text', disabled: true }, cls: 'tn-lims-input' });
-      input.placeholder = attr?.data_type === 'photo' ? '[фото]' : attr?.data_type || '';
+      const dataType = attr?.data_type || sys?.data_type;
+      input.placeholder = dataType === 'photo' ? '[фото]' : dataType || '';
       if (f.help_text) row.createSpan({ text: f.help_text, cls: 'tn-lims-meta' });
     }
   }
