@@ -35,6 +35,7 @@ import { downloadBase64File } from '../../../sbe-core/src/utils/download';
 import { sanitizeAttributesWithRename } from '../services/llm-assist.service';
 import type { ExistingAttributeSummary } from '../services/llm-assist.service';
 import { extractStandardText } from '../services/rtf-to-text';
+import { buildMobileDeepLink, mobileQrDataUrl, renderMobileQr } from '../utils/mobile-link';
 
 export const SBE_LIMS_VIEW_TYPE = 'sbe-lims-view';
 
@@ -977,6 +978,14 @@ export class LimsView extends ItemView {
     meta.createDiv({ text: `📅 Обновлена: ${this.formatDate(req.updated_at)}` });
     meta.createDiv({ text: `Статус: ${STATUS_LABELS[req.status] || req.status}` });
     meta.createDiv({ text: `👷 Исполнитель: ${req.assigned_to || 'не назначен'}` });
+
+    // QR для мобильного ввода результатов (2026-08-27) — тот же диплинк, что
+    // печатает sbe-requests на этикетку образца; показывается и здесь на
+    // случай, если этикетку нужно переклеить/распечатать заново.
+    const qrBlock = this.bodyEl.createDiv({ cls: 'tn-lims-qr-block tn-lims-mb12' });
+    const qrCanvas = qrBlock.createEl('canvas');
+    void renderMobileQr(qrCanvas, buildMobileDeepLink(this.app, 'request', req.id));
+    qrBlock.createDiv({ cls: 'tn-lims-meta', text: 'QR для мобильного ввода результатов' });
 
     if (req.description) {
       this.bodyEl.createDiv({ cls: 'tn-lims-meta tn-lims-mb12' }).createDiv({ text: `📝 ${req.description}` });
@@ -3420,6 +3429,20 @@ export class LimsView extends ItemView {
       const calibrations = await this.plugin.syncService.listEquipmentCalibrations(eq.id);
       container.empty();
       container.createEl('strong', { text: 'Калибровка (основное оборудование)' });
+
+      // QR-этикетка оборудования (2026-08-27) — постоянная, клеится один раз на
+      // прибор; каждое сканирование на мобильном открывает форму новой записи
+      // журнала калибровки для этого оборудования (buildMobileDeepLink). Кнопка
+      // «Калибровать» ничего не создаёт на сервере — просто показывает/печатает
+      // ту же самую этикетку.
+      const qrRow = container.createDiv({ cls: 'tn-lims-qr-block' });
+      const qrCanvas = qrRow.createEl('canvas');
+      void renderMobileQr(qrCanvas, buildMobileDeepLink(this.app, 'equipment', eq.id));
+      const qrInfo = qrRow.createDiv();
+      qrInfo.createDiv({ cls: 'tn-lims-meta', text: 'QR-этикетка для мобильной калибровки' });
+      const qrPrintBtn = qrInfo.createEl('button', { text: '🖶 Калибровать (печать этикетки)', cls: 'tn-btn tn-btn-ghost' });
+      qrPrintBtn.addEventListener('click', () => this.printEquipmentQrLabel(eq));
+
       const mainMethodIds = methodLinks.filter(l => l.role === 'main').map(l => l.method_id);
       const intervalRow = container.createDiv({ cls: 'tn-lims-flex' });
       intervalRow.createSpan({ text: 'Межкалибровочный период, мес.:', cls: 'tn-lims-meta' });
@@ -3486,6 +3509,23 @@ export class LimsView extends ItemView {
    * для ЛЮБОГО метода, тот же принцип, что у системных атрибутов обычных
    * результатов испытаний). Оборудование «Основное» сразу для нескольких методов —
    * select метода, переключение перестраивает динамические поля. */
+  /** Печать постоянной QR-этикетки оборудования (2026-08-27) — та же логика,
+   * что printQrSheet в sbe-requests: скрытый узел + @media print + window.print(),
+   * без временных файлов. */
+  private printEquipmentQrLabel(eq: Equipment): void {
+    const sheet = document.body.createDiv({ cls: 'tn-lims-qr-sheet' });
+    void (async () => {
+      const link = buildMobileDeepLink(this.app, 'equipment', eq.id);
+      const dataUrl = await mobileQrDataUrl(link);
+      const label = sheet.createDiv({ cls: 'tn-lims-qr-label' });
+      label.createEl('img', { attr: { src: dataUrl } });
+      label.createDiv({ cls: 'tn-lims-qr-label-number', text: eq.code || `#${eq.id}` });
+      label.createDiv({ cls: 'tn-lims-qr-label-title', text: eq.name || '' });
+      window.print();
+      sheet.remove();
+    })();
+  }
+
   private renderEquipmentCalibrationForm(container: HTMLElement, eq: Equipment, mainMethodIds: number[]): void {
     const form = container.createDiv({ cls: 'tn-lims-series-form' });
     form.createDiv({ cls: 'tn-lims-meta' }).setText('Дата калибровки:');

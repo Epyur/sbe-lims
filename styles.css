@@ -1047,3 +1047,60 @@
   outline: 2px solid var(--tn-brand);
   outline-offset: -1px;
 }
+
+/* ================= QR-метки для мобильного ввода (2026-08-27) ================= */
+
+.tn-lims-qr-block {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 8px 0;
+}
+
+.tn-lims-qr-block canvas {
+  border-radius: var(--tn-radius-sm, 8px);
+  background: #fff;
+}
+
+.tn-lims-qr-sheet {
+  display: none;
+}
+
+@media print {
+  body > *:not(.tn-lims-qr-sheet) {
+    display: none !important;
+  }
+
+  .tn-lims-qr-sheet {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
+    padding: 12px;
+  }
+
+  .tn-lims-qr-label {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    break-inside: avoid;
+    border: 1px dashed #999;
+    border-radius: 8px;
+    padding: 8px;
+  }
+
+  .tn-lims-qr-label img {
+    width: 140px;
+    height: 140px;
+  }
+
+  .tn-lims-qr-label-number {
+    font-weight: 600;
+    margin-top: 4px;
+  }
+
+  .tn-lims-qr-label-title {
+    font-size: 11px;
+    color: #444;
+  }
+}
