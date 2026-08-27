@@ -3068,6 +3068,22 @@ export class LimsView extends ItemView {
       body.empty();
 
       this.renderEquipmentFieldsForm(body, eq);
+
+      // QR-этикетка оборудования (2026-08-27) — постоянная, клеится один раз на
+      // прибор сразу после создания записи (не только для «Основного» для
+      // метода — этикетка нужна раньше, чем настроена привязка к методу, чтобы
+      // физически промаркировать прибор). Каждое сканирование на мобильном
+      // открывает форму новой записи журнала калибровки для этого оборудования
+      // (buildMobileDeepLink); кнопка ничего не создаёт на сервере — просто
+      // показывает/печатает ту же самую этикетку.
+      const qrRow = body.createDiv({ cls: 'tn-lims-qr-block tn-lims-mb12' });
+      const qrCanvas = qrRow.createEl('canvas');
+      void renderMobileQr(qrCanvas, buildMobileDeepLink(this.app, 'equipment', eq.id));
+      const qrInfo = qrRow.createDiv();
+      qrInfo.createDiv({ cls: 'tn-lims-meta', text: 'QR-этикетка для мобильной калибровки' });
+      const qrPrintBtn = qrInfo.createEl('button', { text: '🖶 Печать этикетки', cls: 'tn-btn tn-btn-ghost' });
+      qrPrintBtn.addEventListener('click', () => void this.printEquipmentQrLabel(eq));
+
       this.renderEquipmentVerificationBlock(body, eq, 'verification_cert', 'Сертификат аттестации',
         eq.verification_cert_number, eq.verification_cert_date, eq.verification_cert_file_url);
       this.renderEquipmentVerificationBlock(body, eq, 'verification_act', 'Акт поверки',
@@ -3434,19 +3450,6 @@ export class LimsView extends ItemView {
       const calibrations = await this.plugin.syncService.listEquipmentCalibrations(eq.id);
       container.empty();
       container.createEl('strong', { text: 'Калибровка (основное оборудование)' });
-
-      // QR-этикетка оборудования (2026-08-27) — постоянная, клеится один раз на
-      // прибор; каждое сканирование на мобильном открывает форму новой записи
-      // журнала калибровки для этого оборудования (buildMobileDeepLink). Кнопка
-      // «Калибровать» ничего не создаёт на сервере — просто показывает/печатает
-      // ту же самую этикетку.
-      const qrRow = container.createDiv({ cls: 'tn-lims-qr-block' });
-      const qrCanvas = qrRow.createEl('canvas');
-      void renderMobileQr(qrCanvas, buildMobileDeepLink(this.app, 'equipment', eq.id));
-      const qrInfo = qrRow.createDiv();
-      qrInfo.createDiv({ cls: 'tn-lims-meta', text: 'QR-этикетка для мобильной калибровки' });
-      const qrPrintBtn = qrInfo.createEl('button', { text: '🖶 Калибровать (печать этикетки)', cls: 'tn-btn tn-btn-ghost' });
-      qrPrintBtn.addEventListener('click', () => void this.printEquipmentQrLabel(eq));
 
       const mainMethodIds = methodLinks.filter(l => l.role === 'main').map(l => l.method_id);
       const intervalRow = container.createDiv({ cls: 'tn-lims-flex' });
