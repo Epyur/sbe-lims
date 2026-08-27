@@ -1,4 +1,4 @@
-import { ItemView, Modal, Notice, WorkspaceLeaf } from 'obsidian';
+import { FileSystemAdapter, ItemView, Modal, Notice, WorkspaceLeaf } from 'obsidian';
 import type { App } from 'obsidian';
 import type SbeLimsPlugin from '../main';
 import type {
@@ -35,6 +35,7 @@ import { downloadBase64File } from '../../../sbe-core/src/utils/download';
 import { sanitizeAttributesWithRename } from '../services/llm-assist.service';
 import type { ExistingAttributeSummary } from '../services/llm-assist.service';
 import { extractStandardText } from '../services/rtf-to-text';
+import { mobileQrDataUrl, renderMobileQr } from '../utils/mobile-link';
 
 export const SBE_LIMS_VIEW_TYPE = 'sbe-lims-view';
 
@@ -48,6 +49,11 @@ const STATUS_LABELS: Record<string, string> = {
 /** Префикс legacy-номера трекера почты (LIMS_LPI); requests.external_id хранит
  * только числовую часть — префикс восстанавливается для отображения. */
 const EXTERNAL_ID_PREFIX = 'LPIZAYAVKINAPRO-';
+
+/** Экранирование для вставки текста в самодельный HTML печатной QR-этикетки (см. printEquipmentQrLabel). */
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
 
 /** Роли lab_members — общий список опций для формы добавления И для inline-
  * редактирования роли (2026-08-24, по запросу пользователя: раньше смену роли
@@ -977,6 +983,15 @@ export class LimsView extends ItemView {
     meta.createDiv({ text: `📅 Обновлена: ${this.formatDate(req.updated_at)}` });
     meta.createDiv({ text: `Статус: ${STATUS_LABELS[req.status] || req.status}` });
     meta.createDiv({ text: `👷 Исполнитель: ${req.assigned_to || 'не назначен'}` });
+
+    // QR для мобильного ввода результатов (2026-08-27) — кодирует номер заявки
+    // (тем же текстом, что и подпись под ним), не ссылку: Obsidian mobile не
+    // имеет доступа к камере, сканирует внешнее приложение телефона, а номер
+    // испытатель вставляет вручную в sbe-lims-mobile.
+    const qrBlock = this.bodyEl.createDiv({ cls: 'tn-lims-qr-block tn-lims-mb12' });
+    const qrCanvas = qrBlock.createEl('canvas');
+    void renderMobileQr(qrCanvas, fullRequestNumber(req));
+    qrBlock.createDiv({ cls: 'tn-lims-meta', text: 'QR с номером заявки — для мобильного ввода результатов' });
 
     if (req.description) {
       this.bodyEl.createDiv({ cls: 'tn-lims-meta tn-lims-mb12' }).createDiv({ text: `📝 ${req.description}` });
@@ -3054,6 +3069,23 @@ export class LimsView extends ItemView {
       body.empty();
 
       this.renderEquipmentFieldsForm(body, eq);
+
+      // QR-этикетка оборудования (2026-08-27) — постоянная, клеится один раз на
+      // прибор сразу после создания записи (не только для «Основного» для
+      // метода — этикетка нужна раньше, чем настроена привязка к методу, чтобы
+      // физически промаркировать прибор). Кодирует код оборудования (тем же
+      // текстом, что подпись под ним), не ссылку — см. renderMobileQr; сканирует
+      // внешнее приложение телефона, код испытатель вставляет вручную в
+      // sbe-lims-mobile. Кнопка ничего не создаёт на сервере — просто
+      // показывает/печатает ту же самую этикетку.
+      const qrRow = body.createDiv({ cls: 'tn-lims-qr-block tn-lims-mb12' });
+      const qrCanvas = qrRow.createEl('canvas');
+      void renderMobileQr(qrCanvas, eq.code || `#${eq.id}`);
+      const qrInfo = qrRow.createDiv();
+      qrInfo.createDiv({ cls: 'tn-lims-meta', text: 'QR-этикетка для мобильной калибровки' });
+      const qrPrintBtn = qrInfo.createEl('button', { text: '🖶 Печать этикетки', cls: 'tn-btn tn-btn-ghost' });
+      qrPrintBtn.addEventListener('click', () => void this.printEquipmentQrLabel(eq));
+
       this.renderEquipmentVerificationBlock(body, eq, 'verification_cert', 'Сертификат аттестации',
         eq.verification_cert_number, eq.verification_cert_date, eq.verification_cert_file_url);
       this.renderEquipmentVerificationBlock(body, eq, 'verification_act', 'Акт поверки',
@@ -3420,6 +3452,7 @@ export class LimsView extends ItemView {
       const calibrations = await this.plugin.syncService.listEquipmentCalibrations(eq.id);
       container.empty();
       container.createEl('strong', { text: 'Калибровка (основное оборудование)' });
+
       const mainMethodIds = methodLinks.filter(l => l.role === 'main').map(l => l.method_id);
       const intervalRow = container.createDiv({ cls: 'tn-lims-flex' });
       intervalRow.createSpan({ text: 'Межкалибровочный период, мес.:', cls: 'tn-lims-meta' });
@@ -3477,6 +3510,56 @@ export class LimsView extends ItemView {
     } catch (e: unknown) {
       container.empty();
       container.createDiv({ cls: 'tn-lims-error' }).setText(`Ошибка: ${errorMessage(e)}`);
+    }
+  }
+
+  /** Печать постоянной QR-этикетки оборудования (2026-08-27). Отдельный HTML-файл,
+   * открытый системным браузером (shell.openPath) — как и printQrSheet в
+   * sbe-requests, НЕ window.print() поверх DOM самого Obsidian: первая версия
+   * (скрытый узел + @media print прямо в окне Obsidian) на практике печатала
+   * пустой документ. */
+  private async printEquipmentQrLabel(eq: Equipment): Promise<void> {
+    const code = eq.code || `#${eq.id}`;
+    const dataUrl = await mobileQrDataUrl(code);
+    const number = escapeHtml(code);
+    const title = escapeHtml(eq.name || '');
+    const html = `<!DOCTYPE html>
+<html lang="ru"><head><meta charset="utf-8"><title>QR-этикетка оборудования</title>
+<style>
+  body { font-family: sans-serif; margin: 12px; }
+  .label { display: flex; flex-direction: column; align-items: center; text-align: center;
+    border: 1px dashed #999; border-radius: 8px; padding: 8px; width: 200px; }
+  .label img { width: 160px; height: 160px; }
+  .number { font-weight: 600; margin-top: 4px; }
+  .title { font-size: 11px; color: #444; }
+</style></head>
+<body>
+<div class="label"><img src="${dataUrl}" alt="QR"><div class="number">${number}</div><div class="title">${title}</div></div>
+<script>window.onload = () => window.print();</script>
+</body></html>`;
+    await this.openPrintableHtml(html, `equipment-${eq.id}`);
+  }
+
+  /** Пишет HTML в yourbase/ и открывает системным браузером (shell.openPath) —
+   * НЕ через Obsidian-встроенный просмотрщик (тот сидит в том же окне/DOM, что
+   * и сам Obsidian, с тем же риском перехвата печати). */
+  private async openPrintableHtml(html: string, baseName: string): Promise<void> {
+    try {
+      const dir = 'yourbase/sbe_lims/print';
+      const adapter = this.app.vault.adapter;
+      if (!(await adapter.exists(dir))) await adapter.mkdir(dir);
+      const path = `${dir}/${baseName}-${Date.now()}.html`;
+      await adapter.write(path, html);
+      if (!(adapter instanceof FileSystemAdapter)) {
+        new Notice(`Файл сохранён: ${path}`);
+        return;
+      }
+      const fullPath = adapter.getFullPath(path);
+      const { shell } = require('electron');
+      const err = await shell.openPath(fullPath);
+      if (err) new Notice(`Не удалось открыть системным приложением: ${err}`);
+    } catch (e: unknown) {
+      new Notice(`Ошибка подготовки печати: ${errorMessage(e)}`);
     }
   }
 

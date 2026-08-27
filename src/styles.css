@@ -589,3 +589,20 @@
   outline: 2px solid var(--tn-brand);
   outline-offset: -1px;
 }
+
+/* ================= QR-метки для мобильного ввода (2026-08-27) ================= */
+/* Печатная этикетка — теперь отдельный HTML-файл (см. printEquipmentQrLabel/
+   openPrintableHtml в lims-view.ts), стили для неё зашиты прямо в файл; здесь
+   остаётся только стиль QR-блока на экране (деталь заявки/карточка оборудования). */
+
+.tn-lims-qr-block {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 8px 0;
+}
+
+.tn-lims-qr-block canvas {
+  border-radius: var(--tn-radius-sm, 8px);
+  background: #fff;
+}
