@@ -17,6 +17,7 @@ import type {
   LimsRequest,
   MeasurementResult,
   MethodConfig,
+  MethodEquipmentLink,
   PresentationKind,
   ProtocolResponse,
 } from '../types/lims';
@@ -113,7 +114,14 @@ export class LimsSyncService {
   /** Сохраняет серию (создание/обновление). */
   async saveResult(
     requestId: number,
-    data: { method_id: number; inventor_id: number; series_num: number; values: Record<string, unknown>; photo_before?: string; photo_after?: string },
+    data: {
+      method_id: number; inventor_id: number; series_num: number; values: Record<string, unknown>;
+      photo_before?: string; photo_after?: string;
+      /** На каком экземпляре оборудования выполнено измерение (2026-08-28, WP1) —
+       * только когда у метода больше одной единицы "Основного" оборудования, см.
+       * lims-view.ts renderResultAddForm/listAllMethodEquipment. */
+      equipment_id?: number;
+    },
   ): Promise<{ id: number; series_num: number; values: Record<string, unknown> }> {
     const token = await this.getToken();
     const res = await this.request({
@@ -444,6 +452,26 @@ export class LimsSyncService {
 
   async deleteEquipmentMethod(id: number, methodId: number): Promise<void> {
     await this.deleteEntity(`/api/lab/equipment/${id}/methods/${methodId}`);
+  }
+
+  /** Вся таблица method_equipment одним запросом (2026-08-28, WP1) — нужно узнать,
+   * сколько единиц "Основного" оборудования у метода (показывать ли селектор
+   * оборудования в форме результатов испытания), без N+1 запроса на каждый метод. */
+  async listAllMethodEquipment(): Promise<MethodEquipmentLink[]> {
+    const token = await this.getToken();
+    const res = await this.request({
+      url: `${this.baseUrl}/api/lab/method-equipment`,
+      method: 'GET',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    this.assertOk(res);
+    try {
+      const data = JSON.parse(res.text) as { links?: MethodEquipmentLink[] };
+      return Array.isArray(data.links) ? data.links : [];
+    } catch (e: unknown) {
+      console.warn('ЛИМС: не JSON в ответе method-equipment:', errorMessage(e));
+      return [];
+    }
   }
 
   /** Все связи оборудование↔оборудование одним запросом (не по одной единице —

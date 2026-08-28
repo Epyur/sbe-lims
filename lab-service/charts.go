@@ -39,7 +39,7 @@ const (
 	chartPlotH         = 360 // высота области графика (без заголовка/легенды/подписей осей)
 	legendRowH         = 18
 	titleBandH         = 26
-	xLabelBandH     = 32
+	xLabelBandH        = 32
 )
 
 var (
@@ -712,6 +712,65 @@ func (s *Server) handleChart(w http.ResponseWriter, r *http.Request) {
 	}
 	if pngBytes == nil {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "no data for chart"})
+		return
+	}
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(pngBytes)
+}
+
+// handleCalibrationCurveChart — GET /equipment/{id}/calibrations/{calibration_id}/curve-chart/{attr_id}
+// (WP1, 2026-08-28): PNG-график ОДНОГО атрибута data_type="curve" конкретной записи
+// калибровки. В отличие от chart_configs метода — не требует отдельной настройки графика,
+// сам факт, что атрибут — "кривая", уже достаточен, чтобы её можно было визуализировать.
+func (s *Server) handleCalibrationCurveChart(w http.ResponseWriter, r *http.Request) {
+	equipmentID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid id"})
+		return
+	}
+	calibrationID, err := strconv.ParseInt(r.PathValue("calibration_id"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid calibration_id"})
+		return
+	}
+	attrID := r.PathValue("attr_id")
+
+	var methodID int64
+	var raw []byte
+	err = s.pool.QueryRow(r.Context(), `
+SELECT COALESCE(method_id, 0), values FROM equipment_calibrations
+WHERE id = $1 AND equipment_id = $2`, calibrationID, equipmentID).Scan(&methodID, &raw)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "calibration not found"})
+		return
+	}
+
+	_, xs, ys, err := parseCalibrationCurve(raw, attrID)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "curve: " + err.Error()})
+		return
+	}
+
+	label := attrID
+	if methodID > 0 {
+		if cfg, cerr := s.loadMethodConfig(r.Context(), methodID); cerr == nil {
+			for _, a := range cfg.CalibrationAttributes {
+				if id, _ := a["id"].(string); id == attrID {
+					if name, _ := a["name"].(string); name != "" {
+						label = name
+					}
+					break
+				}
+			}
+		}
+	}
+
+	series := []chartSeries{{Name: label, X: xs, Y: ys}}
+	pngBytes, err := renderChart("line", label, "", "", "", series, chartAxisOverrides{})
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "chart: " + err.Error()})
 		return
 	}
 	w.Header().Set("Content-Type", "image/png")

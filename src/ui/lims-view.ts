@@ -1055,6 +1055,32 @@ export class LimsView extends ItemView {
     // форма ввода новой серии
     if (this.canEdit) {
       const form = methodDiv.createDiv({ cls: 'tn-lims-series-form' });
+
+      // Селектор оборудования (2026-08-28, WP1) — только когда у метода НЕСКОЛЬКО единиц
+      // "Основного" оборудования (иначе неоднозначно, какую калибровочную кривую брать
+      // для interpolate(), см. lab-service calibration_curve.go); при ровно одной единице
+      // сервер резолвит её сам, поле не показывается вовсе.
+      let equipmentSelect: HTMLSelectElement | undefined;
+      try {
+        const [methodEquipment, equipmentList] = await Promise.all([
+          this.plugin.syncService.listAllMethodEquipment(),
+          this.plugin.syncService.listEquipment(),
+        ]);
+        const mainEquipmentIds = methodEquipment
+          .filter(l => l.method_id === req.method_id && l.role === 'main')
+          .map(l => l.equipment_id);
+        if (mainEquipmentIds.length > 1) {
+          form.createDiv({ cls: 'tn-lims-meta' }).setText('Оборудование:');
+          equipmentSelect = form.createEl('select', { cls: 'tn-lims-select tn-lims-mb8' });
+          for (const eqId of mainEquipmentIds) {
+            const eq = equipmentList.find(e => e.id === eqId);
+            equipmentSelect.createEl('option', { attr: { value: String(eqId) }, text: eq ? (eq.code || eq.name) : `#${eqId}` });
+          }
+        }
+      } catch (e: unknown) {
+        console.warn('ЛИМС: не удалось загрузить оборудование метода:', errorMessage(e));
+      }
+
       const valuesRow = form.createDiv({ cls: 'tn-lims-flex' });
       const input = valuesRow.createEl('input', {
         attr: { type: 'text', placeholder: 'параметр=значение; параметр2=значение2' },
@@ -1064,12 +1090,14 @@ export class LimsView extends ItemView {
       addBtn.addEventListener('click', async () => {
         const values = this.parseValues(input.value);
         if (Object.keys(values).length === 0) { new Notice('Введите параметры (параметр=значение)'); return; }
+        if (equipmentSelect && !equipmentSelect.value) { new Notice('Выберите оборудование'); return; }
         try {
           await this.plugin.syncService.saveResult(req.id, {
             method_id: req.method_id,
             inventor_id: 0,
             series_num: 0,
             values,
+            equipment_id: equipmentSelect ? Number(equipmentSelect.value) : undefined,
           });
           new Notice('Серия добавлена, расчёт выполнен');
           void this.renderRequestDetail(req);
@@ -1996,6 +2024,9 @@ export class LimsView extends ItemView {
       const typeSelect = row.createEl('select', { cls: 'tn-lims-select' });
       const typeOptions: Array<[AttributeDataType, string]> = [
         ['text', 'Текст'], ['int', 'Целое число'], ['float', 'Дробное число'], ['date', 'Дата'],
+        // "curve" (2026-08-28, WP1) — набор точек x→y (напр. калибровочная кривая
+        // расстояние→тепловой поток метода РП), см. renderCurvePointsField.
+        ['curve', 'Кривая (точки x→y)'],
       ];
       for (const [val, label] of typeOptions) typeSelect.createEl('option', { attr: { value: val }, text: label });
       typeSelect.value = attr.data_type;
@@ -3632,6 +3663,38 @@ export class LimsView extends ItemView {
     }
   }
 
+  /** Виджет таблицы точек калибровочной кривой (2026-08-28, WP1) — для
+   * calibration_attributes.data_type="curve": набор пар x→y (напр. расстояние→тепловой
+   * поток метода РП), вместо одного числа. Стартует с двух пустых строк (минимум для
+   * линейной интерполяции), «➕ Точка» добавляет ещё. getPoints() фильтрует пустые/
+   * нечисловые строки — испытателю не нужно чистить недописанные точки перед отправкой. */
+  private renderCurvePointsField(container: HTMLElement): { getPoints: () => Array<{ x: number; y: number }> } {
+    const wrap = container.createDiv({ cls: 'tn-lims-curve-points' });
+    const rowsEl = wrap.createDiv();
+    const rows: Array<{ x: HTMLInputElement; y: HTMLInputElement }> = [];
+    const addRow = (): void => {
+      const row = rowsEl.createDiv({ cls: 'tn-lims-flex' });
+      const x = row.createEl('input', { attr: { type: 'number', placeholder: 'x' }, cls: 'tn-lims-input' });
+      const y = row.createEl('input', { attr: { type: 'number', placeholder: 'y' }, cls: 'tn-lims-input' });
+      const rm = row.createEl('button', { text: '✕', cls: 'tn-btn tn-btn-ghost' });
+      rm.addEventListener('click', () => {
+        row.remove();
+        const i = rows.findIndex(r => r.x === x);
+        if (i >= 0) rows.splice(i, 1);
+      });
+      rows.push({ x, y });
+    };
+    addRow();
+    addRow();
+    const addBtn = wrap.createEl('button', { text: '➕ Точка', cls: 'tn-btn tn-btn-ghost' });
+    addBtn.addEventListener('click', addRow);
+    return {
+      getPoints: () => rows
+        .map(r => ({ x: parseFloat(r.x.value), y: parseFloat(r.y.value) }))
+        .filter(p => !Number.isNaN(p.x) && !Number.isNaN(p.y)),
+    };
+  }
+
   /** Форма новой записи журнала — поля, заданные в конфигураторе ВЫБРАННОГО метода
    * (calibration_attributes), плюс универсальные системные поля (Температура
    * воздуха в лаборатории/Атмосферное давление/Влажность воздуха — одни и те же
@@ -3658,7 +3721,7 @@ export class LimsView extends ItemView {
     const moistInp = envRow.createEl('input', { attr: { type: 'text', placeholder: 'Влажность' }, cls: 'tn-lims-input' });
 
     const attrsDiv = form.createDiv();
-    let attrInputs: Array<{ id: string; el: HTMLInputElement }> = [];
+    let attrInputs: Array<{ id: string; getValue: () => unknown }> = [];
     const redrawAttrs = (): void => {
       attrsDiv.empty();
       attrInputs = [];
@@ -3668,9 +3731,16 @@ export class LimsView extends ItemView {
       for (const attr of cfg.calibration_attributes) {
         const row = attrsDiv.createDiv({ cls: 'tn-lims-flex' });
         row.createSpan({ text: attr.name + ':', cls: 'tn-lims-meta' });
+        // "curve" (2026-08-28, WP1) — набор точек калибровочной кривой (x→y), не одно
+        // число: таблица строк вместо одного <input>, см. renderCurvePointsField.
+        if (attr.data_type === 'curve') {
+          const { getPoints } = this.renderCurvePointsField(row);
+          attrInputs.push({ id: attr.id, getValue: getPoints });
+          continue;
+        }
         const inputType = attr.data_type === 'date' ? 'date' : attr.data_type === 'int' || attr.data_type === 'float' ? 'number' : 'text';
         const inp = row.createEl('input', { attr: { type: inputType }, cls: 'tn-lims-input' });
-        attrInputs.push({ id: attr.id, el: inp });
+        attrInputs.push({ id: attr.id, getValue: () => inp.value.trim() });
       }
     };
     redrawAttrs();
@@ -3683,8 +3753,13 @@ export class LimsView extends ItemView {
     addBtn.addEventListener('click', async () => {
       if (!dateInp.value) { new Notice('Укажите дату калибровки'); return; }
       const values: Record<string, unknown> = {};
-      for (const { id, el } of attrInputs) {
-        if (el.value.trim()) values[id] = el.value.trim();
+      for (const { id, getValue } of attrInputs) {
+        const v = getValue();
+        if (typeof v === 'string') {
+          if (v) values[id] = v;
+        } else if (Array.isArray(v) && v.length > 0) {
+          values[id] = v;
+        }
       }
       try {
         const file = fileInp.files?.[0];

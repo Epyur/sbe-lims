@@ -177,6 +177,11 @@ func main() {
 	mux.HandleFunc("POST /api/lab/equipment/{id}/scan", s.requirePerm("editor")(s.handleEquipmentScan))
 	mux.HandleFunc("GET /api/lab/equipment/{id}/calibrations", s.requirePerm("viewer")(s.handleListEquipmentCalibrations))
 	mux.HandleFunc("POST /api/lab/equipment/{id}/calibrations", s.requirePerm("editor")(s.handleCreateEquipmentCalibration))
+	// Калибровочная кривая (WP1, 2026-08-28) — PNG-график ОДНОГО атрибута data_type="curve"
+	// конкретной записи калибровки. В отличие от chart_configs метода, не требует отдельной
+	// настройки — любой атрибут-кривая автоматически графируется по своим точкам.
+	mux.HandleFunc("GET /api/lab/equipment/{id}/calibrations/{calibration_id}/curve-chart/{attr_id}",
+		s.requirePerm("viewer")(s.handleCalibrationCurveChart))
 	mux.HandleFunc("GET /api/lab/equipment/{id}/methods", s.requirePerm("viewer")(s.handleListEquipmentMethods))
 	mux.HandleFunc("POST /api/lab/equipment/{id}/methods", s.requirePerm("editor")(s.handleSetEquipmentMethod))
 	mux.HandleFunc("DELETE /api/lab/equipment/{id}/methods/{method_id}", s.requirePerm("editor")(s.handleDeleteEquipmentMethod))
@@ -184,6 +189,7 @@ func main() {
 	mux.HandleFunc("POST /api/lab/equipment/{id}/documents", s.requirePerm("editor")(s.handleUploadEquipmentDocument))
 	mux.HandleFunc("DELETE /api/lab/equipment/{id}/documents/{file_id}", s.requirePerm("editor")(s.handleDeleteEquipmentDocument))
 	mux.HandleFunc("GET /api/lab/equipment-links", s.requirePerm("viewer")(s.handleListAllEquipmentLinks))
+	mux.HandleFunc("GET /api/lab/method-equipment", s.requirePerm("viewer")(s.handleListAllMethodEquipment))
 	mux.HandleFunc("POST /api/lab/equipment/{id}/auxiliaries", s.requirePerm("editor")(s.handleAddEquipmentAuxiliary))
 	mux.HandleFunc("DELETE /api/lab/equipment/{id}/auxiliaries/{auxiliary_id}", s.requirePerm("editor")(s.handleRemoveEquipmentAuxiliary))
 	mux.HandleFunc("GET /api/lab/lab-members", s.requirePerm("viewer")(s.handleListLabMembers))
@@ -575,6 +581,14 @@ func (s *Server) migrate(ctx context.Context) error {
 			consumed_at TIMESTAMPTZ,
 			consumed_by_result_id BIGINT REFERENCES measurement_results(id) ON DELETE SET NULL
 		)`,
+		// measurement_results.equipment_id (2026-08-28, WP1 — калибровочная кривая, см.
+		// docs/superpowers/specs/2026-08-28-sbe-lims-calibration-curve-design.md): на каком
+		// именно экземпляре оборудования выполнено измерение — нужно, когда у метода
+		// несколько единиц "Основного" оборудования (method_equipment.role='main'), каждая
+		// со своей калибровочной кривой. Nullable — при ровно одной основной единице сервер
+		// резолвит её сам (resolveSingleMainEquipment), поле не обязательно. Общая
+		// доработка traceability для ЛЮБОГО метода, не только РП.
+		`ALTER TABLE measurement_results ADD COLUMN IF NOT EXISTS equipment_id BIGINT REFERENCES equipment(id)`,
 	}
 	for _, q := range stmts {
 		if _, err := s.pool.Exec(ctx, q); err != nil {

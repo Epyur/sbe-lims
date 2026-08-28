@@ -16,10 +16,13 @@ import (
 // ---- Типы ----
 
 type MeasurementResult struct {
-	ID                int64          `json:"id"`
-	RequestID         int64          `json:"request_id"`
-	MethodID          int64          `json:"method_id"`
-	InventorID        int64          `json:"inventor_id"`
+	ID         int64 `json:"id"`
+	RequestID  int64 `json:"request_id"`
+	MethodID   int64 `json:"method_id"`
+	InventorID int64 `json:"inventor_id"`
+	// EquipmentID (2026-08-28, WP1) — на каком экземпляре оборудования выполнено
+	// измерение (0 — не задано/не требовалось, см. calibration_curve.go).
+	EquipmentID       int64          `json:"equipment_id"`
 	SeriesNum         int            `json:"series_num"`
 	Values            map[string]any `json:"values"`
 	FileLinks         map[string]any `json:"file_links"`
@@ -425,7 +428,7 @@ func buildFormulaEnv(seriesValues []map[string]any, current map[string]any, rank
 // задан) над values текущей серии; результат вписывается в values. Формулы уровня
 // "aggregated" здесь пропускаются — см. applyAggregatedFormulas (считаются раз на
 // заявку+метод, пишутся в aggregated_results, а не в values серии).
-func (s *Server) applyFormulas(ctx context.Context, methodID int64, seriesValues []map[string]any, values map[string]any) error {
+func (s *Server) applyFormulas(ctx context.Context, requestID, methodID, equipmentID int64, seriesValues []map[string]any, values map[string]any) error {
 	cfg, err := s.loadMethodConfig(ctx, methodID)
 	if err != nil {
 		return err
@@ -435,6 +438,7 @@ func (s *Server) applyFormulas(ctx context.Context, methodID int64, seriesValues
 		rankOrder = nil
 	}
 	env := buildFormulaEnv(seriesValues, values, rankOrder)
+	s.injectCalibrationCurves(ctx, requestID, methodID, equipmentID, cfg, env)
 	for _, f := range cfg.Formulas {
 		if lvl, _ := f["apply_level"].(string); lvl == "aggregated" {
 			continue
@@ -1012,7 +1016,7 @@ func (s *Server) handleListResults(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, err := s.pool.Query(r.Context(), `
-SELECT id, request_id, method_id, COALESCE(inventor_id, 0), series_num, values,
+SELECT id, request_id, method_id, COALESCE(inventor_id, 0), COALESCE(equipment_id, 0), series_num, values,
 	file_links, photo_before, photo_after, is_statistical_row, calculation_type,
 	source_series_count, source_series_range, created_at, updated_at
 FROM measurement_results WHERE request_id = $1 ORDER BY series_num, id`, id)
@@ -1026,7 +1030,7 @@ FROM measurement_results WHERE request_id = $1 ORDER BY series_num, id`, id)
 		var m MeasurementResult
 		var valsRaw, linksRaw []byte
 		var ca, ua time.Time
-		if err := rows.Scan(&m.ID, &m.RequestID, &m.MethodID, &m.InventorID, &m.SeriesNum,
+		if err := rows.Scan(&m.ID, &m.RequestID, &m.MethodID, &m.InventorID, &m.EquipmentID, &m.SeriesNum,
 			&valsRaw, &linksRaw, &m.PhotoBefore, &m.PhotoAfter, &m.IsStatisticalRow,
 			&m.CalculationType, &m.SourceSeriesCount, &m.SourceSeriesRange, &ca, &ua); err != nil {
 			log.Printf("results scan: %v", err)
@@ -1065,6 +1069,11 @@ func (s *Server) handleCreateResult(w http.ResponseWriter, r *http.Request) {
 		Values      map[string]any `json:"values"`
 		PhotoBefore string         `json:"photo_before"`
 		PhotoAfter  string         `json:"photo_after"`
+		// EquipmentID (2026-08-28, WP1) — на каком экземпляре оборудования выполнено
+		// измерение; обязательно только когда у метода несколько единиц "Основного"
+		// оборудования (см. calibration_curve.go resolveSingleMainEquipment — при
+		// ровно одной единице сервер резолвит её сам, поле можно не передавать).
+		EquipmentID int64 `json:"equipment_id"`
 		// Системные поля заявки (2026-08-27) — испытатель заполняет их вручную
 		// через «Форму для испытателя» (мобильный/десктоп), если админ явно
 		// добавил их в operator_form.fields конфигуратора; раньше эти колонки
@@ -1095,6 +1104,17 @@ func (s *Server) handleCreateResult(w http.ResponseWriter, r *http.Request) {
 	if req.Values == nil {
 		req.Values = map[string]any{}
 	}
+	if req.EquipmentID > 0 {
+		ok, err := s.isMainEquipmentOfMethod(r.Context(), req.MethodID, req.EquipmentID)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
+			return
+		}
+		if !ok {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "equipment_id is not \"Основное\" equipment of this method"})
+			return
+		}
+	}
 
 	if req.InstrumentHash != "" {
 		bufValues, err := s.claimInstrumentBuffer(r.Context(), req.InstrumentHash)
@@ -1109,7 +1129,7 @@ func (s *Server) handleCreateResult(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	id, seriesNum, err := s.saveResultSeries(r.Context(), requestID, req.MethodID, req.InventorID,
+	id, seriesNum, err := s.saveResultSeries(r.Context(), requestID, req.MethodID, req.InventorID, req.EquipmentID,
 		req.SeriesNum, req.Values, req.PhotoBefore, req.PhotoAfter)
 	if err != nil {
 		if req.InstrumentHash != "" {
@@ -1269,7 +1289,7 @@ func (e *formulaApplyError) Unwrap() error { return e.err }
 // уровня "aggregated". Переиспользуется HTTP-хендлером (handleCreateResult) и
 // email-ingestion воркером (email_ingest.go, applyResultPayload) — без HTTP-обёртки.
 // seriesNum <= 0 — авто-выбор следующего свободного номера серии.
-func (s *Server) saveResultSeries(ctx context.Context, requestID, methodID, inventorID int64,
+func (s *Server) saveResultSeries(ctx context.Context, requestID, methodID, inventorID, equipmentID int64,
 	seriesNum int, values map[string]any, photoBefore, photoAfter string) (int64, int, error) {
 	var err error
 	if seriesNum <= 0 {
@@ -1287,7 +1307,7 @@ func (s *Server) saveResultSeries(ctx context.Context, requestID, methodID, inve
 	allSeries = append(allSeries, values)
 
 	// формулы + классификация
-	if err := s.applyFormulas(ctx, methodID, allSeries, values); err != nil {
+	if err := s.applyFormulas(ctx, requestID, methodID, equipmentID, allSeries, values); err != nil {
 		return 0, 0, &formulaApplyError{err}
 	}
 	if err := s.applyClassification(ctx, requestID, methodID, values); err != nil {
@@ -1302,14 +1322,14 @@ func (s *Server) saveResultSeries(ctx context.Context, requestID, methodID, inve
 	// upsert серии
 	var id int64
 	err = s.pool.QueryRow(ctx, `
-INSERT INTO measurement_results (request_id, method_id, inventor_id, series_num, values,
+INSERT INTO measurement_results (request_id, method_id, inventor_id, equipment_id, series_num, values,
 	photo_before, photo_after, updated_at)
-VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, now())
+VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, now())
 ON CONFLICT (request_id, method_id, series_num) DO UPDATE SET
-	values = EXCLUDED.values, inventor_id = EXCLUDED.inventor_id,
+	values = EXCLUDED.values, inventor_id = EXCLUDED.inventor_id, equipment_id = EXCLUDED.equipment_id,
 	photo_before = EXCLUDED.photo_before, photo_after = EXCLUDED.photo_after, updated_at = now()
 RETURNING id`,
-		requestID, methodID, nullableID(inventorID), seriesNum, string(valsJSON),
+		requestID, methodID, nullableID(inventorID), nullableID(equipmentID), seriesNum, string(valsJSON),
 		photoBefore, photoAfter).Scan(&id)
 	if err != nil {
 		log.Printf("save result series: %v", err)
@@ -1445,7 +1465,7 @@ SELECT method_id FROM measurement_results WHERE request_id = $1 AND series_num =
 	}
 	// пересчитать все серии: для каждой серии применить формулы заново
 	rows, err := s.pool.Query(r.Context(), `
-SELECT id, series_num, values FROM measurement_results
+SELECT id, series_num, values, COALESCE(equipment_id, 0) FROM measurement_results
 WHERE request_id = $1 AND method_id = $2 AND is_statistical_row = false ORDER BY series_num`,
 		requestID, methodID)
 	if err != nil {
@@ -1455,15 +1475,16 @@ WHERE request_id = $1 AND method_id = $2 AND is_statistical_row = false ORDER BY
 	defer rows.Close()
 	allValues := []map[string]any{}
 	type rowT struct {
-		id        int64
-		seriesNum int
-		values    map[string]any
+		id          int64
+		seriesNum   int
+		values      map[string]any
+		equipmentID int64
 	}
 	var rowsList []rowT
 	for rows.Next() {
 		var rw rowT
 		var raw []byte
-		if err := rows.Scan(&rw.id, &rw.seriesNum, &raw); err != nil {
+		if err := rows.Scan(&rw.id, &rw.seriesNum, &raw, &rw.equipmentID); err != nil {
 			continue
 		}
 		rw.values = map[string]any{}
@@ -1474,7 +1495,7 @@ WHERE request_id = $1 AND method_id = $2 AND is_statistical_row = false ORDER BY
 		allValues = append(allValues, rw.values)
 	}
 	for _, rw := range rowsList {
-		if err := s.applyFormulas(r.Context(), methodID, allValues, rw.values); err != nil {
+		if err := s.applyFormulas(r.Context(), requestID, methodID, rw.equipmentID, allValues, rw.values); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "formula: " + err.Error()})
 			return
 		}

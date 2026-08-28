@@ -748,7 +748,11 @@ func (s *Server) applyResultPayload(ctx context.Context, requestID, methodID int
 	}
 	photoBefore := photoURLs["photo_before"]
 	photoAfter := photoURLs["photo_after"]
-	_, _, err = s.saveResultSeries(ctx, requestID, methodID, 0, explicitSeriesNum, values, photoBefore, photoAfter)
+	// equipment_id=0 — письмо не знает, каким оборудованием сделано измерение; если у
+	// метода несколько единиц "Основного" оборудования, калибровочная кривая (WP1) для
+	// таких результатов просто не подставится (см. calibration_curve.go
+	// injectCalibrationCurves — best-effort, не блокирует сохранение).
+	_, _, err = s.saveResultSeries(ctx, requestID, methodID, 0, 0, explicitSeriesNum, values, photoBefore, photoAfter)
 	return err
 }
 

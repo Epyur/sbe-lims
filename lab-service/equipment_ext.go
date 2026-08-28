@@ -266,6 +266,35 @@ type EquipmentMethodLink struct {
 	Role     string `json:"role"`
 }
 
+// handleListAllMethodEquipment — вся таблица method_equipment одним запросом (2026-08-28,
+// WP1 — по образцу уже существующего handleListAllEquipmentLinks): клиенту нужно узнать,
+// сколько единиц "Основного" оборудования у КОНКРЕТНОГО метода (показывать ли селектор
+// оборудования в форме результатов испытания), а не наоборот — один общий запрос дешевле,
+// чем N+1 по каждому методу/оборудованию.
+func (s *Server) handleListAllMethodEquipment(w http.ResponseWriter, r *http.Request) {
+	rows, err := s.pool.Query(r.Context(),
+		`SELECT method_id, equipment_id, role FROM method_equipment ORDER BY method_id`)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
+		return
+	}
+	defer rows.Close()
+	type methodEquipmentRow struct {
+		MethodID    int64  `json:"method_id"`
+		EquipmentID int64  `json:"equipment_id"`
+		Role        string `json:"role"`
+	}
+	out := make([]methodEquipmentRow, 0, 16)
+	for rows.Next() {
+		var it methodEquipmentRow
+		if err := rows.Scan(&it.MethodID, &it.EquipmentID, &it.Role); err != nil {
+			continue
+		}
+		out = append(out, it)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"links": out})
+}
+
 func (s *Server) handleListEquipmentMethods(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
