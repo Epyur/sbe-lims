@@ -1167,6 +1167,21 @@ func (s *Server) handleCreateResult(w http.ResponseWriter, r *http.Request) {
 	if req.Values == nil {
 		req.Values = map[string]any{}
 	}
+	// Системные поля (2026-08-28, WP3b) — раньше писались отдельным UPDATE
+	// requests.* (updateRequestSystemFields, одно значение на всю заявку); теперь
+	// идут прямо в values ЭТОЙ серии, тем же принципом "пустая строка — не
+	// трогать" — испытания одной заявки могут выполняться в разные календарные
+	// дни с разными условиями среды, значение должно относиться к конкретной
+	// серии, а не перезаписывать безвозвратно единственное значение заявки. См.
+	// docs/superpowers/specs/2026-08-28-sbe-lims-system-fields-per-series-design.md.
+	for k, v := range map[string]string{
+		"report_date": req.ReportDate, "samples_in_date": req.SamplesInDate, "exp_date": req.ExpDate,
+		"amb_temp": req.AmbTemp, "amb_pres": req.AmbPres, "amb_moist": req.AmbMoist,
+	} {
+		if v != "" {
+			req.Values[k] = v
+		}
+	}
 	if req.EquipmentID > 0 {
 		ok, err := s.isMainEquipmentOfMethod(r.Context(), req.MethodID, req.EquipmentID)
 		if err != nil {
@@ -1213,12 +1228,6 @@ func (s *Server) handleCreateResult(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.InstrumentHash != "" {
 		s.linkInstrumentBufferResult(r.Context(), req.InstrumentHash, id)
-	}
-	if err := s.updateRequestSystemFields(r.Context(), requestID,
-		req.ReportDate, req.SamplesInDate, req.ExpDate, req.AmbTemp, req.AmbPres, req.AmbMoist); err != nil {
-		// Результаты уже сохранены — не проваливаем весь ответ из-за этого, просто логируем
-		// (тот же принцип, что у recomputeStatistics/applyAggregatedFormulas в saveResultSeries).
-		log.Printf("update request system fields: %v", err)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"id": id, "series_num": seriesNum, "values": req.Values})
@@ -1313,31 +1322,6 @@ func (s *Server) releaseInstrumentBuffer(ctx context.Context, hash string) {
 		hash); err != nil {
 		log.Printf("release instrument buffer: %v", err)
 	}
-}
-
-// updateRequestSystemFields пишет вручную введённые системные поля заявки
-// (см. комментарий в handleCreateResult) — те же колонки requests, что и
-// email_ingest.go, но по прямому вводу испытателя через форму. Пустая строка =
-// не менять текущее значение (NULLIF+COALESCE — не даёт случайно затереть уже
-// пришедшее из письма).
-func (s *Server) updateRequestSystemFields(
-	ctx context.Context, requestID int64, reportDate, samplesInDate, expDate, ambTemp, ambPres, ambMoist string,
-) error {
-	if reportDate == "" && samplesInDate == "" && expDate == "" && ambTemp == "" && ambPres == "" && ambMoist == "" {
-		return nil
-	}
-	_, err := s.pool.Exec(ctx, `
-UPDATE requests SET
-	report_date = COALESCE(NULLIF($2, ''), report_date),
-	samples_in_date = COALESCE(NULLIF($3, ''), samples_in_date),
-	exp_date = COALESCE(NULLIF($4, ''), exp_date),
-	amb_temp = COALESCE(NULLIF($5, ''), amb_temp),
-	amb_pres = COALESCE(NULLIF($6, ''), amb_pres),
-	amb_moist = COALESCE(NULLIF($7, ''), amb_moist),
-	updated_at = now()
-WHERE id = $1`,
-		requestID, reportDate, samplesInDate, expDate, ambTemp, ambPres, ambMoist)
-	return err
 }
 
 // formulaApplyError оборачивает ошибку DSL-формулы, чтобы HTTP-хендлер мог отличить

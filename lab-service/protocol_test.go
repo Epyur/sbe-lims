@@ -64,6 +64,37 @@ func TestResolveSystemPlaceholder(t *testing.T) {
 	}
 }
 
+// 2026-08-28, WP3b: report_date/exp_date/... теперь per-series (values), не
+// requests.* — одиночный плейсхолдер должен взять значение из БЛИЖАЙШЕЙ К КОНЦУ
+// серии, где оно реально заполнено, не обязательно из самой последней (у неё
+// поле могло быть скрыто формой — "тот же день", см. sbe-lims-mobile).
+func TestResolveSystemPlaceholderPerSeriesFallback(t *testing.T) {
+	ctx := testCtx()
+	// Серия 1 — заполнена (день N), серия 2 — "тот же день", поле в форме
+	// скрыто (см. WP3b, shouldShowSystemFields=false), серия 3 — тоже.
+	ctx.series = []map[string]any{
+		{"mass_loss": 10.0, "exp_date": "2026-08-27", "amb_temp": "21"},
+		{"mass_loss": 20.0},
+		{"mass_loss": 30.0},
+	}
+	if got := resolveSystemPlaceholder(ctx, "exp_date"); got != "2026-08-27" {
+		t.Errorf("exp_date: got %q, want значение из серии 1 (ближайшая заполненная с конца)", got)
+	}
+	if got := resolveSystemPlaceholder(ctx, "amb_temp"); got != "21" {
+		t.Errorf("amb_temp: got %q, want значение из серии 1", got)
+	}
+	// report_date НИ У ОДНОЙ серии не заполнено — фоллбэк на requests.report_date.
+	if got := resolveSystemPlaceholder(ctx, "report_date"); got != ctx.req.ReportDate {
+		t.Errorf("report_date: got %q, want фоллбэк ctx.req.ReportDate=%q", got, ctx.req.ReportDate)
+	}
+
+	// Последняя серия САМА заполнена — должна победить (она и есть "ближайшая с конца").
+	ctx.series[2]["exp_date"] = "2026-08-28"
+	if got := resolveSystemPlaceholder(ctx, "exp_date"); got != "2026-08-28" {
+		t.Errorf("exp_date после заполнения последней серии: got %q, want 2026-08-28", got)
+	}
+}
+
 func TestResolvePlaceholderAggregatedAttribute(t *testing.T) {
 	ctx := testCtx()
 	got := resolvePlaceholder(ctx, InlineNode{Type: "placeholder", Source: "attribute", AttributeID: "grade"})

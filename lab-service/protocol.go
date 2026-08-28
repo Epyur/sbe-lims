@@ -212,20 +212,44 @@ func resolveSystemPlaceholder(ctx *placeholderCtx, id string) string {
 	// sbe-lims/AGENTS.md, "Системные атрибуты").
 	case "inventor":
 		return ctx.inventorName
+	// report_date/samples_in_date/exp_date/amb_temp/amb_pres/amb_moist (2026-08-28,
+	// WP3b) — теперь хранятся per-series в values (испытания одной заявки могут
+	// идти в разные дни с разными условиями среды), а не одним значением на
+	// requests.*. Одиночный плейсхолдер вне таблицы результатов обязан свернуться
+	// до ОДНОГО значения — берём ближайшую с конца серию, где поле реально
+	// заполнено (см. seriesSystemField), не обязательно последнюю: у последней
+	// серии поле могло быть скрыто формой как "тот же день, ничего не изменилось"
+	// (см. sbe-lims-mobile). ctx.req.* — фоллбэк для домиграционных данных/заявок
+	// без единой серии.
 	case "report_date":
-		return ctx.req.ReportDate
+		return seriesSystemField(ctx.series, "report_date", ctx.req.ReportDate)
 	case "samples_in_date":
-		return ctx.req.SamplesInDate
+		return seriesSystemField(ctx.series, "samples_in_date", ctx.req.SamplesInDate)
 	case "exp_date":
-		return ctx.req.ExpDate
+		return seriesSystemField(ctx.series, "exp_date", ctx.req.ExpDate)
 	case "amb_temp":
-		return ctx.req.AmbTemp
+		return seriesSystemField(ctx.series, "amb_temp", ctx.req.AmbTemp)
 	case "amb_pres":
-		return ctx.req.AmbPres
+		return seriesSystemField(ctx.series, "amb_pres", ctx.req.AmbPres)
 	case "amb_moist":
-		return ctx.req.AmbMoist
+		return seriesSystemField(ctx.series, "amb_moist", ctx.req.AmbMoist)
 	}
 	return ""
+}
+
+// seriesSystemField — значение системного поля (2026-08-28, WP3b) из ближайшей
+// К КОНЦУ серии, где оно реально заполнено (сериям позже — приоритет), фоллбэк —
+// requests-колонка (домиграционные заявки/заявки без единой серии, см. план
+// docs/superpowers/plans/2026-08-28-sbe-lims-system-fields-per-series-plan.md).
+func seriesSystemField(series []map[string]any, key, fallback string) string {
+	for i := len(series) - 1; i >= 0; i-- {
+		if v, ok := series[i][key]; ok {
+			if s := fmtVal(v); s != "" {
+				return s
+			}
+		}
+	}
+	return fallback
 }
 
 // aggregateSeries — ОДНО значение experiment-атрибута из серий метода, вне

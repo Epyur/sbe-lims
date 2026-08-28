@@ -716,7 +716,12 @@ func (s *Server) applyResultPayload(ctx context.Context, requestID, methodID int
 		}
 		setIfMeaningful(values, k, v)
 	}
-	sysFields := map[string]any{}
+	// inventor — единственное системное поле, которое остаётся per-request
+	// (резолвится в requests.inventor_id по имени, см. resolveInventorFromEmail);
+	// остальные 6 (2026-08-28, WP3b) идут прямо в values ЭТОЙ серии — испытания
+	// одной заявки могут выполняться в разные дни с разными условиями среды, см.
+	// docs/superpowers/specs/2026-08-28-sbe-lims-system-fields-per-series-design.md.
+	inventorField := map[string]any{}
 	for k, v := range payload {
 		if resultMetaFields[k] {
 			continue
@@ -732,8 +737,12 @@ func (s *Server) applyResultPayload(ctx context.Context, requestID, methodID int
 		if !known {
 			log.Printf("email ingest: request %d: неизвестное поле результата %q, передано как есть", requestID, k)
 		}
+		if key == "inventor" {
+			inventorField["inventor"] = v
+			continue
+		}
 		if systemRequestFields[key] {
-			sysFields[key] = v
+			setIfMeaningful(values, key, v)
 			continue
 		}
 		if declaredAttrs != nil && !declaredAttrs[key] {
@@ -741,9 +750,9 @@ func (s *Server) applyResultPayload(ctx context.Context, requestID, methodID int
 		}
 		setIfMeaningful(values, key, v)
 	}
-	if len(sysFields) > 0 {
-		if err := s.applyRequestSystemFields(ctx, requestID, sysFields); err != nil {
-			log.Printf("email ingest: request %d: не удалось записать системные поля: %v", requestID, err)
+	if len(inventorField) > 0 {
+		if err := s.resolveInventorFromEmail(ctx, requestID, inventorField); err != nil {
+			log.Printf("email ingest: request %d: не удалось записать испытателя: %v", requestID, err)
 		}
 	}
 	photoBefore := photoURLs["photo_before"]
@@ -756,41 +765,29 @@ func (s *Server) applyResultPayload(ctx context.Context, requestID, methodID int
 	return err
 }
 
-// applyRequestSystemFields пишет системные атрибуты (см. systemRequestFields) из
-// письма-результата прямо в requests.* — они общие для заявки, не для одной серии
-// метода. "inventor" резолвится по имени в inventors.id точным совпадением; если не
-// найден — предупреждение в лог, inventor_id не устанавливается (не создаём
-// испытателя автоматически — справочник ведёт лаборатория через /inventors).
-func (s *Server) applyRequestSystemFields(ctx context.Context, requestID int64, fields map[string]any) error {
-	var sets []string
-	var args []any
-	add := func(col string, val any) {
-		args = append(args, val)
-		sets = append(sets, fmt.Sprintf("%s = $%d", col, len(args)+1))
-	}
-	if v, ok := fields["inventor"]; ok {
-		name := strings.TrimSpace(fmt.Sprint(v))
-		if name != "" {
-			var inventorID int64
-			if err := s.pool.QueryRow(ctx, `SELECT id FROM inventors WHERE name = $1`, name).Scan(&inventorID); err != nil {
-				log.Printf("email ingest: request %d: испытатель %q не найден в справочнике, inventor_id не установлен", requestID, name)
-			} else {
-				add("inventor_id", inventorID)
-			}
-		}
-	}
-	for _, col := range []string{"report_date", "samples_in_date", "exp_date", "amb_temp", "amb_pres", "amb_moist"} {
-		if v, ok := fields[col]; ok {
-			if sv := strings.TrimSpace(fmt.Sprint(v)); sv != "" {
-				add(col, sv)
-			}
-		}
-	}
-	if len(sets) == 0 {
+// resolveInventorFromEmail резолвит "inventor" (имя из письма-результата) в
+// requests.inventor_id точным совпадением по inventors.name; если не найден —
+// предупреждение в лог, inventor_id не устанавливается (не создаём испытателя
+// автоматически — справочник ведёт лаборатория через /inventors). До 2026-08-28
+// эта функция (тогда applyRequestSystemFields) писала СЮДА ЖЕ ещё 6 полей
+// (report_date и т.п.) — теперь они идут в values серии (WP3b, см. вызывающий
+// код) и остаются единственным системным полем per-request, не per-series
+// (инвентор не меняется день ото дня так, как условия среды).
+func (s *Server) resolveInventorFromEmail(ctx context.Context, requestID int64, fields map[string]any) error {
+	v, ok := fields["inventor"]
+	if !ok {
 		return nil
 	}
-	args = append([]any{requestID}, args...)
-	_, err := s.pool.Exec(ctx, "UPDATE requests SET "+strings.Join(sets, ", ")+" WHERE id = $1", args...)
+	name := strings.TrimSpace(fmt.Sprint(v))
+	if name == "" {
+		return nil
+	}
+	var inventorID int64
+	if err := s.pool.QueryRow(ctx, `SELECT id FROM inventors WHERE name = $1`, name).Scan(&inventorID); err != nil {
+		log.Printf("email ingest: request %d: испытатель %q не найден в справочнике, inventor_id не установлен", requestID, name)
+		return nil
+	}
+	_, err := s.pool.Exec(ctx, `UPDATE requests SET inventor_id = $2 WHERE id = $1`, requestID, inventorID)
 	return err
 }
 

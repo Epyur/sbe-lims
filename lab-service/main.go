@@ -612,6 +612,60 @@ func (s *Server) migrate(ctx context.Context) error {
 			error TEXT NOT NULL DEFAULT '',
 			triggered_by TEXT NOT NULL
 		)`,
+		// WP3b (2026-08-28) — системные поля (report_date/samples_in_date/exp_date/
+		// amb_temp/amb_pres/amb_moist) переезжают с requests.* (одно значение на
+		// всю заявку) на measurement_results.values (по сериям — испытания одной
+		// заявки могут идти в разные дни с разными условиями среды). requests.*
+		// НЕ удаляются (остаются fallback для протокола, см. resolveSystemPlaceholder/
+		// seriesSystemField в protocol.go) — этот backfill одноразово копирует уже
+		// накопленные значения в values ПОСЛЕДНЕЙ серии каждой заявки+метода, чтобы
+		// не потерять историю для уже существующих заявок. Идемпотентно (безопасно
+		// гонять на каждом старте): трогает только строки, где такого ключа в
+		// values ЕЩЁ нет — новые сохранения (handleCreateResult/email_ingest.go,
+		// см. WP3b) сразу пишут эти поля в values сами, backfill им не мешает.
+		// См. docs/superpowers/specs/2026-08-28-sbe-lims-system-fields-per-series-design.md.
+		`UPDATE measurement_results mr SET values = jsonb_set(mr.values, '{report_date}', to_jsonb(r.report_date), true)
+FROM requests r
+WHERE mr.request_id = r.id AND mr.is_statistical_row = false AND COALESCE(r.report_date, '') != ''
+  AND NOT (mr.values ? 'report_date')
+  AND mr.series_num = (SELECT MAX(series_num) FROM measurement_results mr2
+                       WHERE mr2.request_id = mr.request_id AND mr2.method_id = mr.method_id
+                         AND mr2.is_statistical_row = false)`,
+		`UPDATE measurement_results mr SET values = jsonb_set(mr.values, '{samples_in_date}', to_jsonb(r.samples_in_date), true)
+FROM requests r
+WHERE mr.request_id = r.id AND mr.is_statistical_row = false AND COALESCE(r.samples_in_date, '') != ''
+  AND NOT (mr.values ? 'samples_in_date')
+  AND mr.series_num = (SELECT MAX(series_num) FROM measurement_results mr2
+                       WHERE mr2.request_id = mr.request_id AND mr2.method_id = mr.method_id
+                         AND mr2.is_statistical_row = false)`,
+		`UPDATE measurement_results mr SET values = jsonb_set(mr.values, '{exp_date}', to_jsonb(r.exp_date), true)
+FROM requests r
+WHERE mr.request_id = r.id AND mr.is_statistical_row = false AND COALESCE(r.exp_date, '') != ''
+  AND NOT (mr.values ? 'exp_date')
+  AND mr.series_num = (SELECT MAX(series_num) FROM measurement_results mr2
+                       WHERE mr2.request_id = mr.request_id AND mr2.method_id = mr.method_id
+                         AND mr2.is_statistical_row = false)`,
+		`UPDATE measurement_results mr SET values = jsonb_set(mr.values, '{amb_temp}', to_jsonb(r.amb_temp), true)
+FROM requests r
+WHERE mr.request_id = r.id AND mr.is_statistical_row = false AND COALESCE(r.amb_temp, '') != ''
+  AND NOT (mr.values ? 'amb_temp')
+  AND mr.series_num = (SELECT MAX(series_num) FROM measurement_results mr2
+                       WHERE mr2.request_id = mr.request_id AND mr2.method_id = mr.method_id
+                         AND mr2.is_statistical_row = false)`,
+		`UPDATE measurement_results mr SET values = jsonb_set(mr.values, '{amb_pres}', to_jsonb(r.amb_pres), true)
+FROM requests r
+WHERE mr.request_id = r.id AND mr.is_statistical_row = false AND COALESCE(r.amb_pres, '') != ''
+  AND NOT (mr.values ? 'amb_pres')
+  AND mr.series_num = (SELECT MAX(series_num) FROM measurement_results mr2
+                       WHERE mr2.request_id = mr.request_id AND mr2.method_id = mr.method_id
+                         AND mr2.is_statistical_row = false)`,
+		`UPDATE measurement_results mr SET values = jsonb_set(mr.values, '{amb_moist}', to_jsonb(r.amb_moist), true)
+FROM requests r
+WHERE mr.request_id = r.id AND mr.is_statistical_row = false AND COALESCE(r.amb_moist, '') != ''
+  AND NOT (mr.values ? 'amb_moist')
+  AND mr.series_num = (SELECT MAX(series_num) FROM measurement_results mr2
+                       WHERE mr2.request_id = mr.request_id AND mr2.method_id = mr.method_id
+                         AND mr2.is_statistical_row = false)`,
 	}
 	for _, q := range stmts {
 		if _, err := s.pool.Exec(ctx, q); err != nil {
