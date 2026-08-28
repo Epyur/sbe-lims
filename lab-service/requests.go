@@ -87,13 +87,13 @@ type Request struct {
 	// protocol.go resolveSystemPlaceholder), заполняются автоматически при приёме
 	// письма-результата (email_ingest.go); не MethodAttribute, не настраиваются
 	// per-method (см. sbe-lims/AGENTS.md, "Системные атрибуты").
-	InventorID    int64         `json:"inventor_id"`
-	ReportDate    string        `json:"report_date"`
-	SamplesInDate string        `json:"samples_in_date"`
-	ExpDate       string        `json:"exp_date"`
-	AmbTemp       string        `json:"amb_temp"`
-	AmbPres       string        `json:"amb_pres"`
-	AmbMoist      string        `json:"amb_moist"`
+	InventorID    int64  `json:"inventor_id"`
+	ReportDate    string `json:"report_date"`
+	SamplesInDate string `json:"samples_in_date"`
+	ExpDate       string `json:"exp_date"`
+	AmbTemp       string `json:"amb_temp"`
+	AmbPres       string `json:"amb_pres"`
+	AmbMoist      string `json:"amb_moist"`
 	// AssignedTo/CompletedAt — Kanban-доска «Очередь лаборатории» (2026-08-24,
 	// см. kanban.go). AssignedTo — email испытателя (lab_members.email,
 	// lab_operator/lab_admin лабы заявки); назначает/переназначает только
@@ -101,11 +101,11 @@ type Request struct {
 	// заявку из "new". CompletedAt — момент перехода в status="completed"
 	// (не UpdatedAt) — основа 10-рабочедневного окна показа в колонке
 	// "Завершённые".
-	AssignedTo    string        `json:"assigned_to"`
-	CompletedAt   string        `json:"completed_at"`
-	Files         []RequestFile `json:"files"`
-	CreatedAt     string        `json:"created_at"`
-	UpdatedAt     string        `json:"updated_at"`
+	AssignedTo  string        `json:"assigned_to"`
+	CompletedAt string        `json:"completed_at"`
+	Files       []RequestFile `json:"files"`
+	CreatedAt   string        `json:"created_at"`
+	UpdatedAt   string        `json:"updated_at"`
 }
 
 // requestColumnsSQL — колонки requests в порядке, ожидаемом scanRequestRow. Единая
@@ -687,6 +687,12 @@ WHERE id = $1`, id, req.Status)
 		log.Printf("set status: %v", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
 		return
+	}
+	// WP2 (2026-08-28): автоотправка писем при РЕАЛЬНОМ переходе в completed (не при
+	// повторном сохранении уже completed-заявки) — та же проверка, что и в SQL CASE выше.
+	// Best-effort — не блокирует ответ, ошибки только в лог/журнал (см. outbound_email.go).
+	if req.Status == "completed" && existing.Status != "completed" {
+		go s.triggerCompletionEmails(context.WithoutCancel(r.Context()), id)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }

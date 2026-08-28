@@ -397,6 +397,90 @@ COALESCE($6, description), ...` (не перетирает, если поле н
   локально на ветке `backend`), изменения не бампят версию плагина sbe-lims (это
   чисто бэковая доработка, TS/JS клиента не менялись).
 
+## Исходящая почта — результаты заказчику + дубль в LPITrack (WP2, 2026-08-28)
+
+См. `docs/superpowers/specs/2026-08-28-sbe-lims-outbound-email-design.md` +
+`docs/superpowers/plans/2026-08-28-sbe-lims-outbound-email-plan.md`. `lab-service`
+раньше умел только ПРИНИМАТЬ почту (`email_ingest.go`, IMAP) — теперь умеет и слать.
+
+- Новый файл `outbound_email.go`: `sendMailWithAttachment` — тот же паттерн, что
+  `sbe-core/auth-service/email.go sendMail` (net/smtp, exim-релей, STARTTLS с
+  самоподписанным сертификатом), расширенный под MIME multipart/mixed (текст +
+  docx-вложение) и RFC 2047 (Subject с кириллицей корректно кодируется —
+  оригинальный `sendMail` этого не делал, для служебных писем сходило с рук,
+  для клиентских писем с протоколом решил не рисковать).
+- `labs.auto_send_email` (новая колонка, default false) — per-lab переключатель
+  автоотправки; `sent_emails` — журнал КАЖДОЙ попытки (успех и неудача
+  одинаково, видимость важнее) и одновременно защита от повторной АВТОотправки
+  (`hasSentEmail` проверяет только `success=true`).
+- Триггер — `triggerCompletionEmails`, вызывается из ДВУХ мест (оба меняют
+  `requests.status`): `handleSetRequestStatus` (`requests.go`) и
+  `handleKanbanMove` (`kanban.go`) — только при РЕАЛЬНОМ переходе в completed
+  (`existing.Status != "completed" && new == "completed"`), в фоновой
+  горутине (`go ...`, `context.WithoutCancel`) — не блокирует ответ на смену
+  статуса отправкой почты. `shouldAutoSend` — чистая функция без БД/сети
+  (юнит-тесты в `outbound_email_test.go`).
+- `POST /requests/{id}/send-email` (`handleSendRequestEmail`) — ручная кнопка,
+  шлёт оба письма безусловно (без проверки `auto_send_email`/журнала).
+  `GET /requests/{id}/sent-emails` — журнал для карточки заявки.
+
+### Живой E2E нашёл реальный инфраструктурный баг (не в коде — в docker-compose)
+
+Первая попытка (`LAB_SMTP_HOST` по умолчанию `localhost`) — `dial tcp
+[::1]:25: connection refused`: контейнер `lab` не имеет доступа к `exim` на
+хосте через `localhost` (это loopback КОНТЕЙНЕРА, не хоста). auth-service
+(уже рабочий эталон) использует `SMTP_HOST=host.docker.internal` — добавил
+`LAB_SMTP_HOST=host.docker.internal` в `docker-compose.yml` для `lab`, но
+получил ВТОРУЮ ошибку: `lookup host.docker.internal: no such host`. Причина:
+`host.docker.internal` — не встроенное поведение Docker на Linux (в отличие
+от Docker Desktop Mac/Windows), нужен явный `extra_hosts:
+["host.docker.internal:host-gateway"]` на КАЖДОМ сервисе, которому это
+нужно — у `auth-service` он уже был (пропустил при первом чтении compose,
+смотрел только `environment:`), у `lab` — не было. Добавлен. После этого —
+оба письма (`customer`/`lpitrack`) реально ушли через exim, `success=true`.
+**Урок для будущих сервисов**: любой НОВЫЙ сервис в этом compose, которому
+нужен доступ к хостовым ресурсам (exim и т.п.) через `host.docker.internal`,
+обязан сам получить `extra_hosts` — это не наследуется и не общее для сети
+`internal`, настраивается per-service.
+
+Изменения `docker-compose.yml` на сервере (не в git — сервер не
+версионируется, см. общее правило проекта): `LAB_SMTP_HOST`/`_PORT`/`_FROM`/
+`_SKIP_VERIFY`, `LAB_LPITRACK_EMAIL` (= `LAB_MAIL_LOGIN`, тот же ящик
+`lpitn@yandex.ru` — легаси десктопная ЛИМС мониторит его же как инбокс),
+`extra_hosts` для `lab`. Провалидировано `docker compose config --quiet`
+перед применением, минимальный диф проверен построчно.
+
+Живой E2E (тестовые лаба/метод/объект/3 заявки, удалены после проверки,
+продакшн не тронут): (1) `auto_send_email=true` + `external_id` заполнен →
+оба письма ушли, `success=true`, обе строки журнала; (2) повторный
+туда-обратно перевод в completed → НИ ОДНОЙ новой авто-записи (защита от
+дублей работает); (3) ручная кнопка `POST .../send-email` → 2 новые записи
+`triggered_by='manual'`, независимо от уже отправленного; (4) заявка БЕЗ
+`external_id` → только customer-письмо, ни одной lpitrack-записи (не ошибка,
+просто неприменимо); (5) `auto_send_email=false` → ни одного автописьма,
+журнал пуст. **Примечание**: тесты (1)/(3) реально отправили письма на
+настоящие адреса — `polishchuk@tn.ru` (владелец, для проверки) и
+`lpitn@yandex.ru` (реальный ящик трекера LPITrack) — это было необходимо для
+честной проверки SMTP-транспорта, письма НЕ удалялись (нет доступа
+удалить из внешнего ящика без отдельного запроса на IMAP-удаление).
+
+### Фикс: текст письма заказчику должен явно называть external_id (2026-08-28)
+
+Живая жалоба пользователя по итогам реального письма: пустое вложение —
+ожидаемо (тестовая заявка без результатов), но текст письма называл только
+внутренний номер ЛИМС (`CustomerNumber`), а для заявки переходного периода
+(есть `external_id`) заказчик узнаёт её именно по этому номеру — письмо должно
+называть его явно. Новая чистая функция `customerEmailContent(req) (subject,
+body string)`: если `ExternalID != ""` — и тема, и текст письма ведут с
+`№{external_id}`, тело дополнительно поясняет `(учётный номер в ЛИМС системе —
+{CustomerNumber})` — оба номера видны, прослеживаемость внутри ЛИМС не
+теряется. Без `external_id` — как раньше, только `CustomerNumber`. Юнит-тесты
+(`TestCustomerEmailContentWith(out)ExternalID`) — проверяют оба случая.
+Задеплоено (`gofmt`/`go build`/`go vet`/`go test` чисто, md5 сверен, health
+ok) — новую живую отправку не гонял (тело уже покрыто юнит-тестом с теми же
+значениями формата, повторно слать письма на реальные адреса ради этого не
+стал).
+
 ## Калибровочная кривая метода РП (WP1, 2026-08-28)
 
 См. `docs/superpowers/specs/2026-08-28-sbe-lims-calibration-curve-design.md` +

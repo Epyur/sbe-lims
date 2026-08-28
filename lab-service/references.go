@@ -25,9 +25,13 @@ type Lab struct {
 	// handleCreateLab): внешняя лаба не существует самостоятельно, привязана к
 	// внутренней. 0 — у внутренних лабораторий (или у внешних, заведённых раньше
 	// этого поля — переходное состояние, не мешает работе, см. AGENTS.md).
-	ParentLabID int64  `json:"parent_lab_id"`
-	CreatedAt   string `json:"created_at"`
-	UpdatedAt   string `json:"updated_at"`
+	ParentLabID int64 `json:"parent_lab_id"`
+	// AutoSendEmail (2026-08-28, WP2) — автоотправка письма заказчику (+ дубль в
+	// LPITrack, если у заявки есть external_id) при переходе заявки этой лабы в
+	// completed. По умолчанию выключено — см. outbound_email.go triggerCompletionEmails.
+	AutoSendEmail bool   `json:"auto_send_email"`
+	CreatedAt     string `json:"created_at"`
+	UpdatedAt     string `json:"updated_at"`
 }
 
 // handleListLabs — admin/superadmin видят все лаборатории; остальные — свои
@@ -44,11 +48,11 @@ func (s *Server) handleListLabs(w http.ResponseWriter, r *http.Request) {
 	var rows pgx.Rows
 	if roleRank(role) >= roleRank("admin") {
 		rows, err = s.pool.Query(r.Context(), `
-SELECT id, code, name, description, type, COALESCE(parent_lab_id, 0), created_at, updated_at
+SELECT id, code, name, description, type, COALESCE(parent_lab_id, 0), auto_send_email, created_at, updated_at
 FROM labs ORDER BY id`)
 	} else {
 		rows, err = s.pool.Query(r.Context(), `
-SELECT id, code, name, description, type, COALESCE(parent_lab_id, 0), created_at, updated_at
+SELECT id, code, name, description, type, COALESCE(parent_lab_id, 0), auto_send_email, created_at, updated_at
 FROM labs
 WHERE id IN (SELECT lab_id FROM lab_members WHERE email = $1)
    OR parent_lab_id IN (SELECT lab_id FROM lab_members WHERE email = $1)
@@ -64,7 +68,7 @@ ORDER BY id`, email)
 	for rows.Next() {
 		var l Lab
 		var ca, ua time.Time
-		if err := rows.Scan(&l.ID, &l.Code, &l.Name, &l.Description, &l.Type, &l.ParentLabID, &ca, &ua); err != nil {
+		if err := rows.Scan(&l.ID, &l.Code, &l.Name, &l.Description, &l.Type, &l.ParentLabID, &l.AutoSendEmail, &ca, &ua); err != nil {
 			log.Printf("labs scan: %v", err)
 			continue
 		}
@@ -154,6 +158,8 @@ func (s *Server) handleUpdateLab(w http.ResponseWriter, r *http.Request) {
 		Description *string `json:"description"`
 		Type        *string `json:"type"`
 		ParentLabID *int64  `json:"parent_lab_id"`
+		// AutoSendEmail (2026-08-28, WP2) — см. Lab.AutoSendEmail.
+		AutoSendEmail *bool `json:"auto_send_email"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json"})
@@ -220,8 +226,9 @@ UPDATE labs SET
 	code = COALESCE($2, code), name = COALESCE($3, name), description = COALESCE($4, description),
 	type = COALESCE($5, type),
 	parent_lab_id = CASE WHEN $6 THEN $7 ELSE parent_lab_id END,
+	auto_send_email = COALESCE($8, auto_send_email),
 	updated_at = now()
-WHERE id = $1`, id, req.Code, req.Name, req.Description, req.Type, parentProvided, parentValue)
+WHERE id = $1`, id, req.Code, req.Name, req.Description, req.Type, parentProvided, parentValue, req.AutoSendEmail)
 	if err != nil {
 		if isUniqueViolation(err) {
 			writeJSON(w, http.StatusConflict, map[string]any{"error": "code already exists"})

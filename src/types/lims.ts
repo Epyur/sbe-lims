@@ -9,8 +9,23 @@ export interface Lab {
   description: string;
   type: string;
   parent_lab_id: number;
+  /** Автоотправка письма заказчику (+ дубль в LPITrack, если у заявки есть
+   * external_id) при переходе заявки этой лабы в completed (2026-08-28, WP2). */
+  auto_send_email: boolean;
   created_at: string;
   updated_at: string;
+}
+
+/** Одна строка журнала отправленных писем заявки (2026-08-28, WP2). */
+export interface SentEmail {
+  id: number;
+  request_id: number;
+  recipient_type: 'customer' | 'lpitrack';
+  recipient_address: string;
+  sent_at: string;
+  success: boolean;
+  error: string;
+  triggered_by: 'auto' | 'manual';
 }
 
 /** Заявка (видимая лаборатории). 1 заявка = 1 метод (метод и номера прямо в

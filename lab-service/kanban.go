@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -166,6 +167,11 @@ WHERE id = $1`, id, newStatus, newAssignedTo)
 		log.Printf("kanban move: %v", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
 		return
+	}
+	// WP2 (2026-08-28): та же автоотправка, что и handleSetRequestStatus — только при
+	// РЕАЛЬНОМ переходе в completed, не при повторном перемещении уже completed-заявки.
+	if newStatus == "completed" && existing.Status != "completed" {
+		go s.triggerCompletionEmails(context.WithoutCancel(r.Context()), id)
 	}
 
 	full, err := s.loadRequest(r.Context(), id)

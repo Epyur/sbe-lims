@@ -126,6 +126,9 @@ func main() {
 	mux.HandleFunc("PATCH /api/lab/requests/{id}", s.requirePerm("editor")(s.handleUpdateRequest))
 	mux.HandleFunc("POST /api/lab/requests/{id}/status", s.requirePerm("editor")(s.handleSetRequestStatus))
 	mux.HandleFunc("POST /api/lab/requests/{id}/kanban-move", s.requirePerm("editor")(s.handleKanbanMove))
+	// WP2 (2026-08-28) — исходящая почта: ручная отправка + журнал заявки.
+	mux.HandleFunc("POST /api/lab/requests/{id}/send-email", s.requirePerm("editor")(s.handleSendRequestEmail))
+	mux.HandleFunc("GET /api/lab/requests/{id}/sent-emails", s.requirePerm("viewer")(s.handleListSentEmails))
 
 	// Группы
 	mux.HandleFunc("GET /api/lab/groups", s.requirePerm("viewer")(s.handleListGroups))
@@ -589,6 +592,24 @@ func (s *Server) migrate(ctx context.Context) error {
 		// резолвит её сам (resolveSingleMainEquipment), поле не обязательно. Общая
 		// доработка traceability для ЛЮБОГО метода, не только РП.
 		`ALTER TABLE measurement_results ADD COLUMN IF NOT EXISTS equipment_id BIGINT REFERENCES equipment(id)`,
+		// WP2 (2026-08-28, исходящая почта) — см.
+		// docs/superpowers/specs/2026-08-28-sbe-lims-outbound-email-design.md.
+		// auto_send_email — per-lab переключатель автоотправки при переходе заявки в
+		// completed (по умолчанию выключено — явное решение админа лабы, не глобальный
+		// флаг). sent_emails — журнал КАЖДОЙ попытки отправки (включая неудачные —
+		// видимость важнее), и заодно источник для защиты от повторной автоотправки
+		// (см. triggerCompletionEmails в outbound_email.go).
+		`ALTER TABLE labs ADD COLUMN IF NOT EXISTS auto_send_email BOOLEAN NOT NULL DEFAULT false`,
+		`CREATE TABLE IF NOT EXISTS sent_emails (
+			id BIGSERIAL PRIMARY KEY,
+			request_id BIGINT NOT NULL REFERENCES requests(id) ON DELETE CASCADE,
+			recipient_type TEXT NOT NULL,
+			recipient_address TEXT NOT NULL,
+			sent_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+			success BOOLEAN NOT NULL,
+			error TEXT NOT NULL DEFAULT '',
+			triggered_by TEXT NOT NULL
+		)`,
 	}
 	for _, q := range stmts {
 		if _, err := s.pool.Exec(ctx, q); err != nil {
