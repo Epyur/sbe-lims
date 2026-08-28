@@ -168,6 +168,18 @@ export class LimsSyncService {
     this.assertOk(res);
   }
 
+  /** Удаление серии с перенумерацией последующих (2026-08-28, WP3a) — сервер сам
+   * сдвигает series_num всех следующих серий этого метода на −1. */
+  async deleteResultSeries(requestId: number, seriesNum: number): Promise<void> {
+    const token = await this.getToken();
+    const res = await this.request({
+      url: `${this.baseUrl}/api/lab/requests/${requestId}/results/${seriesNum}`,
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    this.assertOk(res);
+  }
+
   /** Меняет статус заявки (received/processing/completed). */
   /** Kanban-доска «Очередь лаборатории»: смена статуса и/или назначение испытателя
    * (см. server_back/lab-service/kanban.go, handleKanbanMove) — единая точка входа
@@ -419,6 +431,21 @@ export class LimsSyncService {
       console.warn('ЛИМС: не JSON в ответе equipment/calibrations:', errorMessage(e));
       return [];
     }
+  }
+
+  /** PNG-график калибровочного атрибута data_type="curve" (2026-08-28, WP1) — бинарный
+   * ответ, в обход текстовой обёртки request() (та возвращает только .text), поэтому
+   * здесь requestUrl напрямую. Возвращает data: URL, готовый для <img src>. */
+  async getCalibrationCurveChartDataUrl(equipmentId: number, calibrationId: number, attrId: string): Promise<string> {
+    const token = await this.getToken();
+    const res = await requestUrl({
+      url: `${this.baseUrl}/api/lab/equipment/${equipmentId}/calibrations/${calibrationId}/curve-chart/${encodeURIComponent(attrId)}`,
+      method: 'GET',
+      headers: { Authorization: `Bearer ${token}` },
+      throw: false,
+    });
+    if (res.status >= 400) throw new Error(`Сервер вернул ${res.status} при загрузке графика`);
+    return `data:image/png;base64,${arrayBufferToBase64(res.arrayBuffer)}`;
   }
 
   /** Новая запись журнала калибровок — сервер сам пересчитывает last_calibration/
@@ -797,4 +824,17 @@ export class LimsSyncService {
       if (timer !== undefined) window.clearTimeout(timer);
     }
   }
+}
+
+/** ArrayBuffer → base64 (2026-08-28, WP1 — график калибровочной кривой), в чанках —
+ * String.fromCharCode(...bytes) на весь буфер разом упёрся бы в лимит аргументов
+ * стека для больших файлов (график — не больше пары десятков КБ, но привычка). */
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
 }

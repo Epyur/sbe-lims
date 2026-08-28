@@ -1383,18 +1383,25 @@ DELETE FROM measurement_results WHERE request_id = $1 AND method_id = $2 AND is_
 		requestID, methodID); err != nil {
 		return err
 	}
-	// nextSeriesNum (не len(series)+1) — гарантированно свободный слот ПОСЛЕ
-	// максимального номера настоящей серии, даже если она не начинается с 1
-	// или имеет разрывы (2026-08-24, см. комментарий у nextSeriesNum).
-	seriesNum, err := s.nextSeriesNum(ctx, requestID, methodID)
-	if err != nil {
-		return err
-	}
+	// Фиксированный вне-диапазонный номер -1 (2026-08-28) — ИСПРАВЛЕНИЕ реального
+	// бага, найденного живым E2E WP3a: раньше стат-строка занимала nextSeriesNum()
+	// (тот же слот "MAX(реальных)+1", что и следующая настоящая серия) — уникальный
+	// индекс uq_meas_req_method_series НЕ различает is_statistical_row, поэтому
+	// вставка следующей настоящей серии молча УПЁРЛАСЬ бы в ON CONFLICT DO UPDATE,
+	// перезаписав values стат-строки данными новой серии (is_statistical_row при
+	// этом НЕ менялся — оставался true), а этот же вызов recomputeStatistics СРАЗУ
+	// ПОСЛЕ удалял "стат-строку" — реально только что записанные данные новой
+	// серии — целиком. Раз стат-строка ровно одна на request+method (DELETE+INSERT
+	// выше), ей не нужен "следующий свободный" номер вообще — фиксированный -1
+	// (real series_num всегда >= 1) гарантированно никогда не пересечётся ни с
+	// одной настоящей серией, в отличие от "следующего" номера, который по
+	// определению пересечётся с следующей же настоящей вставкой.
+	const statsRowSeriesNum = -1
 	_, err = s.pool.Exec(ctx, `
 INSERT INTO measurement_results (request_id, method_id, series_num, values, is_statistical_row,
 	calculation_type, source_series_count, source_series_range)
 VALUES ($1, $2, $3, $4::jsonb, true, 'auto_statistics', $5, $6)`,
-		requestID, methodID, seriesNum, string(statsJSON), len(series), "1-"+strconv.Itoa(len(series)))
+		requestID, methodID, statsRowSeriesNum, string(statsJSON), len(series), "1-"+strconv.Itoa(len(series)))
 	return err
 }
 
@@ -1432,6 +1439,74 @@ FROM aggregated_results WHERE request_id = $1 ORDER BY id`, requestID)
 		res = append(res, a)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"aggregated": res})
+}
+
+// handleDeleteResultSeries — DELETE /requests/{id}/results/{series} (WP3a, 2026-08-28,
+// см. docs/superpowers/specs/2026-08-28-sbe-lims-series-navigation-design.md): удаляет
+// серию и СДВИГАЕТ НОМЕРА всех последующих серий этого метода на −1 (решение
+// пользователя — не оставлять дыр в нумерации), в одной транзакции. После коммита —
+// пересчёт статистики/агрегированных формул, тот же путь, что и после обычного
+// сохранения серии (saveResultSeries).
+func (s *Server) handleDeleteResultSeries(w http.ResponseWriter, r *http.Request) {
+	requestID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid id"})
+		return
+	}
+	if ok, err := s.requireLabAccess(r.Context(), currentEmail(r), requestID); err != nil || !ok {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden: not lab member"})
+		return
+	}
+	seriesNum, err := strconv.Atoi(r.PathValue("series"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid series"})
+		return
+	}
+	var methodID int64
+	if err := s.pool.QueryRow(r.Context(),
+		`SELECT method_id FROM measurement_results WHERE request_id = $1 AND series_num = $2 AND is_statistical_row = false`,
+		requestID, seriesNum).Scan(&methodID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeJSON(w, http.StatusNotFound, map[string]any{"error": "series not found"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
+		return
+	}
+
+	tx, err := s.pool.Begin(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
+		return
+	}
+	defer tx.Rollback(r.Context())
+
+	if _, err := tx.Exec(r.Context(), `
+DELETE FROM measurement_results
+WHERE request_id = $1 AND method_id = $2 AND series_num = $3 AND is_statistical_row = false`,
+		requestID, methodID, seriesNum); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
+		return
+	}
+	if _, err := tx.Exec(r.Context(), `
+UPDATE measurement_results SET series_num = series_num - 1
+WHERE request_id = $1 AND method_id = $2 AND series_num > $3 AND is_statistical_row = false`,
+		requestID, methodID, seriesNum); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
+		return
+	}
+
+	if err := s.recomputeStatistics(r.Context(), requestID, methodID); err != nil {
+		log.Printf("delete result series: recompute statistics: %v", err)
+	}
+	if err := s.applyAggregatedFormulas(r.Context(), requestID, methodID); err != nil {
+		log.Printf("delete result series: aggregated formulas: %v", err)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 // handleCalculateSeries пересчитывает формулы/классификацию для всех серий заявки.

@@ -164,6 +164,8 @@ func main() {
 	mux.HandleFunc("POST /api/lab/requests/{id}/results", s.requirePerm("editor")(s.handleCreateResult))
 	mux.HandleFunc("GET /api/lab/requests/{id}/results/aggregated", s.requirePerm("viewer")(s.handleListAggregated))
 	mux.HandleFunc("POST /api/lab/requests/{id}/results/{series}/calculate", s.requirePerm("editor")(s.handleCalculateSeries))
+	// WP3a (2026-08-28) — удаление серии с перенумерацией последующих.
+	mux.HandleFunc("DELETE /api/lab/requests/{id}/results/{series}", s.requirePerm("editor")(s.handleDeleteResultSeries))
 	// Буфер данных приборов (2026-08-28) — не привязан к заявке/лаборатории (прибор не
 	// знает номер заявки), поэтому обычный editor-уровень, без requireLabAccess.
 	mux.HandleFunc("POST /api/lab/instrument-buffer", s.requirePerm("editor")(s.handleCreateInstrumentBuffer))
