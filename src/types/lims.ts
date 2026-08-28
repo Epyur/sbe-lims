@@ -339,9 +339,13 @@ export interface InlineNode {
 /** Один столбец динамической таблицы (RichNode "table") — одна строка на
  * серию эксперимента, без агрегации. kind="series_no" — номер серии (1,2,3...)
  * как обычная колонка (раньше жёстко prepend-илась сервером без права
- * пользователя её убрать/переместить/переименовать, 2026-08-23). */
+ * пользователя её убрать/переместить/переименовать, 2026-08-23).
+ * kind="photo_before"/"photo_after" (2026-08-28) — top-level
+ * measurement_results.photo_before/photo_after (загружаются через мобильные
+ * пикеры «Фото до/после испытания»), НЕ атрибут метода — до этого фикса
+ * протокол их вообще не рисовал (только фото-атрибуты data_type="photo"). */
 export interface TableColumn {
-  kind?: 'attribute' | 'series_no';
+  kind?: 'attribute' | 'series_no' | 'photo_before' | 'photo_after';
   attribute_id?: string;
   label?: string;
 }
