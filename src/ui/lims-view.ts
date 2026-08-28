@@ -123,6 +123,46 @@ function parseConditionLiteral(raw: string): string | number {
   return raw;
 }
 
+/** "YYYY-MM-DD" по локальной дате устройства (2026-08-28, WP3c) — тот же
+ * принцип, что todayLocalDateString в sbe-lims-mobile (WP3b): маленькое
+ * дублирование между клиентами, не общий пакет. Суффикс Desktop — избегает
+ * путаницы с одноимённым мобильным хелпером при чтении кода бок о бок. */
+function todayLocalDateStringDesktop(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+/** Сравнение для OperatorFormField.visibility.conditions (2026-08-28, WP3c) —
+ * НЕ переиспользует DSL/классификацию (те выполняются только на сервере, Go);
+ * тут нужна живая клиентская проверка при каждом изменении формы правки серии. */
+function compareFieldCondition(actual: unknown, operator: ComparisonOperator, expected: string): boolean {
+  if (operator === '==') return String(actual ?? '') === expected;
+  if (operator === '!=') return String(actual ?? '') !== expected;
+  const a = Number(actual);
+  const b = Number(expected);
+  if (Number.isNaN(a) || Number.isNaN(b)) return false;
+  if (operator === '<') return a < b;
+  if (operator === '<=') return a <= b;
+  if (operator === '>') return a > b;
+  return a >= b; // '>='
+}
+
+/** Пересчитывает видимость всех полей формы правки серии с visibility
+ * (2026-08-28, WP3c) — скрывает/показывает через CSS display, DOM/введённое
+ * значение НЕ уничтожается. */
+function updateFieldVisibilityDesktop(form: HTMLElement, fields: OperatorFormField[], values: Record<string, unknown>): void {
+  for (const field of fields) {
+    if (!field.visibility) continue;
+    const row = form.querySelector<HTMLElement>(`[data-attribute-id="${CSS.escape(field.attribute_id)}"]`);
+    if (!row) continue;
+    const { logic, conditions } = field.visibility;
+    if (conditions.length === 0) { row.style.display = ''; continue; }
+    const results = conditions.map(c => compareFieldCondition(values[c.field], c.operator, c.value));
+    const visible = logic === 'and' ? results.every(Boolean) : results.some(Boolean);
+    row.style.display = visible ? '' : 'none';
+  }
+}
+
 /** Ключи разделов дерева навигации (фасад; наполнение подключается позже). */
 type NavKey =
   | 'requests'
@@ -1223,8 +1263,14 @@ export class LimsView extends ItemView {
     for (const field of fields) {
       const attr = attrById.get(field.attribute_id);
       if (attr && attr.data_type === 'photo') continue; // вне scope, как и на мобильном
-      this.renderDesktopResultField(form, field, attr?.data_type || 'text', values);
+      this.renderDesktopResultField(form, field, attr?.data_type || 'text', values, attr?.options);
     }
+    // Условная видимость (2026-08-28, WP3c) — стартовое состояние сразу после
+    // рендера, живой пересчёт на каждое изменение формы.
+    const recomputeVisibility = (): void => { updateFieldVisibilityDesktop(form, fields, values); };
+    recomputeVisibility();
+    form.addEventListener('input', recomputeVisibility);
+    form.addEventListener('change', recomputeVisibility);
 
     let equipmentSelect: HTMLSelectElement | undefined;
     if (mainEquipmentIds.length > 1) {
@@ -1244,11 +1290,22 @@ export class LimsView extends ItemView {
     saveBtn.addEventListener('click', async () => {
       if (equipmentSelect && !equipmentSelect.value) { new Notice('Выберите оборудование'); return; }
       try {
+        // Скрытые условной видимостью поля не уходят на сервер (2026-08-28,
+        // WP3c) — та же логика, что в мобильном renderResultForm.
+        recomputeVisibility();
+        const hiddenIds = new Set<string>();
+        form.querySelectorAll<HTMLElement>('[data-attribute-id]').forEach((row) => {
+          if (row.style.display === 'none' && row.dataset.attributeId) hiddenIds.add(row.dataset.attributeId);
+        });
+        const submitValues: Record<string, unknown> = {};
+        for (const [k, v] of Object.entries(values)) {
+          if (!hiddenIds.has(k)) submitValues[k] = v;
+        }
         await this.plugin.syncService.saveResult(req.id, {
           method_id: req.method_id,
           inventor_id: 0,
           series_num: series.series_num,
-          values,
+          values: submitValues,
           equipment_id: equipmentSelect ? Number(equipmentSelect.value) : undefined,
         });
         new Notice('Серия сохранена, расчёт выполнен');
@@ -1264,9 +1321,39 @@ export class LimsView extends ItemView {
    * не у input_parameters метода) — не обрабатывается отдельной веткой намеренно. */
   private renderDesktopResultField(
     container: HTMLElement, field: OperatorFormField, dataType: AttributeDataType, values: Record<string, unknown>,
+    options?: string[],
   ): void {
     const row = container.createDiv({ cls: 'tn-lims-flex' });
+    // Для updateFieldVisibility (2026-08-28, WP3c) — находит обёртку поля по
+    // attribute_id, чтобы скрыть/показать по условию другого поля.
+    row.dataset.attributeId = field.attribute_id;
     row.createSpan({ text: (field.label || field.attribute_id) + (field.required ? ' *' : '') + ': ', cls: 'tn-lims-meta' });
+
+    // Дефолт (2026-08-28, WP3c) — однократно при рендере, только если значения
+    // ещё нет (не перетирает уже сохранённое — эта форма ВСЕГДА правка
+    // существующей серии на десктопе, но дефолт может пригодиться, если
+    // конкретно это поле раньше не заполнялось).
+    if (field.default && values[field.attribute_id] === undefined) {
+      if (field.default.kind === 'literal') values[field.attribute_id] = field.default.value;
+      else if (field.default.kind === 'today' && dataType === 'date') values[field.attribute_id] = todayLocalDateStringDesktop();
+    }
+
+    // select/boolean (2026-08-28, WP3c) — constrained-choice виджет: boolean
+    // всегда ['Да','Нет'], select — из MethodAttribute.options.
+    if (dataType === 'select' || dataType === 'boolean') {
+      const opts = dataType === 'boolean' ? ['Да', 'Нет'] : (options || []);
+      const select = row.createEl('select', { cls: 'tn-lims-select' });
+      select.createEl('option', { attr: { value: '' }, text: '— выбрать —' });
+      for (const o of opts) select.createEl('option', { attr: { value: o }, text: o });
+      const existingChoice = values[field.attribute_id];
+      if (existingChoice !== undefined) select.value = String(existingChoice);
+      select.addEventListener('change', () => {
+        if (select.value === '') { delete values[field.attribute_id]; return; }
+        values[field.attribute_id] = select.value;
+      });
+      return;
+    }
+
     const attrs: Record<string, string> = { type: 'text' };
     if (dataType === 'int') { attrs.type = 'number'; attrs.step = '1'; }
     else if (dataType === 'float') { attrs.type = 'number'; attrs.step = 'any'; }
@@ -2084,7 +2171,107 @@ export class LimsView extends ItemView {
       });
       helpInput.value = f.help_text || '';
       helpInput.addEventListener('change', () => { f.help_text = helpInput.value.trim() || undefined; onChange(); });
+
+      // Дефолт + условная видимость (2026-08-28, WP3c) — резолвим тип поля
+      // (атрибут метода или системное) один раз, обе секции от него зависят.
+      const resolvedAttr = attrs.find(a => a.id === f.attribute_id);
+      const resolvedSys = OPERATOR_FORM_SYSTEM_FIELDS.find(s => s.id === f.attribute_id);
+      const resolvedType = resolvedAttr?.data_type || resolvedSys?.data_type;
+
+      const defaultRow = row.createDiv({ cls: 'tn-lims-flex' });
+      if (resolvedType === 'select' || resolvedType === 'boolean') {
+        defaultRow.createSpan({ cls: 'tn-lims-meta', text: 'Дефолт:' });
+        const defSelect = defaultRow.createEl('select', { cls: 'tn-lims-select' });
+        defSelect.createEl('option', { attr: { value: '' }, text: '— нет —' });
+        const opts = resolvedType === 'boolean' ? ['Да', 'Нет'] : (resolvedAttr?.options || []);
+        for (const o of opts) defSelect.createEl('option', { attr: { value: o }, text: o });
+        defSelect.value = f.default?.kind === 'literal' ? f.default.value : '';
+        defSelect.addEventListener('change', () => {
+          f.default = defSelect.value ? { kind: 'literal', value: defSelect.value } : undefined;
+          onChange();
+        });
+      } else if (resolvedType === 'date') {
+        const defLabel = defaultRow.createEl('label', { cls: 'tn-lims-flex' });
+        const defCb = defLabel.createEl('input', { attr: { type: 'checkbox' } });
+        defCb.checked = f.default?.kind === 'today';
+        defLabel.createSpan({ text: 'по умолчанию — сегодня' });
+        defCb.addEventListener('change', () => {
+          f.default = defCb.checked ? { kind: 'today' } : undefined;
+          onChange();
+        });
+      }
+      // Другие типы (text/int/float/photo/curve) — без UI дефолта, не запрошено.
+
+      // Условная видимость — тот же toggle-панель паттерн, что у синонимов
+      // атрибута (toggleSynonymsPanel): кнопка добавляет/убирает панель.
+      const visBtn = row.createEl('button', {
+        text: f.visibility ? '👁 условие показа ✓' : '👁 условие показа',
+        cls: 'tn-btn tn-btn-ghost',
+      });
+      visBtn.addEventListener('click', () => this.toggleVisibilityPanel(row, f, fields, onChange));
     });
+  }
+
+  /** Панель условной видимости поля формы (2026-08-28, WP3c) — тот же
+   * toggle-по-кнопке паттерн, что toggleSynonymsPanel. Список полей для
+   * условия — ВСЕ ОСТАЛЬНЫЕ поля этой же формы (по attribute_id, без
+   * самого себя) — условие ссылается на то, что испытатель уже мог заполнить
+   * в этой же форме, не на произвольный атрибут метода. */
+  private toggleVisibilityPanel(
+    row: HTMLElement, f: OperatorFormField, allFields: OperatorFormField[], onChange: () => void,
+  ): void {
+    const existing = row.querySelector('.tn-lims-visibility');
+    if (existing) { existing.remove(); return; }
+    const panel = row.createDiv({ cls: 'tn-lims-visibility tn-lims-series-form' });
+    panel.createDiv({ cls: 'tn-lims-meta' }).setText('Показывать только если (условия ниже):');
+
+    const logicSelect = panel.createEl('select', { cls: 'tn-lims-select' });
+    logicSelect.createEl('option', { attr: { value: 'and' }, text: 'выполняются ВСЕ условия (И)' });
+    logicSelect.createEl('option', { attr: { value: 'or' }, text: 'выполняется ХОТЯ БЫ ОДНО (ИЛИ)' });
+    logicSelect.value = f.visibility?.logic || 'and';
+    logicSelect.addEventListener('change', () => {
+      if (!f.visibility) f.visibility = { logic: 'and', conditions: [] };
+      f.visibility.logic = logicSelect.value as 'and' | 'or';
+    });
+
+    const condListEl = panel.createDiv();
+    const otherFields = allFields.filter(other => other !== f);
+    const redrawConditions = (): void => {
+      condListEl.empty();
+      const conditions = f.visibility?.conditions || [];
+      conditions.forEach((cond, i) => {
+        const condRow = condListEl.createDiv({ cls: 'tn-lims-flex' });
+        const fieldSelect = condRow.createEl('select', { cls: 'tn-lims-select' });
+        for (const other of otherFields) {
+          fieldSelect.createEl('option', { attr: { value: other.attribute_id }, text: other.label || other.attribute_id });
+        }
+        fieldSelect.value = cond.field;
+        fieldSelect.addEventListener('change', () => { cond.field = fieldSelect.value; });
+        const opSelect = condRow.createEl('select', { cls: 'tn-lims-select' });
+        for (const [val, label] of COMPARISON_OPERATOR_OPTIONS) opSelect.createEl('option', { attr: { value: val }, text: label });
+        opSelect.value = cond.operator;
+        opSelect.addEventListener('change', () => { cond.operator = opSelect.value as ComparisonOperator; });
+        const valInput = condRow.createEl('input', { attr: { type: 'text', placeholder: 'значение' }, cls: 'tn-lims-input' });
+        valInput.value = cond.value;
+        valInput.addEventListener('change', () => { cond.value = valInput.value; });
+        const rmBtn = condRow.createEl('button', { text: '✖', cls: 'tn-btn tn-btn-ghost' });
+        rmBtn.addEventListener('click', () => {
+          f.visibility!.conditions.splice(i, 1);
+          if (f.visibility!.conditions.length === 0) f.visibility = undefined;
+          redrawConditions();
+        });
+      });
+    };
+    redrawConditions();
+    const addCondBtn = panel.createEl('button', { text: '➕ Условие', cls: 'tn-btn tn-btn-ghost' });
+    addCondBtn.addEventListener('click', () => {
+      if (otherFields.length === 0) return;
+      if (!f.visibility) f.visibility = { logic: logicSelect.value as 'and' | 'or', conditions: [] };
+      f.visibility.conditions.push({ field: otherFields[0].attribute_id, operator: '==', value: '' });
+      redrawConditions();
+    });
+    const doneBtn = panel.createEl('button', { text: 'Готово', cls: 'tn-btn tn-btn-primary' });
+    doneBtn.addEventListener('click', () => { panel.remove(); onChange(); });
   }
 
   /** Read-only предпросмотр «как увидит испытатель» — поля формы отрисованы
@@ -2486,12 +2673,18 @@ export class LimsView extends ItemView {
       const typeSelect = row.createEl('select', { cls: 'tn-lims-select' });
       const typeOptions: Array<[AttributeDataType, string]> = [
         ['text', 'Текст'], ['int', 'Целое число'], ['float', 'Дробное число'],
-        ['date', 'Дата'], ['time', 'Время'], ['boolean', 'Да/Нет'], ['photo', 'Фотография'],
-        ['timeseries', 'Временной ряд (для графика)'],
+        ['date', 'Дата'], ['time', 'Время'], ['boolean', 'Да/Нет'], ['select', 'Выбор из списка'],
+        ['photo', 'Фотография'], ['timeseries', 'Временной ряд (для графика)'],
       ];
       for (const [val, label] of typeOptions) typeSelect.createEl('option', { attr: { value: val }, text: label });
       typeSelect.value = attr.data_type;
-      typeSelect.addEventListener('change', () => { attr.data_type = typeSelect.value as AttributeDataType; });
+      typeSelect.addEventListener('change', () => {
+        attr.data_type = typeSelect.value as AttributeDataType;
+        // Редраунт нужен, чтобы показать/убрать редактор опций ниже
+        // (2026-08-28, WP3c) — раньше data_type ни на что в строке не влиял,
+        // onChange() не вызывался.
+        onChange();
+      });
 
       const fillSelect = row.createEl('select', { cls: 'tn-lims-select' });
       const fillOptions: Array<[AttributeFillMethod, string]> = [
@@ -2563,11 +2756,51 @@ export class LimsView extends ItemView {
         methodSelect.addEventListener('change', syncAggregation);
       }
 
+      // Список опций (2026-08-28, WP3c) — только data_type="select"; независим
+      // от fill_method/level выше (обычный вручную вводимый select-атрибут).
+      if (attr.data_type === 'select') {
+        this.renderSelectOptionsEditor(row, attr);
+      }
+
       const synBtn = row.createEl('button', { text: '🔗 синонимы', cls: 'tn-btn tn-btn-ghost' });
       synBtn.addEventListener('click', () => this.toggleSynonymsPanel(row, attr));
 
       const delBtn = row.createEl('button', { text: '✖', cls: 'tn-btn tn-btn-ghost' });
       delBtn.addEventListener('click', () => { attrs.splice(idx, 1); onChange(); });
+    });
+  }
+
+  /** Список вариантов select-атрибута (2026-08-28, WP3c) — add/remove строк
+   * текста, тот же паттерн, что у точек калибровочной кривой/колонок таблицы
+   * результатов. Не входит в общий редраунт renderAttributeRows (не нужен
+   * drag-reorder — порядок опций не принципиален для select), обновляет
+   * `attr.options` напрямую по месту без внешнего onChange. */
+  private renderSelectOptionsEditor(container: HTMLElement, attr: MethodAttribute): void {
+    if (!attr.options) attr.options = [];
+    const wrap = container.createDiv({ cls: 'tn-lims-select-options' });
+    wrap.createDiv({ cls: 'tn-lims-meta' }).setText('Варианты выбора:');
+    const listEl = wrap.createDiv();
+    const redraw = (): void => {
+      listEl.empty();
+      attr.options!.forEach((opt, i) => {
+        const optRow = listEl.createDiv({ cls: 'tn-lims-flex' });
+        const optInput = optRow.createEl('input', { attr: { type: 'text' }, cls: 'tn-lims-input' });
+        optInput.value = opt;
+        optInput.addEventListener('change', () => { attr.options![i] = optInput.value.trim(); });
+        const rmBtn = optRow.createEl('button', { text: '✖', cls: 'tn-btn tn-btn-ghost' });
+        rmBtn.addEventListener('click', () => { attr.options!.splice(i, 1); redraw(); });
+      });
+    };
+    redraw();
+    const addRow = wrap.createDiv({ cls: 'tn-lims-flex' });
+    const newOptInput = addRow.createEl('input', { attr: { type: 'text', placeholder: 'новый вариант' }, cls: 'tn-lims-input' });
+    const addBtn = addRow.createEl('button', { text: '➕ Вариант', cls: 'tn-btn tn-btn-ghost' });
+    addBtn.addEventListener('click', () => {
+      const v = newOptInput.value.trim();
+      if (!v) return;
+      attr.options!.push(v);
+      newOptInput.value = '';
+      redraw();
     });
   }
 
