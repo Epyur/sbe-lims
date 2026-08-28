@@ -108,7 +108,15 @@ export interface LabGroup {
  * ({time, channels, average_temp, derivative}) — заполняется автоматически из письма
  * прибора (synonyms на "mesure_data"), не вводится вручную. См. ChartConfig.kind —
  * единственный способ показать такой атрибут содержательно — через график. */
-export type AttributeDataType = 'text' | 'int' | 'float' | 'date' | 'time' | 'photo' | 'boolean' | 'timeseries';
+/** "curve" (2026-08-28, WP1 — калибровочная кривая) — ТОЛЬКО для
+ * calibration_attributes (не input_parameters метода): значение — массив точек
+ * {x,y}[], вводится вручную испытателем при калибровке (таблица точек, см.
+ * renderCalibrationCurveField в lims-view.ts), не одно число. В отличие от
+ * "timeseries" — редактируемый тип, не только источник для графика. Используется
+ * DSL-формулой interpolate(x, {id}_xs, {id}_ys) метода (lab-service dsl.go/
+ * calibration_curve.go) и автоматически графируется без отдельной настройки
+ * (GET /equipment/{id}/calibrations/{calibration_id}/curve-chart/{attr_id}). */
+export type AttributeDataType = 'text' | 'int' | 'float' | 'date' | 'time' | 'photo' | 'boolean' | 'timeseries' | 'curve';
 /** Знак сравнения — пороговое правило классификации (условие на строку, 2026-08-22). */
 export type ComparisonOperator = '==' | '!=' | '<' | '<=' | '>' | '>=';
 /** Способ заполнения атрибута. "classification" (2026-08-22) — значение пишет
@@ -413,6 +421,10 @@ export interface MeasurementResult {
   request_id: number;
   method_id: number;
   inventor_id: number;
+  /** На каком экземпляре оборудования выполнено измерение (2026-08-28, WP1) — 0,
+   * если не задано/не требовалось (у метода ровно одна единица "Основного"
+   * оборудования, см. lab-service calibration_curve.go resolveSingleMainEquipment). */
+  equipment_id: number;
   series_num: number;
   values: Record<string, unknown>;
   file_links: Record<string, unknown>;
@@ -500,6 +512,16 @@ export interface EquipmentCalibration {
  * оборудование может быть основным для одного метода и вспомогательным для другого). */
 export interface EquipmentMethodLink {
   method_id: number;
+  role: 'main' | 'auxiliary';
+}
+
+/** Одна строка ВСЕЙ таблицы method_equipment (GET /method-equipment, 2026-08-28, WP1) —
+ * в отличие от EquipmentMethodLink (уже привязан к одному equipment_id через URL), здесь
+ * equipment_id — часть самой записи: нужно узнать все единицы оборудования КОНКРЕТНОГО
+ * метода, а не наоборот. */
+export interface MethodEquipmentLink {
+  method_id: number;
+  equipment_id: number;
   role: 'main' | 'auxiliary';
 }
 
