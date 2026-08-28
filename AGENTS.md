@@ -154,6 +154,31 @@ lab_operator/lab_admin/владелец. Не трогали: эндпоинт �
 
 ## История работ
 
+### 2026-08-28 — v0.2.24 (WP3c ч.1/2 — select-виджет, дефолты, условная видимость полей)
+
+Спека/план: `docs/superpowers/specs/2026-08-28-sbe-lims-select-defaults-visibility-design.md`
++ `-plan.md` в ветке `backend`. Форма испытателя: «Да/Нет» рендерился как
+обычный текст, «выбор из списка» не существовал как тип данных вовсе — без
+constrained-choice виджета дефолты и условная видимость опирались бы на
+нежёстко заданный свободный текст.
+
+- `types/lims.ts`: `AttributeDataType` += `'select'`; `MethodAttribute` +=
+  `options?: string[]`; `OperatorFormField` += `default?` (статический
+  литерал или «сегодня» для дат — без DSL) и `visibility?` (плоский список
+  условий с одним связывателем И/ИЛИ на всё поле, переиспользует
+  `ComparisonOperator`).
+- `lims-view.ts`: `renderDesktopResultField` — новая ветка `select`/`boolean`
+  (`<select>`); новые `compareFieldCondition`/`updateFieldVisibilityDesktop`/
+  `todayLocalDateStringDesktop` — НЕ переиспользуют DSL (тот только на
+  сервере) — маленькие клиентские функции для живого пересчёта видимости.
+  `renderSeriesEditForm` — скрытые условием поля исключаются из отправляемых
+  values. Конфигуратор: `renderAttributeRows` += тип «Выбор из списка» +
+  редактор опций; `renderOperatorFormRows` += блок дефолта и панель условной
+  видимости (тот же toggle-по-кнопке паттерн, что у синонимов атрибута).
+- `npx tsc --noEmit -skipLibCheck` EXIT=0, `npm run build` OK. Версия 0.2.23 →
+  **0.2.24**. Backend не менялся вообще (чисто клиентская конфигурация) —
+  полная запись с деталями брейнсторма/решений — `AGENTS.md` в ветке `backend`.
+
 ### 2026-08-28 — v0.2.23 (фикс: колонки «Фото до/после испытания» в таблице результатов)
 
 Живая жалоба на заявке 287/2026: фото, загруженное через мобильный пикер «Фото

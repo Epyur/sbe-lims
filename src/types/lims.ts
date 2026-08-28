@@ -131,7 +131,7 @@ export interface LabGroup {
  * DSL-формулой interpolate(x, {id}_xs, {id}_ys) метода (lab-service dsl.go/
  * calibration_curve.go) и автоматически графируется без отдельной настройки
  * (GET /equipment/{id}/calibrations/{calibration_id}/curve-chart/{attr_id}). */
-export type AttributeDataType = 'text' | 'int' | 'float' | 'date' | 'time' | 'photo' | 'boolean' | 'timeseries' | 'curve';
+export type AttributeDataType = 'text' | 'int' | 'float' | 'date' | 'time' | 'photo' | 'boolean' | 'timeseries' | 'curve' | 'select';
 /** Знак сравнения — пороговое правило классификации (условие на строку, 2026-08-22). */
 export type ComparisonOperator = '==' | '!=' | '<' | '<=' | '>' | '>=';
 /** Способ заполнения атрибута. "classification" (2026-08-22) — значение пишет
@@ -173,6 +173,11 @@ export interface MethodAttribute {
    * legacy-источниках (email-импорт от десктопной ЛИМС); при приёме результатов
    * из письма synonyms сопоставляются с id (см. email_ingest.go resolveResultKey). */
   synonyms?: string[];
+  /** Варианты выбора (2026-08-28, WP3c) — значимо только при data_type="select";
+   * рендерится как <select> в форме результатов испытания (renderFormField/
+   * renderDesktopResultField), вместе с "boolean" (фиксированный ['Да','Нет'],
+   * этому полю не нужен). */
+  options?: string[];
 }
 
 /** Операнд правой части атомарного сравнения в правиле классификации
@@ -403,6 +408,20 @@ export interface OperatorFormField {
   label?: string;
   required: boolean;
   help_text?: string;
+  /** Значение по умолчанию (2026-08-28, WP3c) — без DSL: "literal" — точное
+   * значение (select/boolean/text/int/float), "today" — только для
+   * data_type="date", сегодняшняя ЛОКАЛЬНАЯ дата устройства в момент открытия
+   * формы. Применяется один раз при рендере, не переопределяет уже
+   * существующее значение (правка серии). */
+  default?: { kind: 'literal'; value: string } | { kind: 'today' };
+  /** Условная видимость (2026-08-28, WP3c) — поле показывается, только если
+   * условия истинны (logic="and" — все, "or" — хотя бы одно); field — id
+   * ДРУГОГО поля этой же формы (не самого себя). Пересчитывается живо при
+   * любом изменении формы; скрытое поле не попадает в отправляемые values. */
+  visibility?: {
+    logic: 'and' | 'or';
+    conditions: Array<{ field: string; operator: ComparisonOperator; value: string }>;
+  };
 }
 
 /** methods.operator_form — схема формы для испытателя. */
