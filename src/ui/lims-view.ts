@@ -566,6 +566,16 @@ export class LimsView extends ItemView {
     typeSelect.addEventListener('change', () => {
       parentSelect.style.display = typeSelect.value === 'external' ? '' : 'none';
     });
+    // Автоотправка письма заказчику при завершении заявки (2026-08-28, WP2) — только
+    // при редактировании существующей лабы (при создании всегда false на сервере,
+    // включать имеет смысл, когда лаба уже реально работает с заявками).
+    let autoSendCheckbox: HTMLInputElement | undefined;
+    if (lab) {
+      const autoSendRow = form.createDiv({ cls: 'tn-lims-flex' });
+      autoSendCheckbox = autoSendRow.createEl('input', { attr: { type: 'checkbox' } });
+      autoSendCheckbox.checked = lab.auto_send_email;
+      autoSendRow.createSpan({ text: 'Автоматически отправлять письмо заказчику при завершении заявки' });
+    }
     const saveBtn = form.createEl('button', { text: lab ? '💾 Сохранить' : '➕ Создать', cls: 'tn-btn tn-btn-primary' });
     const cancelBtn = form.createEl('button', { text: '✖ Отмена', cls: 'tn-btn tn-btn-ghost' });
     cancelBtn.addEventListener('click', () => form.remove());
@@ -583,6 +593,7 @@ export class LimsView extends ItemView {
             description: description.value.trim(),
             type: typeSelect.value,
             parent_lab_id: typeSelect.value === 'external' ? Number(parentSelect.value) : 0,
+            auto_send_email: autoSendCheckbox?.checked ?? lab.auto_send_email,
           });
           new Notice('Лаборатория обновлена');
         } else {
@@ -1040,6 +1051,45 @@ export class LimsView extends ItemView {
         void this.performKanbanMove(req, statusSelect.value).then(updated => {
           if (updated) void this.renderRequestDetail(updated);
         });
+      });
+    }
+
+    // Письмо заказчику + журнал отправок (2026-08-28, WP2). Кнопка доступна всегда
+    // (ручная отправка — явное действие, не завязана на автонастройку лабы/статус
+    // заявки), см. lab-service outbound_email.go handleSendRequestEmail.
+    if (this.canEdit) {
+      const emailDiv = this.bodyEl.createDiv({ cls: 'tn-lims-mb12' });
+      const sendEmailBtn = emailDiv.createEl('button', { text: '✉ Отправить письмо', cls: 'tn-btn tn-btn-ghost' });
+      const emailStatus = emailDiv.createDiv({ cls: 'tn-lims-meta' });
+      const journalEl = emailDiv.createDiv();
+      const redrawJournal = (): void => {
+        journalEl.empty();
+        this.plugin.syncService.listSentEmails(req.id).then(emails => {
+          if (emails.length === 0) return;
+          const list = journalEl.createDiv({ cls: 'tn-lims-meta' });
+          for (const e of emails) {
+            const kind = e.recipient_type === 'customer' ? 'заказчику' : 'в LPITrack';
+            const via = e.triggered_by === 'auto' ? 'авто' : 'вручную';
+            const status = e.success ? '✅' : `❌ ${e.error}`;
+            list.createDiv({ text: `${status} ${kind} (${e.recipient_address}) — ${via}, ${new Date(e.sent_at).toLocaleString('ru-RU')}` });
+          }
+        }).catch(() => {});
+      };
+      redrawJournal();
+      sendEmailBtn.addEventListener('click', async () => {
+        sendEmailBtn.setAttr('disabled', 'true');
+        emailStatus.setText('Отправка…');
+        try {
+          await this.plugin.syncService.sendRequestEmail(req.id);
+          emailStatus.setText('');
+          new Notice('Письмо отправлено');
+          redrawJournal();
+        } catch (e: unknown) {
+          emailStatus.setText('');
+          new Notice(`Ошибка: ${errorMessage(e)}`);
+        } finally {
+          sendEmailBtn.removeAttribute('disabled');
+        }
       });
     }
 

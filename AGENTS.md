@@ -154,6 +154,27 @@ lab_operator/lab_admin/владелец. Не трогали: эндпоинт �
 
 ## История работ
 
+### 2026-08-28 — v0.2.21 (WP2 — исходящая почта: результаты заказчику + дубль в LPITrack)
+
+Второй пакет основного плана MVP (см. `docs/superpowers/plans/2026-08-28-sbe-lims-outbound-email-plan.md`
+в ветке `backend`, вне git). `lab-service` раньше только принимал почту —
+теперь и отправляет: результаты заказчику + дубль на ящик легаси-трекера
+LPITrack, автоматически при завершении заявки (по лабе — включается
+отдельно) и/или вручную кнопкой (backend-подробности, включая найденный и
+исправленный инфраструктурный баг с `host.docker.internal` — см.
+`lab-service/AGENTS.md` в ветке `backend`).
+
+- `types/lims.ts`: `Lab` += `auto_send_email`; новый `SentEmail`.
+- `sync.service.ts`: `updateLab` += `auto_send_email`; новые
+  `sendRequestEmail(requestId)`/`listSentEmails(requestId)`.
+- `lims-view.ts`: `renderLabForm` — чекбокс «Автоматически отправлять письмо
+  заказчику при завершении заявки»; карточка заявки — кнопка
+  «✉ Отправить письмо» + журнал отправок под ней.
+- `npx tsc --noEmit -skipLibCheck` EXIT=0, `npm run build` OK. Версия 0.2.20 →
+  **0.2.21**. Живой E2E на VDS — подробности в `backend`, включая живую
+  правку: если у заявки есть `external_id`, письмо заказчику явно называет
+  его (не только внутренний номер ЛИМС).
+
 ### 2026-08-28 — v0.2.20 (WP1 — калибровочная кривая метода РП: точки x→y + селектор оборудования)
 
 Первый пакет основного плана MVP (см. `docs/superpowers/plans/2026-08-28-sbe-lims-calibration-curve-plan.md`

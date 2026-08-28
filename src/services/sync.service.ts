@@ -18,6 +18,7 @@ import type {
   MeasurementResult,
   MethodConfig,
   MethodEquipmentLink,
+  SentEmail,
   PresentationKind,
   ProtocolResponse,
 } from '../types/lims';
@@ -225,9 +226,42 @@ export class LimsSyncService {
    * что при создании — сервер откажет несогласованной комбинацией (400). */
   async updateLab(
     id: number,
-    data: Partial<{ code: string; name: string; description: string; type: string; parent_lab_id: number }>,
+    data: Partial<{
+      code: string; name: string; description: string; type: string; parent_lab_id: number;
+      auto_send_email: boolean;
+    }>,
   ): Promise<void> {
     await this.patchEntity(`/api/lab/labs/${id}`, data);
+  }
+
+  /** Ручная отправка письма заказчику (+ дубль в LPITrack, если есть external_id) —
+   * кнопка «✉ Отправить письмо» в карточке заявки (2026-08-28, WP2). */
+  async sendRequestEmail(requestId: number): Promise<void> {
+    const token = await this.getToken();
+    const res = await this.request({
+      url: `${this.baseUrl}/api/lab/requests/${requestId}/send-email`,
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    this.assertOk(res);
+  }
+
+  /** Журнал отправленных писем заявки (2026-08-28, WP2). */
+  async listSentEmails(requestId: number): Promise<SentEmail[]> {
+    const token = await this.getToken();
+    const res = await this.request({
+      url: `${this.baseUrl}/api/lab/requests/${requestId}/sent-emails`,
+      method: 'GET',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    this.assertOk(res);
+    try {
+      const data = JSON.parse(res.text) as { emails?: SentEmail[] };
+      return Array.isArray(data.emails) ? data.emails : [];
+    } catch (e: unknown) {
+      console.warn('ЛИМС: не JSON в ответе sent-emails:', errorMessage(e));
+      return [];
+    }
   }
 
   /** Объекты исследования (только чтение — создание в sbe-requests). */
