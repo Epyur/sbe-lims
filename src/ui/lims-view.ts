@@ -21,6 +21,7 @@ import type {
   LabObject,
   LabProject,
   LimsRequest,
+  MeasurementResult,
   MethodAttribute,
   MethodConfig,
   Operand,
@@ -1102,72 +1103,14 @@ export class LimsView extends ItemView {
       text: `Метод: ${this.methodName(req.method_id)}${labLabel ? ` · Лаборатория: ${labLabel.name || labLabel.code}` : ''}`,
     });
 
-    // форма ввода новой серии
+    // Список серий + правка (2026-08-28, WP3a) — создание серий теперь ТОЛЬКО с
+    // мобильного (сканирование QR заявки, см. sbe-lims-mobile); десктоп — просмотр
+    // и правка уже введённых данных + удаление. Старая крудая форма
+    // «параметр=значение» убрана из UI (код saveResult/эндпоинт не удалялись —
+    // можно вернуть кнопку добавления позже, если какой-то лаборатории понадобится).
     if (this.canEdit) {
-      const form = methodDiv.createDiv({ cls: 'tn-lims-series-form' });
-
-      // Селектор оборудования (2026-08-28, WP1) — только когда у метода НЕСКОЛЬКО единиц
-      // "Основного" оборудования (иначе неоднозначно, какую калибровочную кривую брать
-      // для interpolate(), см. lab-service calibration_curve.go); при ровно одной единице
-      // сервер резолвит её сам, поле не показывается вовсе.
-      let equipmentSelect: HTMLSelectElement | undefined;
-      try {
-        const [methodEquipment, equipmentList] = await Promise.all([
-          this.plugin.syncService.listAllMethodEquipment(),
-          this.plugin.syncService.listEquipment(),
-        ]);
-        const mainEquipmentIds = methodEquipment
-          .filter(l => l.method_id === req.method_id && l.role === 'main')
-          .map(l => l.equipment_id);
-        if (mainEquipmentIds.length > 1) {
-          form.createDiv({ cls: 'tn-lims-meta' }).setText('Оборудование:');
-          equipmentSelect = form.createEl('select', { cls: 'tn-lims-select tn-lims-mb8' });
-          for (const eqId of mainEquipmentIds) {
-            const eq = equipmentList.find(e => e.id === eqId);
-            equipmentSelect.createEl('option', { attr: { value: String(eqId) }, text: eq ? (eq.code || eq.name) : `#${eqId}` });
-          }
-        }
-      } catch (e: unknown) {
-        console.warn('ЛИМС: не удалось загрузить оборудование метода:', errorMessage(e));
-      }
-
-      const valuesRow = form.createDiv({ cls: 'tn-lims-flex' });
-      const input = valuesRow.createEl('input', {
-        attr: { type: 'text', placeholder: 'параметр=значение; параметр2=значение2' },
-        cls: 'tn-lims-input',
-      });
-      const addBtn = valuesRow.createEl('button', { text: '➕ Добавить серию', cls: 'tn-btn tn-btn-primary' });
-      addBtn.addEventListener('click', async () => {
-        const values = this.parseValues(input.value);
-        if (Object.keys(values).length === 0) { new Notice('Введите параметры (параметр=значение)'); return; }
-        if (equipmentSelect && !equipmentSelect.value) { new Notice('Выберите оборудование'); return; }
-        try {
-          await this.plugin.syncService.saveResult(req.id, {
-            method_id: req.method_id,
-            inventor_id: 0,
-            series_num: 0,
-            values,
-            equipment_id: equipmentSelect ? Number(equipmentSelect.value) : undefined,
-          });
-          new Notice('Серия добавлена, расчёт выполнен');
-          void this.renderRequestDetail(req);
-        } catch (e: unknown) {
-          new Notice(`Ошибка: ${errorMessage(e)}`);
-        }
-      });
-      const calcBtn = form.createEl('button', { text: '🔄 Рассчитать', cls: 'tn-btn tn-btn-ghost' });
-      calcBtn.addEventListener('click', async () => {
-        try {
-          const results = await this.plugin.syncService.listResults(req.id);
-          const series = results.filter(r => !r.is_statistical_row);
-          if (series.length === 0) { new Notice('Нет серий'); return; }
-          await this.plugin.syncService.calculateSeries(req.id, series[0].series_num);
-          new Notice('Расчёт выполнен');
-          void this.renderRequestDetail(req);
-        } catch (e: unknown) {
-          new Notice(`Ошибка: ${errorMessage(e)}`);
-        }
-      });
+      const seriesDiv = methodDiv.createDiv();
+      await this.renderSeriesList(seriesDiv, req);
     }
 
     // результаты — краткий вид (блоки метода, вид "ui"), тот же эндпоинт, что
@@ -1204,6 +1147,139 @@ export class LimsView extends ItemView {
         }
       });
     }
+  }
+
+  /** Список серий результатов заявки (2026-08-28, WP3a) — просмотр + правка + удаление.
+   * Создание серий — только с мобильного (см. комментарий в вызывающем коде). */
+  private async renderSeriesList(container: HTMLElement, req: LimsRequest): Promise<void> {
+    container.empty();
+    container.createEl('h5', { text: 'Серии результатов' });
+    let results: MeasurementResult[];
+    let mainEquipmentIds: number[] = [];
+    let equipmentList: Equipment[] = [];
+    try {
+      const [allResults, methodEquipment, allEquipment] = await Promise.all([
+        this.plugin.syncService.listResults(req.id),
+        this.plugin.syncService.listAllMethodEquipment(),
+        this.plugin.syncService.listEquipment(),
+      ]);
+      results = allResults;
+      mainEquipmentIds = methodEquipment.filter(l => l.method_id === req.method_id && l.role === 'main').map(l => l.equipment_id);
+      equipmentList = allEquipment;
+    } catch (e: unknown) {
+      container.createDiv({ cls: 'tn-lims-error' }).setText(`Ошибка: ${errorMessage(e)}`);
+      return;
+    }
+    const series = results.filter(r => !r.is_statistical_row).sort((a, b) => a.series_num - b.series_num);
+    if (series.length === 0) {
+      container.createDiv({ cls: 'tn-lims-meta' }).setText(
+        'Серий ещё нет — вводятся с мобильного устройства (сканирование QR заявки).',
+      );
+      return;
+    }
+    const cfg = this.methodConfigOf(req.method_id);
+    for (const s of series) {
+      const row = container.createDiv({ cls: 'tn-lims-flex tn-lims-mb8' });
+      const summary = Object.entries(s.values).slice(0, 3)
+        .map(([k, v]) => `${k}=${Array.isArray(v) ? `${v.length} точек` : String(v)}`).join(', ');
+      row.createSpan({ text: `Серия ${s.series_num}${summary ? ' — ' + summary : ''}` });
+      const editHost = container.createDiv();
+      const editBtn = row.createEl('button', { text: '✏️ Править', cls: 'tn-btn tn-btn-ghost' });
+      editBtn.addEventListener('click', () => {
+        editHost.empty();
+        this.renderSeriesEditForm(editHost, req, s, cfg, mainEquipmentIds, equipmentList, () => {
+          void this.renderSeriesList(container, req);
+        });
+      });
+      const delBtn = row.createEl('button', { text: '🗑', cls: 'tn-btn tn-btn-ghost' });
+      delBtn.addEventListener('click', () => {
+        void (async () => {
+          if (!window.confirm(`Удалить серию ${s.series_num}? Следующие серии будут перенумерованы.`)) return;
+          try {
+            await this.plugin.syncService.deleteResultSeries(req.id, s.series_num);
+            new Notice('Серия удалена');
+            void this.renderSeriesList(container, req);
+          } catch (e: unknown) {
+            new Notice(`Ошибка: ${errorMessage(e)}`);
+          }
+        })();
+      });
+    }
+  }
+
+  /** Форма правки одной серии (2026-08-28, WP3a) — портированный аналог мобильного
+   * renderFormField (тот же принцип дублирования между репозиториями, что и везде в
+   * проекте): диспетчер по AttributeDataType, предзаполнение текущими значениями серии. */
+  private renderSeriesEditForm(
+    container: HTMLElement, req: LimsRequest, series: MeasurementResult, cfg: MethodConfig,
+    mainEquipmentIds: number[], equipmentList: Equipment[], onDone: () => void,
+  ): void {
+    const form = container.createDiv({ cls: 'tn-lims-series-form' });
+    const attrById = new Map(cfg.input_parameters.map(a => [a.id, a] as const));
+    const fields: OperatorFormField[] = cfg.operator_form.fields.length > 0
+      ? cfg.operator_form.fields
+      : cfg.input_parameters.map(a => ({ attribute_id: a.id, label: a.name, required: false }));
+    const values: Record<string, unknown> = { ...series.values };
+    for (const field of fields) {
+      const attr = attrById.get(field.attribute_id);
+      if (attr && attr.data_type === 'photo') continue; // вне scope, как и на мобильном
+      this.renderDesktopResultField(form, field, attr?.data_type || 'text', values);
+    }
+
+    let equipmentSelect: HTMLSelectElement | undefined;
+    if (mainEquipmentIds.length > 1) {
+      form.createDiv({ cls: 'tn-lims-meta' }).setText('Оборудование:');
+      equipmentSelect = form.createEl('select', { cls: 'tn-lims-select tn-lims-mb8' });
+      for (const eqId of mainEquipmentIds) {
+        const eq = equipmentList.find(e => e.id === eqId);
+        equipmentSelect.createEl('option', { attr: { value: String(eqId) }, text: eq ? (eq.code || eq.name) : `#${eqId}` });
+      }
+      if (series.equipment_id) equipmentSelect.value = String(series.equipment_id);
+    }
+
+    const btnRow = form.createDiv({ cls: 'tn-lims-flex' });
+    const saveBtn = btnRow.createEl('button', { text: '💾 Сохранить', cls: 'tn-btn tn-btn-primary' });
+    const cancelBtn = btnRow.createEl('button', { text: '✖ Отмена', cls: 'tn-btn tn-btn-ghost' });
+    cancelBtn.addEventListener('click', () => onDone());
+    saveBtn.addEventListener('click', async () => {
+      if (equipmentSelect && !equipmentSelect.value) { new Notice('Выберите оборудование'); return; }
+      try {
+        await this.plugin.syncService.saveResult(req.id, {
+          method_id: req.method_id,
+          inventor_id: 0,
+          series_num: series.series_num,
+          values,
+          equipment_id: equipmentSelect ? Number(equipmentSelect.value) : undefined,
+        });
+        new Notice('Серия сохранена, расчёт выполнен');
+        onDone();
+      } catch (e: unknown) {
+        new Notice(`Ошибка: ${errorMessage(e)}`);
+      }
+    });
+  }
+
+  /** Одно поле формы правки серии — портированный аналог mobile-lims-view.ts
+   * renderFormField. "curve" здесь не встречается (только у calibration_attributes,
+   * не у input_parameters метода) — не обрабатывается отдельной веткой намеренно. */
+  private renderDesktopResultField(
+    container: HTMLElement, field: OperatorFormField, dataType: AttributeDataType, values: Record<string, unknown>,
+  ): void {
+    const row = container.createDiv({ cls: 'tn-lims-flex' });
+    row.createSpan({ text: (field.label || field.attribute_id) + (field.required ? ' *' : '') + ': ', cls: 'tn-lims-meta' });
+    const attrs: Record<string, string> = { type: 'text' };
+    if (dataType === 'int') { attrs.type = 'number'; attrs.step = '1'; }
+    else if (dataType === 'float') { attrs.type = 'number'; attrs.step = 'any'; }
+    else if (dataType === 'date') attrs.type = 'date';
+    else if (dataType === 'time') attrs.type = 'time';
+    const input = row.createEl('input', { attr: attrs, cls: 'tn-lims-input' });
+    const existing = values[field.attribute_id];
+    if (existing !== undefined) input.value = String(existing);
+    input.addEventListener('input', () => {
+      const v = input.value;
+      if (v === '') { delete values[field.attribute_id]; return; }
+      values[field.attribute_id] = (dataType === 'int' || dataType === 'float') ? Number(v) : v;
+    });
   }
 
   /** Краткий вид результатов — блоки метода с show_in_ui, отрисованные
@@ -3639,15 +3715,34 @@ export class LimsView extends ItemView {
           tr.createEl('td').setText(this.formatDate(c.calibrated_at));
           tr.createEl('td').setText(c.method_id ? this.methodName(c.method_id) : '—');
           const cfg = c.method_id ? this.methodConfigOf(c.method_id) : null;
-          const paramsParts: string[] = [];
-          if (c.amb_temp) paramsParts.push(`t=${c.amb_temp}`);
-          if (c.amb_pres) paramsParts.push(`P=${c.amb_pres}`);
-          if (c.amb_moist) paramsParts.push(`φ=${c.amb_moist}`);
+          // Ячейка "Параметры" — не единая строка через setText: data_type="curve"
+          // (2026-08-28, WP1) хранит МАССИВ точек {x,y}, не скаляр — String(array)
+          // давал "[object Object],[object Object],..." (живая жалоба пользователя).
+          // Для такого атрибута — короткая сводка + кнопка «📈» с реальным графиком
+          // (переиспользует уже готовый серверный PNG-эндпоинт), не попытка впихнуть
+          // массив точек в текст.
+          const paramsTd = tr.createEl('td');
+          const scalarParts: string[] = [];
+          if (c.amb_temp) scalarParts.push(`t=${c.amb_temp}`);
+          if (c.amb_pres) scalarParts.push(`P=${c.amb_pres}`);
+          if (c.amb_moist) scalarParts.push(`φ=${c.amb_moist}`);
+          if (scalarParts.length > 0) paramsTd.createSpan({ text: scalarParts.join(', ') + ' ' });
           for (const [k, v] of Object.entries(c.values || {})) {
-            const attrName = cfg?.calibration_attributes.find(a => a.id === k)?.name || k;
-            paramsParts.push(`${attrName}=${String(v)}`);
+            const attr = cfg?.calibration_attributes.find(a => a.id === k);
+            const attrName = attr?.name || k;
+            if (attr?.data_type === 'curve' && Array.isArray(v)) {
+              paramsTd.createSpan({ text: `${attrName}: ${v.length} точек ` });
+              const chartBtn = paramsTd.createEl('button', { text: '📈', cls: 'tn-btn tn-btn-ghost' });
+              chartBtn.setAttribute('title', 'Показать график');
+              chartBtn.addEventListener('click', () => {
+                void this.showCalibrationCurveChart(eq.id, c.id, k, attrName);
+              });
+              paramsTd.createSpan({ text: ' ' });
+            } else {
+              paramsTd.createSpan({ text: `${attrName}=${String(v)} ` });
+            }
           }
-          tr.createEl('td').setText(paramsParts.join(', ') || '—');
+          if (paramsTd.childNodes.length === 0) paramsTd.setText('—');
           tr.createEl('td').setText(c.result || '—');
           const fileTd = tr.createEl('td');
           if (c.file_url) fileTd.createEl('a', { text: '📎', attr: { href: c.file_url, target: '_blank' } });
@@ -4049,6 +4144,23 @@ export class LimsView extends ItemView {
     modal.open();
   }
 
+  /** График калибровочной кривой (2026-08-28, WP1) — по клику «📈» в журнале
+   * калибровок (см. renderEquipmentCalibrationBlock). Живая жалоба пользователя:
+   * раньше массив точек показывался как "[object Object],..." и посмотреть график
+   * было вообще негде — эндпоинт на сервере уже был готов, не хватало клиента. */
+  private async showCalibrationCurveChart(
+    equipmentId: number, calibrationId: number, attrId: string, attrName: string,
+  ): Promise<void> {
+    const modal = new ImageModal(this.app, attrName);
+    modal.open();
+    try {
+      const dataUrl = await this.plugin.syncService.getCalibrationCurveChartDataUrl(equipmentId, calibrationId, attrId);
+      modal.setImage(dataUrl);
+    } catch (e: unknown) {
+      modal.setError(`Не удалось загрузить график: ${errorMessage(e)}`);
+    }
+  }
+
   private downloadDocx(base64Data: string, fileName: string): void {
     try {
       downloadBase64File(base64Data, fileName, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
@@ -4099,6 +4211,36 @@ export class LimsView extends ItemView {
   /** Editor+ (app-level, включая admin/superadmin) — испытатели/оборудование. */
   private get canEditRefs(): boolean {
     return this.myRole === 'editor' || this.myRole === 'admin' || this.myRole === 'superadmin';
+  }
+}
+
+/** Простое модальное окно для одной картинки (2026-08-28, WP1 — график калибровочной
+ * кривой) — открывается сразу с индикатором загрузки, setImage/setError заполняют
+ * его по прилёту data: URL (см. LimsView.showCalibrationCurveChart). */
+class ImageModal extends Modal {
+  private bodyDiv?: HTMLElement;
+
+  constructor(app: App, private title: string) {
+    super(app);
+  }
+
+  onOpen(): void {
+    this.titleEl.setText(this.title);
+    this.bodyDiv = this.contentEl.createDiv({ cls: 'tn-lims-meta' });
+    this.bodyDiv.setText('Загрузка графика…');
+  }
+
+  setImage(dataUrl: string): void {
+    if (!this.bodyDiv) return;
+    this.bodyDiv.empty();
+    this.bodyDiv.createEl('img', { attr: { src: dataUrl, style: 'max-width: 100%;' } });
+  }
+
+  setError(message: string): void {
+    if (!this.bodyDiv) return;
+    this.bodyDiv.empty();
+    this.bodyDiv.addClass('tn-lims-error');
+    this.bodyDiv.setText(message);
   }
 }
 
