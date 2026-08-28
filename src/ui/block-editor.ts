@@ -356,12 +356,20 @@ function renderTableNodeEditor(container: HTMLElement, node: RichNode, attrs: Me
       row.createSpan({ text: '⠿', cls: 'tn-lims-meta' });
       if (col.kind === 'series_no') {
         row.createSpan({ text: 'Серия (номер по порядку)' });
+      } else if (col.kind === 'photo_before') {
+        row.createSpan({ text: '📷 Фото до испытания' });
+      } else if (col.kind === 'photo_after') {
+        row.createSpan({ text: '📷 Фото после испытания' });
       } else {
         const attr = attrs.find(a => a.id === col.attribute_id);
         row.createSpan({ text: attrDisplayName(attr, col.attribute_id || '') });
       }
+      const defaultLabelHint = col.kind === 'series_no' ? 'подпись (по умолч. «Серия»)'
+        : col.kind === 'photo_before' ? 'подпись (по умолч. «Фото до испытания»)'
+        : col.kind === 'photo_after' ? 'подпись (по умолч. «Фото после испытания»)'
+        : 'подпись (опц.)';
       const labelInput = row.createEl('input', {
-        attr: { type: 'text', placeholder: col.kind === 'series_no' ? 'подпись (по умолч. «Серия»)' : 'подпись (опц.)' },
+        attr: { type: 'text', placeholder: defaultLabelHint },
         cls: 'tn-lims-input',
       });
       labelInput.value = col.label || '';
@@ -381,6 +389,16 @@ function renderTableNodeEditor(container: HTMLElement, node: RichNode, attrs: Me
   if (!node.columns!.some((c: TableColumn) => c.kind === 'series_no')) {
     select.createEl('option', { attr: { value: '__series_no__' }, text: 'Серия (номер по порядку)' });
   }
+  // photo_before/photo_after (2026-08-28) — top-level measurement_results.photo_before/
+  // photo_after (мобильные пикеры «Фото до/после испытания»), НЕ атрибут метода — до
+  // этого фикса протокол их вообще не рисовал, только фото-атрибуты data_type="photo"
+  // ниже. Те же две фиксированные опции, что series_no — не из attrs.
+  if (!node.columns!.some((c: TableColumn) => c.kind === 'photo_before')) {
+    select.createEl('option', { attr: { value: '__photo_before__' }, text: '📷 Фото до испытания' });
+  }
+  if (!node.columns!.some((c: TableColumn) => c.kind === 'photo_after')) {
+    select.createEl('option', { attr: { value: '__photo_after__' }, text: '📷 Фото после испытания' });
+  }
   // "timeseries" исключён (2026-08-24, см. PlaceholderPickerModal выше) — ячейка
   // таблицы показала бы дамп всего JSON-ряда, а не осмысленное значение.
   for (const a of attrs.filter(a => a.level === 'experiment' && a.data_type !== 'timeseries')) {
@@ -392,6 +410,10 @@ function renderTableNodeEditor(container: HTMLElement, node: RichNode, attrs: Me
     if (!select.value) return;
     if (select.value === '__series_no__') {
       node.columns!.push({ kind: 'series_no' });
+    } else if (select.value === '__photo_before__') {
+      node.columns!.push({ kind: 'photo_before' });
+    } else if (select.value === '__photo_after__') {
+      node.columns!.push({ kind: 'photo_after' });
     } else {
       node.columns!.push({ kind: 'attribute', attribute_id: select.value });
     }

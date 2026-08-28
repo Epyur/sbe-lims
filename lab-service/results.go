@@ -374,6 +374,36 @@ ORDER BY series_num`, requestID, methodID)
 	return out, rows.Err()
 }
 
+// loadSeriesPhotos — top-level photo_before/photo_after всех серий (не статистических),
+// параллельно loadSeriesValues (тот же WHERE/ORDER BY, чтобы индексы совпадали с
+// ctx.series в protocol.go). ОТДЕЛЬНАЯ функция, не поле в values из loadSeriesValues —
+// эта карта переиспользуется buildFormulaEnv/агрегацией/экспортом/графиками (см. её
+// вызывающих), подмешивать туда лишние ключи означало бы риск случайно потянуть
+// photo_before/photo_after в DSL-формулы или CSV/XLSX-экспорт. Нужна ТОЛЬКО протоколу
+// (2026-08-28, колонки "Фото до"/"Фото после" таблицы результатов — до этого фото,
+// загруженное мобильным испытателем через "Фото до/после испытания", нигде не
+// отображалось: протокол рисовал <img> только для фото-АТРИБУТОВ метода, top-level
+// колонки measurement_results.photo_before/photo_after не читал вообще).
+func (s *Server) loadSeriesPhotos(ctx context.Context, requestID, methodID int64) (before, after []string, err error) {
+	rows, err := s.pool.Query(ctx, `
+SELECT photo_before, photo_after FROM measurement_results
+WHERE request_id = $1 AND method_id = $2 AND is_statistical_row = false
+ORDER BY series_num`, requestID, methodID)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var b, a string
+		if err := rows.Scan(&b, &a); err != nil {
+			continue
+		}
+		before = append(before, b)
+		after = append(after, a)
+	}
+	return before, after, rows.Err()
+}
+
 // loadSeriesValuesAt — values ОДНОЙ конкретной серии по её номеру (2026-08-24) — нужно
 // email_ingest.go/applyResultPayload, когда письмо явно указывает свой series_num
 // (напр. письмо прибора и письмо-форма несут ОДИН и тот же series_num — их values нужно

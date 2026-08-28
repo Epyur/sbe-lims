@@ -219,6 +219,41 @@ func TestRenderTableHTMLPhotoColumn(t *testing.T) {
 	}
 }
 
+// 2026-08-28: заявка 287/2026 — фото, загруженное мобильным испытателем через
+// "Фото до/после испытания" (top-level measurement_results.photo_before/photo_after),
+// нигде не отображалось в таблице результатов — renderTableHTML/Docx умели рисовать
+// <img> только для фото-АТРИБУТОВ метода (data_type="photo" в values), не для этих
+// top-level колонок. Новые kind="photo_before"/"photo_after" читают ctx.photoBefore/
+// photoAfter параллельно ctx.series (см. loadSeriesPhotos в results.go).
+func TestRenderTableHTMLPhotoBeforeAfterColumn(t *testing.T) {
+	ctx := testCtx()
+	ctx.photoBefore = []string{"http://x/before1.jpg", "", "http://x/before3.jpg"}
+	ctx.photoAfter = []string{"", "http://x/after2.jpg", ""}
+	got := renderNodeHTML(ctx, RichNode{Type: "table", Columns: []TableColumn{
+		{Kind: "photo_before"}, {Kind: "photo_after"},
+	}})
+	if !strings.Contains(got, "<th>Фото до испытания</th>") || !strings.Contains(got, "<th>Фото после испытания</th>") {
+		t.Errorf("table missing default photo_before/photo_after headers: %s", got)
+	}
+	if !strings.Contains(got, `<img src="http://x/before1.jpg"`) {
+		t.Errorf("table missing photo_before <img> for series 1: %s", got)
+	}
+	if !strings.Contains(got, `<img src="http://x/after2.jpg"`) {
+		t.Errorf("table missing photo_after <img> for series 2: %s", got)
+	}
+	// Серия 2 без photo_before/серия 1 и 3 без photo_after — пустая ячейка, не <img>.
+	if strings.Count(got, "<img") != 3 {
+		t.Errorf("expected exactly 3 <img> (before1, after2, before3), got: %s", got)
+	}
+
+	custom := renderNodeHTML(ctx, RichNode{Type: "table", Columns: []TableColumn{
+		{Kind: "photo_before", Label: "До"}, {Kind: "photo_after", Label: "После"},
+	}})
+	if !strings.Contains(custom, "<th>До</th>") || !strings.Contains(custom, "<th>После</th>") {
+		t.Errorf("html should respect explicit label override: %s", custom)
+	}
+}
+
 func TestRenderTableSeriesNoColumn(t *testing.T) {
 	ctx := testCtx()
 	columns := []TableColumn{{Kind: "series_no"}, {AttributeID: "mass_loss"}}

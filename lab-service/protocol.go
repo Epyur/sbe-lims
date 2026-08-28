@@ -61,6 +61,11 @@ type placeholderCtx struct {
 	series    []map[string]any
 	stats     map[string]any
 	agg       map[string]any
+	// photoBefore/photoAfter — top-level measurement_results.photo_before/photo_after
+	// каждой серии (2026-08-28), параллельно series (тот же индекс = та же серия) —
+	// см. loadSeriesPhotos. Не часть values, чтобы не течь в DSL-формулы/агрегацию.
+	photoBefore []string
+	photoAfter  []string
 	// photoRegistry — только при рендере DOCX (2026-08-24, см. docxPhotoRegistry): при
 	// рендере HTML остаётся nil, фото-атрибуты рендерятся прямой ссылкой (renderTableHTML/
 	// renderInlineHTML), сеть не нужна. Общий на ВЕСЬ протокол объект (передаётся всем
@@ -113,6 +118,21 @@ func tableColumnHeader(c TableColumn, attrsByID map[string]MethodAttribute) stri
 			return c.Label
 		}
 		return "Серия"
+	}
+	// photo_before/photo_after (2026-08-28) — top-level измерение measurement_results,
+	// не атрибут метода, поэтому columnLabel(AttributeID, ...) тут не резолвит: свои
+	// дефолтные подписи, как у series_no выше.
+	if c.Kind == "photo_before" {
+		if c.Label != "" {
+			return c.Label
+		}
+		return "Фото до испытания"
+	}
+	if c.Kind == "photo_after" {
+		if c.Label != "" {
+			return c.Label
+		}
+		return "Фото после испытания"
 	}
 	return columnLabel(c.AttributeID, c.Label, attrsByID)
 }
@@ -302,6 +322,24 @@ func resolvePlaceholder(ctx *placeholderCtx, n InlineNode) string {
 	return fmtVal(aggregateSeries(ctx.series, n.AttributeID, n.Agg))
 }
 
+// seriesPhotoAt — photo_before/photo_after серии с индексом i (2026-08-28) — общий
+// bounds-checked доступ для renderTableHTML/renderTableDocx; kind — "photo_before" |
+// "photo_after". Индекс может выйти за границы, если photoBefore/photoAfter не
+// удалось загрузить (loadSeriesPhotos best-effort, ошибка проглатывается в
+// buildProtocol) — тогда просто пустая ячейка, как для незаполненного фото.
+func seriesPhotoAt(ctx *placeholderCtx, kind string, i int) string {
+	var arr []string
+	if kind == "photo_before" {
+		arr = ctx.photoBefore
+	} else {
+		arr = ctx.photoAfter
+	}
+	if i < 0 || i >= len(arr) {
+		return ""
+	}
+	return arr[i]
+}
+
 // ---- HTML ----
 
 func renderInlineHTML(ctx *placeholderCtx, nodes []InlineNode) string {
@@ -350,6 +388,15 @@ func renderTableHTML(ctx *placeholderCtx, columns []TableColumn) string {
 		for _, c := range columns {
 			if c.Kind == "series_no" {
 				fmt.Fprintf(&b, "<td>%d</td>", i+1)
+				continue
+			}
+			if c.Kind == "photo_before" || c.Kind == "photo_after" {
+				url := seriesPhotoAt(ctx, c.Kind, i)
+				if url != "" {
+					fmt.Fprintf(&b, "<td><img src=\"%s\" style=\"max-width:160px;max-height:160px\"></td>", html.EscapeString(url))
+				} else {
+					b.WriteString("<td></td>")
+				}
 				continue
 			}
 			attr := ctx.attrsByID[c.AttributeID]
@@ -583,6 +630,16 @@ func renderTableDocx(ctx *placeholderCtx, columns []TableColumn) string {
 		for _, c := range columns {
 			if c.Kind == "series_no" {
 				fmt.Fprintf(&b, `<w:tc>%s</w:tc>`, docxCenteredParagraph("", strconv.Itoa(i+1)))
+				continue
+			}
+			if c.Kind == "photo_before" || c.Kind == "photo_after" {
+				if url := seriesPhotoAt(ctx, c.Kind, i); url != "" {
+					if drawing := ctx.photoRegistry.register(url); drawing != "" {
+						fmt.Fprintf(&b, `<w:tc><w:p><w:pPr><w:jc w:val="center"/></w:pPr>%s</w:p></w:tc>`, drawing)
+						continue
+					}
+				}
+				b.WriteString(`<w:tc><w:p/></w:tc>`)
 				continue
 			}
 			if ctx.attrsByID[c.AttributeID].DataType == "photo" {
@@ -1003,6 +1060,7 @@ JOIN methods m ON m.id = r.method_id WHERE r.id = $1 ORDER BY m.id`, requestID)
 		}
 		stats, _ := s.loadStatsRow(ctx, requestID, m.id)
 		agg, _ := s.loadAggregatedRow(ctx, requestID, m.id)
+		photoBefore, photoAfter, _ := s.loadSeriesPhotos(ctx, requestID, m.id)
 		cfg, cfgErr := s.loadMethodConfig(ctx, m.id)
 		if cfgErr != nil {
 			cfg = &MethodConfig{}
@@ -1013,6 +1071,7 @@ JOIN methods m ON m.id = r.method_id WHERE r.id = $1 ORDER BY m.id`, requestID)
 			targetIndicator: targetIndicator, inventorName: inventorName, methodName: m.name,
 			attrsByID: methodAttributesByID(cfg),
 			series:    series, stats: stats, agg: agg,
+			photoBefore: photoBefore, photoAfter: photoAfter,
 		}
 		p.Methods = append(p.Methods, protocolMethod{
 			MethodID:     m.id,
