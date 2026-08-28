@@ -24,6 +24,7 @@ import type {
   MeasurementResult,
   MethodAttribute,
   MethodConfig,
+  MethodOperatorForm,
   Operand,
   OperatorFormField,
   PresentationKind,
@@ -1260,6 +1261,14 @@ export class LimsView extends ItemView {
       ? cfg.operator_form.fields
       : cfg.input_parameters.map(a => ({ attribute_id: a.id, label: a.name, required: false }));
     const values: Record<string, unknown> = { ...series.values };
+
+    // Таймер (2026-08-28, WP3c ч.2) — тот же виджет, что на мобильном (портированный
+    // аналог renderTimerWidget), ДО обычных полей формы.
+    const timerConfig = cfg.operator_form.timer;
+    if (timerConfig && (timerConfig.capture || timerConfig.log)) {
+      this.renderTimerWidgetDesktop(form, timerConfig, values);
+    }
+
     for (const field of fields) {
       const attr = attrById.get(field.attribute_id);
       if (attr && attr.data_type === 'photo') continue; // вне scope, как и на мобильном
@@ -1314,6 +1323,103 @@ export class LimsView extends ItemView {
         new Notice(`Ошибка: ${errorMessage(e)}`);
       }
     });
+  }
+
+  /** Таймер формы (2026-08-28, WP3c ч.2) — портированный аналог мобильного
+   * renderTimerWidget. Десктоп — только правка существующей серии (WP3a), нет
+   * механизма "dirty"/неявного сохранения при переключении — onDirty не нужен.
+   * Состояние таймера — только этот рендер формы, не сохраняется (стартует
+   * заново при каждом открытии формы правки). */
+  private renderTimerWidgetDesktop(
+    form: HTMLElement, timer: NonNullable<MethodOperatorForm['timer']>, values: Record<string, unknown>,
+  ): void {
+    const wrap = form.createDiv({ cls: 'tn-lims-timer tn-lims-mb8' });
+    let elapsedBeforePauseMs = 0;
+    let runningSinceMs: number | null = null;
+    let intervalId: number | undefined;
+
+    const getElapsedSeconds = (): number => {
+      const extra = runningSinceMs !== null ? Date.now() - runningSinceMs : 0;
+      return Math.floor((elapsedBeforePauseMs + extra) / 1000);
+    };
+    const formatMMSS = (totalSeconds: number): string => {
+      const m = Math.floor(totalSeconds / 60);
+      const s = totalSeconds % 60;
+      return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+    };
+
+    const display = wrap.createDiv({ cls: 'tn-lims-meta' });
+    const redrawDisplay = (): void => { display.setText(formatMMSS(getElapsedSeconds())); };
+    redrawDisplay();
+
+    const btnRow = wrap.createDiv({ cls: 'tn-lims-flex' });
+    const toggleBtn = btnRow.createEl('button', { text: '▶ Старт', cls: 'tn-btn tn-btn-primary' });
+    const stopTicking = (): void => {
+      if (intervalId !== undefined) { window.clearInterval(intervalId); intervalId = undefined; }
+    };
+    const pause = (): void => {
+      if (runningSinceMs === null) return;
+      elapsedBeforePauseMs += Date.now() - runningSinceMs;
+      runningSinceMs = null;
+      stopTicking();
+      toggleBtn.setText('▶ Старт');
+    };
+    const start = (): void => {
+      if (runningSinceMs !== null) return;
+      runningSinceMs = Date.now();
+      toggleBtn.setText('⏸ Пауза');
+      stopTicking();
+      intervalId = window.setInterval(redrawDisplay, 1000);
+    };
+    toggleBtn.addEventListener('click', () => { (runningSinceMs === null ? start : pause)(); });
+    const resetBtn = btnRow.createEl('button', { text: '⟲ Сброс', cls: 'tn-btn tn-btn-ghost' });
+    resetBtn.addEventListener('click', () => {
+      pause();
+      elapsedBeforePauseMs = 0;
+      redrawDisplay();
+    });
+
+    const syncFieldDisplay = (attributeId: string, value: string): void => {
+      const row = form.querySelector<HTMLElement>(`[data-attribute-id="${CSS.escape(attributeId)}"]`);
+      const input = row?.querySelector<HTMLInputElement | HTMLSelectElement>('input, select');
+      if (input) input.value = value;
+    };
+
+    if (timer.capture) {
+      const { booleanFieldId, secondsFieldId } = timer.capture;
+      const captureBtn = wrap.createEl('button', { text: '🔥 Зафиксировать событие', cls: 'tn-btn tn-btn-primary tn-lims-mt8' });
+      captureBtn.addEventListener('click', () => {
+        const seconds = getElapsedSeconds();
+        // 'Да' — строка, не JS true: булев атрибут — select с фиксированными
+        // вариантами ['Да','Нет'] (WP3c ч.1), не настоящий boolean.
+        values[booleanFieldId] = 'Да';
+        values[secondsFieldId] = seconds;
+        syncFieldDisplay(booleanFieldId, 'Да');
+        syncFieldDisplay(secondsFieldId, String(seconds));
+        pause(); // "останавливающая эксперимент" — прямая формулировка роадмапа
+      });
+    }
+
+    if (timer.log) {
+      const { attributeId, events } = timer.log;
+      const logListEl = wrap.createDiv({ cls: 'tn-lims-meta tn-lims-mt8' });
+      const redrawLog = (): void => {
+        const entries = Array.isArray(values[attributeId]) ? values[attributeId] as Array<{ label: string; seconds: number }> : [];
+        logListEl.setText(entries.length > 0 ? entries.map(e => `${e.label} — ${formatMMSS(e.seconds)}`).join('; ') : '');
+      };
+      redrawLog();
+      const logBtnRow = wrap.createDiv({ cls: 'tn-lims-flex tn-lims-mt8' });
+      for (const label of events) {
+        const btn = logBtnRow.createEl('button', { text: label, cls: 'tn-btn tn-btn-ghost' });
+        btn.addEventListener('click', () => {
+          const entries = Array.isArray(values[attributeId]) ? values[attributeId] as unknown[] : [];
+          entries.push({ label, seconds: getElapsedSeconds() });
+          values[attributeId] = entries;
+          redrawLog();
+          // Не останавливает таймер — промежуточное наблюдение (см. спеку).
+        });
+      }
+    }
   }
 
   /** Одно поле формы правки серии — портированный аналог mobile-lims-view.ts
@@ -1902,6 +2008,12 @@ export class LimsView extends ItemView {
     const operatorFormFields: OperatorFormField[] = cfg.operator_form.fields
       .filter(f => attrs.some(a => a.id === f.attribute_id) || OPERATOR_FORM_SYSTEM_FIELDS.some(s => s.id === f.attribute_id))
       .map(f => ({ ...f }));
+    // Таймер (2026-08-28, WP3c ч.2) — отдельное от operatorFormFields состояние,
+    // см. renderTimerConfigEditor ниже и сборку operator_form в buildPatch.
+    let timerConfig: MethodOperatorForm['timer'] = cfg.operator_form.timer
+      ? { capture: cfg.operator_form.timer.capture ? { ...cfg.operator_form.timer.capture } : undefined,
+        log: cfg.operator_form.timer.log ? { attributeId: cfg.operator_form.timer.log.attributeId, events: [...cfg.operator_form.timer.log.events] } : undefined }
+      : undefined;
     const operatorFormBody = this.renderCollapsibleSection(form, 'Форма для испытателя (данные эксперимента)');
     operatorFormBody.createDiv({ cls: 'tn-lims-meta' }).setText(
       'Какие поля испытатель заполняет при эксперименте (мобильный ввод — ЛИМС Мобайл): ' +
@@ -1940,6 +2052,114 @@ export class LimsView extends ItemView {
       if (!any) { new Notice('Все доступные поля уже добавлены в форму испытателя'); return; }
       menu.showAtMouseEvent(ev);
     });
+
+    // Таймер (2026-08-28, WP3c ч.2) — фиксированная схема (не общий расширяемый
+    // механизм виджетов): опционально «захват события» (2 уже существующих
+    // атрибута метода) и опционально «лог наблюдений» (1 существующий
+    // event_log-атрибут + список названий кнопок). Ссылается на атрибуты ПО ID
+    // — сами атрибуты заводятся как обычно (renderAttributeRows), не здесь.
+    const timerBody = operatorFormBody.createDiv({ cls: 'tn-lims-mt8' });
+    const redrawTimerConfig = (): void => {
+      timerBody.empty();
+      const enabledLabel = timerBody.createEl('label', { cls: 'tn-lims-flex' });
+      const enabledCb = enabledLabel.createEl('input', { attr: { type: 'checkbox' } });
+      enabledCb.checked = !!timerConfig;
+      enabledLabel.createSpan({ text: 'Включить таймер (секундомер + захват события/лог наблюдений)' });
+      enabledCb.addEventListener('change', () => {
+        timerConfig = enabledCb.checked ? {} : undefined;
+        redrawTimerConfig();
+      });
+      if (!timerConfig) return;
+
+      const captureLabel = timerBody.createEl('label', { cls: 'tn-lims-flex tn-lims-mt8' });
+      const captureCb = captureLabel.createEl('input', { attr: { type: 'checkbox' } });
+      captureCb.checked = !!timerConfig.capture;
+      captureLabel.createSpan({ text: 'Кнопка «Зафиксировать событие» (пишет в 2 поля, останавливает таймер)' });
+      captureCb.addEventListener('change', () => {
+        const boolAttrs = attrs.filter(a => a.id && a.data_type === 'boolean');
+        const numAttrs = attrs.filter(a => a.id && (a.data_type === 'int' || a.data_type === 'float'));
+        timerConfig!.capture = captureCb.checked
+          ? { booleanFieldId: boolAttrs[0]?.id || '', secondsFieldId: numAttrs[0]?.id || '' }
+          : undefined;
+        redrawTimerConfig();
+      });
+      if (timerConfig.capture) {
+        const boolAttrs = attrs.filter(a => a.id && a.data_type === 'boolean');
+        const numAttrs = attrs.filter(a => a.id && (a.data_type === 'int' || a.data_type === 'float'));
+        if (boolAttrs.length === 0 || numAttrs.length === 0) {
+          timerBody.createDiv({ cls: 'tn-lims-meta' }).setText(
+            'Нужен хотя бы один атрибут метода "Да/Нет" и один числовой (целое/дробное) — заведите их выше.',
+          );
+        } else {
+          const row = timerBody.createDiv({ cls: 'tn-lims-flex' });
+          row.createSpan({ cls: 'tn-lims-meta', text: 'поле-факт:' });
+          const boolSelect = row.createEl('select', { cls: 'tn-lims-select' });
+          for (const a of boolAttrs) boolSelect.createEl('option', { attr: { value: a.id }, text: a.name || a.id });
+          boolSelect.value = timerConfig.capture.booleanFieldId;
+          boolSelect.addEventListener('change', () => { timerConfig!.capture!.booleanFieldId = boolSelect.value; });
+          row.createSpan({ cls: 'tn-lims-meta', text: 'поле-время:' });
+          const numSelect = row.createEl('select', { cls: 'tn-lims-select' });
+          for (const a of numAttrs) numSelect.createEl('option', { attr: { value: a.id }, text: a.name || a.id });
+          numSelect.value = timerConfig.capture.secondsFieldId;
+          numSelect.addEventListener('change', () => { timerConfig!.capture!.secondsFieldId = numSelect.value; });
+        }
+      }
+
+      const logLabel = timerBody.createEl('label', { cls: 'tn-lims-flex tn-lims-mt8' });
+      const logCb = logLabel.createEl('input', { attr: { type: 'checkbox' } });
+      logCb.checked = !!timerConfig.log;
+      logLabel.createSpan({ text: 'Лог наблюдений (кнопки событий, копят записи в один атрибут)' });
+      logCb.addEventListener('change', () => {
+        const logAttrs = attrs.filter(a => a.id && a.data_type === 'event_log');
+        timerConfig!.log = logCb.checked ? { attributeId: logAttrs[0]?.id || '', events: [] } : undefined;
+        redrawTimerConfig();
+      });
+      if (timerConfig.log) {
+        const logAttrs = attrs.filter(a => a.id && a.data_type === 'event_log');
+        if (logAttrs.length === 0) {
+          timerBody.createDiv({ cls: 'tn-lims-meta' }).setText(
+            'Нужен хотя бы один атрибут метода с типом "Лог наблюдений" — заведите его выше.',
+          );
+        } else {
+          const attrRow = timerBody.createDiv({ cls: 'tn-lims-flex' });
+          attrRow.createSpan({ cls: 'tn-lims-meta', text: 'атрибут лога:' });
+          const logAttrSelect = attrRow.createEl('select', { cls: 'tn-lims-select' });
+          for (const a of logAttrs) logAttrSelect.createEl('option', { attr: { value: a.id }, text: a.name || a.id });
+          logAttrSelect.value = timerConfig.log.attributeId;
+          logAttrSelect.addEventListener('change', () => { timerConfig!.log!.attributeId = logAttrSelect.value; });
+
+          // Список названий кнопок — тот же паттерн, что renderSelectOptionsEditor
+          // (опции select-атрибута, WP3c ч.1), но над timerConfig.log.events, а не
+          // MethodAttribute.options — не переиспользуем ту функцию напрямую (её
+          // сигнатура завязана на MethodAttribute), маленькое дублирование дешевле.
+          timerBody.createDiv({ cls: 'tn-lims-meta tn-lims-mt8' }).setText('Названия кнопок лога:');
+          const logEventsListEl = timerBody.createDiv();
+          const redrawLogEvents = (): void => {
+            logEventsListEl.empty();
+            timerConfig!.log!.events.forEach((ev2, i) => {
+              const evRow = logEventsListEl.createDiv({ cls: 'tn-lims-flex' });
+              const evInput = evRow.createEl('input', { attr: { type: 'text' }, cls: 'tn-lims-input' });
+              evInput.value = ev2;
+              evInput.addEventListener('change', () => { timerConfig!.log!.events[i] = evInput.value.trim(); });
+              const rmBtn = evRow.createEl('button', { text: '✖', cls: 'tn-btn tn-btn-ghost' });
+              rmBtn.addEventListener('click', () => { timerConfig!.log!.events.splice(i, 1); redrawLogEvents(); });
+            });
+          };
+          redrawLogEvents();
+          const addEvRow = timerBody.createDiv({ cls: 'tn-lims-flex' });
+          const newEvInput = addEvRow.createEl('input', { attr: { type: 'text', placeholder: 'название кнопки, напр. Вспышка' }, cls: 'tn-lims-input' });
+          const addEvBtn = addEvRow.createEl('button', { text: '➕ Событие', cls: 'tn-btn tn-btn-ghost' });
+          addEvBtn.addEventListener('click', () => {
+            const v = newEvInput.value.trim();
+            if (!v) return;
+            timerConfig!.log!.events.push(v);
+            newEvInput.value = '';
+            redrawLogEvents();
+          });
+        }
+      }
+    };
+    redrawTimerConfig();
 
     // ---- Блок 4: параметры калибровки (2026-08-26) — атрибуты, которые
     // испытатель заполняет ПРИ калибровке оборудования (см. equipment_ext.go,
@@ -2007,7 +2227,7 @@ export class LimsView extends ItemView {
         classification: rules,
         chart_configs: charts,
         presentation: { blocks },
-        operator_form: { fields: operatorFormFields.filter(f => allowedFieldIds.has(f.attribute_id)) },
+        operator_form: { fields: operatorFormFields.filter(f => allowedFieldIds.has(f.attribute_id)), timer: timerConfig },
         calibration_attributes: calibrationAttrs,
         calibration_operator_form: {
           fields: calibrationOperatorFormFields.filter(f => calibrationAttrs.some(a => a.id === f.attribute_id)),
@@ -2674,7 +2894,8 @@ export class LimsView extends ItemView {
       const typeOptions: Array<[AttributeDataType, string]> = [
         ['text', 'Текст'], ['int', 'Целое число'], ['float', 'Дробное число'],
         ['date', 'Дата'], ['time', 'Время'], ['boolean', 'Да/Нет'], ['select', 'Выбор из списка'],
-        ['photo', 'Фотография'], ['timeseries', 'Временной ряд (для графика)'],
+        ['photo', 'Фотография'], ['event_log', 'Лог наблюдений (событие+время)'],
+        ['timeseries', 'Временной ряд (для графика)'],
       ];
       for (const [val, label] of typeOptions) typeSelect.createEl('option', { attr: { value: val }, text: label });
       typeSelect.value = attr.data_type;

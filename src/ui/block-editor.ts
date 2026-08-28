@@ -290,18 +290,22 @@ class PlaceholderPickerModal extends Modal {
         'Атрибуты эксперимента (нужно выбрать одно значение серии; 📷 — фотография, вставляется как изображение):',
       );
       for (const a of experiment) {
-        // Фото — не число: "среднее/минимальное/максимальное" для него не имеют
-        // смысла (2026-08-24, по жалобе "не понятно, как вставлять фотографии") —
-        // предлагаем только выбор серии, а не полный список агрегаций.
-        this.buildRow(attrDisplayName(a, a.id), () => this.renderAggChoice(a, a.data_type === 'photo'));
+        // Фото/лог наблюдений — не число: "среднее/минимальное/максимальное" для
+        // них не имеют смысла (2026-08-24, по жалобе "не понятно, как вставлять
+        // фотографии"; event_log — 2026-08-28, WP3c ч.2, тот же принцип — без
+        // явного first/last aggregateSeries() по умолчанию считает avg() по
+        // числам, для нечислового значения это пустой массив → nil, плейсхолдер
+        // молча не резолвится) — предлагаем только выбор серии.
+        const seriesOnly = a.data_type === 'photo' || a.data_type === 'event_log';
+        this.buildRow(attrDisplayName(a, a.id), () => this.renderAggChoice(a, seriesOnly));
       }
     }
   }
 
-  private renderAggChoice(attr: MethodAttribute, photoOnly: boolean): void {
+  private renderAggChoice(attr: MethodAttribute, seriesOnly: boolean): void {
     this.contentEl.empty();
-    this.titleEl.setText(`${attrDisplayName(attr, attr.id)} — ${photoOnly ? 'фото какой серии показать?' : 'какое значение серии?'}`);
-    const opts: PlaceholderAgg[] = photoOnly ? ['first', 'last'] : ['avg', 'min', 'max', 'first', 'last'];
+    this.titleEl.setText(`${attrDisplayName(attr, attr.id)} — ${seriesOnly ? 'значение какой серии показать?' : 'какое значение серии?'}`);
+    const opts: PlaceholderAgg[] = seriesOnly ? ['first', 'last'] : ['avg', 'min', 'max', 'first', 'last'];
     for (const agg of opts) {
       this.buildRow(AGG_LABELS[agg], () => this.pick({ type: 'placeholder', source: 'attribute', attribute_id: attr.id, agg }));
     }
