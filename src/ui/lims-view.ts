@@ -1753,6 +1753,12 @@ export class LimsView extends ItemView {
     // было защиты от потери правок при случайном закрытии конфигуратора).
     const buildPatch = (): Partial<MethodConfig> & { lab_ids?: number[]; description?: string; determinable_indicators?: string[] } => {
       const attrIds = new Set(attrs.map(a => a.id));
+      // Баг 2026-08-28 (живая жалоба пользователя — добавил системные поля
+      // (report_date/exp_date/amb_*) в форму испытателя, при сохранении они
+      // пропадали): этот фильтр разрешал только id реальных атрибутов метода,
+      // хотя UI (см. добавление через OPERATOR_FORM_SYSTEM_FIELDS выше) явно
+      // позволяет добавлять и системные поля — они молча вырезались при save.
+      const allowedFieldIds = new Set([...attrIds, ...OPERATOR_FORM_SYSTEM_FIELDS.map(s => s.id)]);
       return {
         lab_ids: getLabIDs(),
         description: description.value.trim(),
@@ -1760,7 +1766,7 @@ export class LimsView extends ItemView {
         classification: rules,
         chart_configs: charts,
         presentation: { blocks },
-        operator_form: { fields: operatorFormFields.filter(f => attrIds.has(f.attribute_id)) },
+        operator_form: { fields: operatorFormFields.filter(f => allowedFieldIds.has(f.attribute_id)) },
         calibration_attributes: calibrationAttrs,
         calibration_operator_form: {
           fields: calibrationOperatorFormFields.filter(f => calibrationAttrs.some(a => a.id === f.attribute_id)),
