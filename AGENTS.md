@@ -193,6 +193,38 @@ lab_operator/lab_admin/владелец. Не трогали: эндпоинт �
 
 ## История работ
 
+### 2026-08-28 — v0.2.25 (WP3c ч.2/2 — таймер, захват события, лог наблюдений; WP3 закрыт)
+
+Спека/план: `docs/superpowers/specs/2026-08-28-sbe-lims-timer-widget-design.md`
++ `-plan.md`. Последняя часть WP3 — весь пакет теперь готов. Подробности
+(находки брейнсторма, 2 реальных бага — латентный Agg-баг для нечисловых
+одиночных плейсхолдеров, потеря `timer` при round-trip `operator_form`) —
+`lab-service/AGENTS.md`.
+
+- `types/lims.ts`: `AttributeDataType` += `'event_log'`; `MethodOperatorForm`
+  += `timer?: { capture?: {booleanFieldId, secondsFieldId}, log?:
+  {attributeId, events} }` — фиксированная схема, не общий расширяемый
+  механизм виджетов.
+- `lims-view.ts`: новый `renderTimerWidgetDesktop` (портированный аналог
+  мобильного) — общий секундомер, кнопка «Зафиксировать событие» (пишет
+  `'Да'`/секунды в 2 обычных поля, ОСТАНАВЛИВАЕТ таймер — прямая
+  формулировка роадмапа), кнопки лога (копят `{label,seconds}` в
+  event_log-атрибут, НЕ останавливают таймер). Состояние таймера — только
+  рендер формы, не сохраняется. Конфигуратор: `renderAttributeRows` += тип
+  «Лог наблюдений»; новый блок «Таймер» в редакторе «Форма для испытателя» —
+  чекбоксы включения захвата/лога, select атрибутов (отфильтрованы по
+  подходящему `data_type`), список названий кнопок лога (тот же list-editor
+  паттерн, что опции select-атрибута WP3c ч.1, не переиспользует ту же
+  функцию напрямую — сигнатура завязана на `MethodAttribute`).
+- `block-editor.ts`: `renderAggChoice` — параметр `photoOnly` → `seriesOnly`,
+  теперь ограничивает выбор агрегации до first/last и для `event_log` тоже
+  (нашли баг: без этого нечисловой одиночный плейсхолдер резолвится в
+  пустоту, см. `lab-service/AGENTS.md`).
+- `npx tsc --noEmit -skipLibCheck` EXIT=0, `npm run build` OK. Версия 0.2.24 →
+  **0.2.25**.
+- **Живой E2E** (throwaway-метод+заявка, удалены после проверки) —
+  подробности в `lab-service/AGENTS.md`.
+
 ### 2026-08-28 — v0.2.24 (WP3c часть 1/2 — select-виджет, дефолты, условная видимость)
 
 Спека/план: `docs/superpowers/specs/2026-08-28-sbe-lims-select-defaults-visibility-design.md`

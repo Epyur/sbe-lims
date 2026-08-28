@@ -131,7 +131,7 @@ export interface LabGroup {
  * DSL-формулой interpolate(x, {id}_xs, {id}_ys) метода (lab-service dsl.go/
  * calibration_curve.go) и автоматически графируется без отдельной настройки
  * (GET /equipment/{id}/calibrations/{calibration_id}/curve-chart/{attr_id}). */
-export type AttributeDataType = 'text' | 'int' | 'float' | 'date' | 'time' | 'photo' | 'boolean' | 'timeseries' | 'curve' | 'select';
+export type AttributeDataType = 'text' | 'int' | 'float' | 'date' | 'time' | 'photo' | 'boolean' | 'timeseries' | 'curve' | 'select' | 'event_log';
 /** Знак сравнения — пороговое правило классификации (условие на строку, 2026-08-22). */
 export type ComparisonOperator = '==' | '!=' | '<' | '<=' | '>' | '>=';
 /** Способ заполнения атрибута. "classification" (2026-08-22) — значение пишет
@@ -427,6 +427,22 @@ export interface OperatorFormField {
 /** methods.operator_form — схема формы для испытателя. */
 export interface MethodOperatorForm {
   fields: OperatorFormField[];
+  /** Таймер формы (2026-08-28, WP3c ч.2) — фиксированная схема, не общий
+   * расширяемый механизм виджетов. Оба под-блока независимо опциональны;
+   * если ни один не задан, таймер не показывается вовсе. Ссылается на УЖЕ
+   * существующие атрибуты метода по id — сам их не создаёт. */
+  timer?: {
+    /** «Зафиксировать событие» — пишет true в booleanFieldId и текущее
+     * время таймера (сек, округлено вниз) в secondsFieldId; дополнительно
+     * останавливает таймер (прямая формулировка роадмапа — кнопка
+     * «Воспламенение» "останавливающая эксперимент"). */
+    capture?: { booleanFieldId: string; secondsFieldId: string };
+    /** Кнопки лога — каждая добавляет {label, seconds} в values[attributeId]
+     * (создаёт массив, если его ещё нет); НЕ останавливает таймер —
+     * промежуточное наблюдение, эксперимент продолжается. attributeId —
+     * атрибут с data_type="event_log". */
+    log?: { attributeId: string; events: string[] };
+  };
 }
 
 /** Метод испытаний (справочник lab-service). Может принадлежать нескольким

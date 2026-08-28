@@ -364,6 +364,33 @@ func seriesPhotoAt(ctx *placeholderCtx, kind string, i int) string {
 	return arr[i]
 }
 
+// formatEventLog — event_log-атрибут (2026-08-28, WP3c ч.2: таймер/захват
+// события/лог наблюдений) в читаемый текст "label1 (Ns); label2 (Ms)" — без
+// этого fmtVal() дал бы нечитаемый дамп Go-структуры (та же причина, что была
+// у "[object Object]" для curve-массивов на десктопе до отдельного фикса).
+// Значение — []any записей {"label":string,"seconds":number}, как пишут
+// клиентские кнопки лога (см. renderTimerWidget); не JSON-массив/не запись
+// без "label" — пропускается, не паникует.
+func formatEventLog(v any) string {
+	arr, ok := v.([]any)
+	if !ok {
+		return ""
+	}
+	parts := make([]string, 0, len(arr))
+	for _, item := range arr {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		label := fmtVal(m["label"])
+		if label == "" {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s (%sс)", label, fmtVal(m["seconds"])))
+	}
+	return strings.Join(parts, "; ")
+}
+
 // ---- HTML ----
 
 func renderInlineHTML(ctx *placeholderCtx, nodes []InlineNode) string {
@@ -376,6 +403,15 @@ func renderInlineHTML(ctx *placeholderCtx, nodes []InlineNode) string {
 		if n.Type == "placeholder" && n.Source == "attribute" && ctx.attrsByID[n.AttributeID].DataType == "photo" {
 			if url := resolvePlaceholder(ctx, n); url != "" {
 				fmt.Fprintf(&b, `<img src="%s" style="max-width:200px;max-height:200px">`, html.EscapeString(url))
+			}
+			continue
+		}
+		// event_log (2026-08-28, WP3c ч.2) — та же логика, что у photo выше: сырое
+		// значение нужно ДО того, как resolvePlaceholder/fmtVal превратит его в
+		// нечитаемый дамп — берём его через aggregateSeries напрямую.
+		if n.Type == "placeholder" && n.Source == "attribute" && ctx.attrsByID[n.AttributeID].DataType == "event_log" {
+			if s := formatEventLog(aggregateSeries(ctx.series, n.AttributeID, n.Agg)); s != "" {
+				b.WriteString(html.EscapeString(s))
 			}
 			continue
 		}
@@ -431,6 +467,13 @@ func renderTableHTML(ctx *placeholderCtx, columns []TableColumn) string {
 				} else {
 					b.WriteString("<td></td>")
 				}
+				continue
+			}
+			// event_log (2026-08-28, WP3c ч.2) — та же логика, что photo выше:
+			// сырое значение строки таблицы уже под рукой (val), fmtVal() дал бы
+			// нечитаемый дамп.
+			if attr.DataType == "event_log" {
+				fmt.Fprintf(&b, "<td>%s</td>", html.EscapeString(formatEventLog(val)))
 				continue
 			}
 			fmt.Fprintf(&b, "<td>%s</td>", html.EscapeString(fmtVal(val)))
@@ -604,7 +647,14 @@ func renderInlineDocxRuns(ctx *placeholderCtx, nodes []InlineNode, headingLevel 
 		}
 		text := n.Text
 		if n.Type == "placeholder" {
-			text = resolvePlaceholder(ctx, n)
+			// event_log (2026-08-28, WP3c ч.2) — сырое значение через aggregateSeries
+			// напрямую, ДО того, как resolvePlaceholder/fmtVal превратит его в
+			// нечитаемый дамп — та же причина, что у photo выше.
+			if n.Source == "attribute" && ctx.attrsByID[n.AttributeID].DataType == "event_log" {
+				text = formatEventLog(aggregateSeries(ctx.series, n.AttributeID, n.Agg))
+			} else {
+				text = resolvePlaceholder(ctx, n)
+			}
 		}
 		bold := n.Bold || headingLevel > 0
 		italic := n.Italic
@@ -674,6 +724,11 @@ func renderTableDocx(ctx *placeholderCtx, columns []TableColumn) string {
 					}
 				}
 				b.WriteString(`<w:tc><w:p/></w:tc>`)
+				continue
+			}
+			// event_log (2026-08-28, WP3c ч.2) — та же логика, что photo выше.
+			if ctx.attrsByID[c.AttributeID].DataType == "event_log" {
+				fmt.Fprintf(&b, `<w:tc>%s</w:tc>`, docxCenteredParagraph("", formatEventLog(sv[c.AttributeID])))
 				continue
 			}
 			fmt.Fprintf(&b, `<w:tc>%s</w:tc>`, docxCenteredParagraph("", fmtVal(sv[c.AttributeID])))

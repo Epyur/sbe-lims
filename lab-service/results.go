@@ -163,6 +163,12 @@ type OperatorFormField struct {
 // MethodOperatorForm — methods.operator_form: схема формы для испытателя.
 type MethodOperatorForm struct {
 	Fields []OperatorFormField `json:"fields"`
+	// Timer (2026-08-28, WP3c ч.2) — секундомер/захват события/лог наблюдений.
+	// Сервер НЕ интерпретирует его структуру нигде (чисто клиентская схема
+	// рендера) — json.RawMessage, чтобы round-trip через parseMethodOperatorForm/
+	// GET-эндпоинты не терял его молча (раньше структура была только {Fields},
+	// любые другие ключи JSONB отбрасывались при повторной сериализации).
+	Timer json.RawMessage `json:"timer,omitempty"`
 }
 
 // ---- Вспомогательные ----

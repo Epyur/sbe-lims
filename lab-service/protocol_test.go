@@ -24,9 +24,13 @@ func testCtx() *placeholderCtx {
 			"mass_loss": {ID: "mass_loss", Name: "Потеря массы"},
 			"grade":     {ID: "grade", Name: "Группа горючести", Level: "aggregated"},
 			"photo1":    {ID: "photo1", Name: "Фото", DataType: "photo"},
+			"events":    {ID: "events", Name: "Наблюдения", DataType: "event_log"},
 		},
 		series: []map[string]any{
-			{"mass_loss": 10.0, "photo1": "http://x/1.jpg"},
+			{"mass_loss": 10.0, "photo1": "http://x/1.jpg", "events": []any{
+				map[string]any{"label": "Вспышка", "seconds": 45.0},
+				map[string]any{"label": "Пробежка пламени", "seconds": 120.0},
+			}},
 			{"mass_loss": 20.0, "photo1": "http://x/2.jpg"},
 			{"mass_loss": 30.0},
 		},
@@ -247,6 +251,69 @@ func TestRenderTableHTMLPhotoColumn(t *testing.T) {
 	}
 	if strings.Count(got, "<tr>") != 4 { // header + 3 series rows
 		t.Errorf("expected 4 <tr> (header+3 series), got: %s", got)
+	}
+}
+
+// 2026-08-28, WP3c ч.2 — formatEventLog: массив {label,seconds} в читаемый
+// текст, не fmtVal()-дамп Go-структуры.
+func TestFormatEventLog(t *testing.T) {
+	cases := []struct {
+		name string
+		in   any
+		want string
+	}{
+		{"два события", []any{
+			map[string]any{"label": "Вспышка", "seconds": 45.0},
+			map[string]any{"label": "Пробежка пламени", "seconds": 120.0},
+		}, "Вспышка (45с); Пробежка пламени (120с)"},
+		{"пустой массив", []any{}, ""},
+		{"не массив (nil)", nil, ""},
+		{"не массив (строка)", "оops", ""},
+		{"запись без label — пропущена", []any{
+			map[string]any{"seconds": 10.0},
+			map[string]any{"label": "Вспышка", "seconds": 5.0},
+		}, "Вспышка (5с)"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := formatEventLog(c.in); got != c.want {
+				t.Errorf("formatEventLog(%v) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+// 2026-08-28, WP3c ч.2 — колонка таблицы результатов, ссылающаяся на
+// event_log-атрибут, должна показывать читаемый текст, а не Go-дамп массива.
+func TestRenderTableHTMLEventLogColumn(t *testing.T) {
+	ctx := testCtx()
+	got := renderNodeHTML(ctx, RichNode{Type: "table", Columns: []TableColumn{
+		{Kind: "series_no"}, {AttributeID: "events"},
+	}})
+	if !strings.Contains(got, "<td>Вспышка (45с); Пробежка пламени (120с)</td>") {
+		t.Errorf("table missing formatted event_log cell: %s", got)
+	}
+	// Серии 2/3 без events — пустая ячейка, не "[]"/паника.
+	if !strings.Contains(got, "<td></td>") {
+		t.Errorf("table missing empty cell for series without events: %s", got)
+	}
+}
+
+// 2026-08-28, WP3c ч.2 — одиночный плейсхолдер event_log вне таблицы (напр.
+// в шапке протокола) — та же логика, что уже была для photo. Agg="last"
+// ОБЯЗАТЕЛЕН для нечисловых значений (см. block-editor.ts renderAggChoice —
+// picker ограничивает выбор first/last для photo/event_log) — без явного
+// Agg aggregateSeries() по умолчанию считает avg() по числам, для нечислового
+// значения это nil (найдено при написании этого теста — тот же класс бага,
+// что уже был известен для photo, просто раньше никогда не попадал живьём:
+// UI не даёт вставить такой плейсхолдер без first/last).
+func TestRenderInlineHTMLEventLogPlaceholder(t *testing.T) {
+	ctx := testCtx()
+	got := renderNodeHTML(ctx, RichNode{Type: "paragraph", Children: []InlineNode{
+		{Type: "placeholder", Source: "attribute", AttributeID: "events", Agg: "last"},
+	}})
+	if !strings.Contains(got, "Вспышка (45с); Пробежка пламени (120с)") {
+		t.Errorf("inline placeholder missing formatted event_log: %s", got)
 	}
 }
 
