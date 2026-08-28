@@ -113,6 +113,7 @@ chart_configs/input_parameters), расширенный ЖЦ заявки (recei
 | POST | `/requests/{id}/protocol?template=&format=` | editor+ |
 | GET | `/requests/{id}/export.xlsx` | editor (2026-08-24, серии + агрегаты/статистика, `excelize`) |
 | GET | `/dashboard?period=` | viewer |
+| POST | `/instrument-buffer` | editor (2026-08-28, буфер данных приборов — не привязан к заявке/лабе, см. История) |
 
 ## Полный сброс тестовых данных (2026-08-2x)
 
@@ -331,6 +332,70 @@ COALESCE($6, description), ...` (не перетирает, если поле н
   `LAB_MAIL_ENABLED=true`, пересоздать контейнер, пройти E2E из спеки. Также перед этим
   шагом нужно поправить конфиг метода `GG-M1` (см. предупреждение выше о
   `comb_length`/`Comb_lenth_1..4`).
+
+## Буфер результатов приборов — instrument_result_buffer (2026-08-28)
+
+По решению пользователя (переработка WP3d — TDT Reader): прибор (десктопное
+приложение, первый потребитель — TDT Reader, метод ГГ) **не знает и не должен
+знать** номер заявки/серии — риск пришить результаты не к тому эксперименту при
+ручном вводе номера в отдельностоящую программу. Вместо прямой записи в
+`measurement_results` прибор шлёт данные в промежуточный буфер и предъявляет
+только hash; связывание с конкретной заявкой происходит на стороне формы
+испытателя (где номер заявки/серии уже корректно выбран контекстом).
+
+- `main.go`: `CREATE TABLE instrument_result_buffer (hash TEXT PRIMARY KEY,
+  values JSONB NOT NULL, created_by TEXT, created_at, consumed_at,
+  consumed_by_result_id BIGINT REFERENCES measurement_results(id) ON DELETE SET
+  NULL)`. Роут `POST /api/lab/instrument-buffer` — обычный `editor`-уровень, без
+  `requireLabAccess` (прибор не привязан к лаборатории/заявке).
+- `results.go`:
+  - `handleCreateInstrumentBuffer` — `{hash, values}` → `INSERT ... ON CONFLICT
+    (hash) DO NOTHING` (повторная отправка того же hash — например ретрай после
+    обрыва связи из локального журнала прибора — безопасный no-op, не ошибка).
+  - `claimInstrumentBuffer(hash)` — атомарно `UPDATE ... SET consumed_at = now()
+    WHERE hash = $1 AND consumed_at IS NULL RETURNING values`: один и тот же hash
+    нельзя случайно прикрепить к двум разным заявкам — повторная попытка получает
+    0 строк и понятную ошибку, а не тихий дубль. Сам факт нахождения записи по
+    hash — и есть проверка целостности (опечатка/чужой hash просто не найдётся).
+  - `handleCreateResult` — новое опциональное поле `instrument_hash`: если
+    передано, `claimInstrumentBuffer` вызывается до `saveResultSeries`,
+    вернувшиеся `values` домержены в `req.Values` (не перетирают явно переданные
+    поля формы); после успешного сохранения — best-effort
+    `linkInstrumentBufferResult` (проставляет `consumed_by_result_id` для
+    прослеживаемости, ошибка только логируется — целостность уже обеспечена
+    claim'ом выше).
+- Задеплоено на VDS (`scp` + `docker compose up -d --build lab`, health ok).
+  E2E на сервере (ручной JWT): повторная отправка одного hash — идемпотентна
+  (одна строка, значения не изменились); повторный claim того же hash — 0 строк
+  (ожидаемая ошибка). Тестовые данные удалены после проверки.
+- **Живой E2E с реальным hash из TDT Reader (2026-08-28) нашёл и исправил баг**:
+  `handleCreateResult` вызывал `claimInstrumentBuffer` (помечает `consumed_at`)
+  ДО `saveResultSeries` — если `saveResultSeries` падал ПОСЛЕ успешного claim
+  (например ошибка формулы — не хватает вручную вводимого параметра типа
+  `mass_before`, которого прибор не знает), hash оказывался "сожжён" навсегда:
+  `claimInstrumentBuffer` ищет только `consumed_at IS NULL`, повторный claim
+  тем же hash больше не находил строку, данные из буфера терялись без
+  возможности повтора. Исправлено: новая `releaseInstrumentBuffer(hash)` —
+  `UPDATE ... SET consumed_at = NULL WHERE hash = $1 AND consumed_by_result_id
+  IS NULL`, вызывается в error-ветке `handleCreateResult` сразу после неудачи
+  `saveResultSeries`, если `req.InstrumentHash != ""`. Best-effort (ошибка
+  только логируется). Проверено живьём на реальном hash из буфера (отправлен
+  настоящим TDT Reader): 1) submit с пустыми `values` → формула упала на
+  `mass_before` → `consumed_at` откатился в NULL (подтверждено); 2) повторный
+  submit того же hash с `mass_before`/`mass_after` → успех, результат создан,
+  `consumed_by_result_id` проставлен корректно, все значения из буфера
+  (tp1-4_smog, temp_of_smog, smoke_temp_curve) корректно смержены с вручную
+  введёнными mass_before/mass_after. Тестовые заявка/объект/результат/буфер
+  удалены после проверки, продакшн-данные (317 реальных заявок) не тронуты.
+  Задеплоено (`results.go`, md5 сверен, health ok).
+- Пока не реализовано: клиент (Python-приложение TDT Reader) ещё не переведён на
+  этот флоу (текущая задеплоенная версия приложения шлёт данные напрямую с
+  номером заявки/серии — предыдущая итерация WP3d) — планируется отдельным
+  раундом доработки (+ локальный журнал последних 20 измерений с ретраем и
+  повторным показом hash/QR). Поле в форме испытателя («вставить hash») пока не
+  добавлено ни в один клиент (sbe-lims/sbe-lims-mobile) — не commit/push (только
+  локально на ветке `backend`), изменения не бампят версию плагина sbe-lims (это
+  чисто бэковая доработка, TS/JS клиента не менялись).
 
 ## S3 (rclone)
 

@@ -1077,6 +1077,12 @@ func (s *Server) handleCreateResult(w http.ResponseWriter, r *http.Request) {
 		AmbTemp       string `json:"amb_temp"`
 		AmbPres       string `json:"amb_pres"`
 		AmbMoist      string `json:"amb_moist"`
+		// InstrumentHash (2026-08-28) — если задан, испытатель вставил в форму hash,
+		// полученный по QR от внешнего прибора (см. instrument_result_buffer в main.go).
+		// Данные из буфера ДОПОЛНЯЮТ values (не перезаписывают уже введённое вручную —
+		// это разные namespace ключей на практике, но на всякий случай ручной ввод в
+		// приоритете), затем буферная запись помечается использованной.
+		InstrumentHash string `json:"instrument_hash"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json"})
@@ -1090,9 +1096,30 @@ func (s *Server) handleCreateResult(w http.ResponseWriter, r *http.Request) {
 		req.Values = map[string]any{}
 	}
 
+	if req.InstrumentHash != "" {
+		bufValues, err := s.claimInstrumentBuffer(r.Context(), req.InstrumentHash)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		for k, v := range bufValues {
+			if _, exists := req.Values[k]; !exists {
+				req.Values[k] = v
+			}
+		}
+	}
+
 	id, seriesNum, err := s.saveResultSeries(r.Context(), requestID, req.MethodID, req.InventorID,
 		req.SeriesNum, req.Values, req.PhotoBefore, req.PhotoAfter)
 	if err != nil {
+		if req.InstrumentHash != "" {
+			// saveResultSeries не удался ПОСЛЕ успешного claimInstrumentBuffer выше
+			// (например ошибка формулы — не хватает вручную вводимого параметра) —
+			// без отката hash оказался бы "сожжён" (claimInstrumentBuffer больше не
+			// найдёт строку с consumed_at IS NULL), а данные из буфера потеряны без
+			// возможности повтора. Найдено живым E2E-тестом 2026-08-28.
+			s.releaseInstrumentBuffer(r.Context(), req.InstrumentHash)
+		}
 		var fe *formulaApplyError
 		if errors.As(err, &fe) {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": fe.Error()})
@@ -1100,6 +1127,9 @@ func (s *Server) handleCreateResult(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
 		return
+	}
+	if req.InstrumentHash != "" {
+		s.linkInstrumentBufferResult(r.Context(), req.InstrumentHash, id)
 	}
 	if err := s.updateRequestSystemFields(r.Context(), requestID,
 		req.ReportDate, req.SamplesInDate, req.ExpDate, req.AmbTemp, req.AmbPres, req.AmbMoist); err != nil {
@@ -1109,6 +1139,97 @@ func (s *Server) handleCreateResult(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"id": id, "series_num": seriesNum, "values": req.Values})
+}
+
+// handleCreateInstrumentBuffer принимает {hash, values} от внешнего прибора
+// (первый потребитель — TDT Reader, метод ГГ) БЕЗ привязки к заявке/методу —
+// прибор не знает и не должен знать номер заявки/серии (см. instrument_result_buffer
+// в main.go). ON CONFLICT DO NOTHING делает повторную отправку того же hash
+// (ретрай после обрыва связи, см. журнал последних измерений на стороне прибора)
+// безопасным no-op, а не ошибкой.
+func (s *Server) handleCreateInstrumentBuffer(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Hash   string         `json:"hash"`
+		Values map[string]any `json:"values"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json"})
+		return
+	}
+	if req.Hash == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "hash is required"})
+		return
+	}
+	if req.Values == nil {
+		req.Values = map[string]any{}
+	}
+	valsJSON, err := json.Marshal(req.Values)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
+		return
+	}
+	_, err = s.pool.Exec(r.Context(), `
+INSERT INTO instrument_result_buffer (hash, values, created_by)
+VALUES ($1, $2::jsonb, $3)
+ON CONFLICT (hash) DO NOTHING`,
+		req.Hash, string(valsJSON), currentEmail(r))
+	if err != nil {
+		log.Printf("create instrument buffer: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// claimInstrumentBuffer атомарно помечает запись буфера использованной
+// (consumed_at) и возвращает её values — WHERE consumed_at IS NULL гарантирует,
+// что один и тот же hash нельзя случайно прикрепить к двум разным заявкам:
+// повторная попытка просто не найдёт строку (0 rows) и получит понятную ошибку,
+// а не тихо продублирует данные.
+func (s *Server) claimInstrumentBuffer(ctx context.Context, hash string) (map[string]any, error) {
+	var raw []byte
+	err := s.pool.QueryRow(ctx, `
+UPDATE instrument_result_buffer SET consumed_at = now()
+WHERE hash = $1 AND consumed_at IS NULL
+RETURNING values`, hash).Scan(&raw)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, errors.New("данные прибора с этим hash не найдены или уже использованы")
+		}
+		return nil, err
+	}
+	values := map[string]any{}
+	if err := json.Unmarshal(raw, &values); err != nil {
+		return nil, err
+	}
+	return values, nil
+}
+
+// linkInstrumentBufferResult — best-effort, только для прослеживаемости (какая
+// запись measurement_results получила данные из этого буфера); не критично, если
+// не удалось — целостность (запрет повторного использования hash) уже обеспечена
+// claimInstrumentBuffer выше, поэтому ошибка здесь только логируется.
+func (s *Server) linkInstrumentBufferResult(ctx context.Context, hash string, resultID int64) {
+	if _, err := s.pool.Exec(ctx,
+		`UPDATE instrument_result_buffer SET consumed_by_result_id = $2 WHERE hash = $1`,
+		hash, resultID); err != nil {
+		log.Printf("link instrument buffer result: %v", err)
+	}
+}
+
+// releaseInstrumentBuffer откатывает claimInstrumentBuffer, если saveResultSeries после
+// успешного claim всё же не удался (например ошибка формулы — не хватает вручную
+// вводимого параметра) — иначе hash оказался бы "сожжён" навсегда (claimInstrumentBuffer
+// ищет только consumed_at IS NULL), а данные из буфера потеряны без возможности повтора.
+// consumed_by_result_id IS NULL в WHERE — защита от гонки: не откатывать, если запись
+// каким-то образом уже успела привязаться к результату. Best-effort: ошибка только
+// логируется — на ответ клиенту уже не влияет (он и так получит ошибку сохранения).
+func (s *Server) releaseInstrumentBuffer(ctx context.Context, hash string) {
+	if _, err := s.pool.Exec(ctx,
+		`UPDATE instrument_result_buffer SET consumed_at = NULL WHERE hash = $1 AND consumed_by_result_id IS NULL`,
+		hash); err != nil {
+		log.Printf("release instrument buffer: %v", err)
+	}
 }
 
 // updateRequestSystemFields пишет вручную введённые системные поля заявки

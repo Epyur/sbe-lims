@@ -161,6 +161,9 @@ func main() {
 	mux.HandleFunc("POST /api/lab/requests/{id}/results", s.requirePerm("editor")(s.handleCreateResult))
 	mux.HandleFunc("GET /api/lab/requests/{id}/results/aggregated", s.requirePerm("viewer")(s.handleListAggregated))
 	mux.HandleFunc("POST /api/lab/requests/{id}/results/{series}/calculate", s.requirePerm("editor")(s.handleCalculateSeries))
+	// Буфер данных приборов (2026-08-28) — не привязан к заявке/лаборатории (прибор не
+	// знает номер заявки), поэтому обычный editor-уровень, без requireLabAccess.
+	mux.HandleFunc("POST /api/lab/instrument-buffer", s.requirePerm("editor")(s.handleCreateInstrumentBuffer))
 
 	// ЛИМС: справочники
 	mux.HandleFunc("GET /api/lab/inventors", s.requirePerm("viewer")(s.handleListInventors))
@@ -555,6 +558,23 @@ func (s *Server) migrate(ctx context.Context) error {
 		`ALTER TABLE equipment_calibrations ADD COLUMN IF NOT EXISTS amb_pres TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE equipment_calibrations ADD COLUMN IF NOT EXISTS amb_moist TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE equipment_calibrations ADD COLUMN IF NOT EXISTS values JSONB NOT NULL DEFAULT '{}'`,
+		// instrument_result_buffer (2026-08-28) — приёмник данных от внешних приборов
+		// (первый потребитель: TDT Reader, метод ГГ), НЕ привязан к заявке/методу —
+		// прибор не знает и не должен знать номер заявки/серии (риск пришить данные не к
+		// тому эксперименту, прямое решение пользователя). Прибор шлёт {hash, values} сюда
+		// сразу после эксперимента и показывает hash как QR; испытатель в форме результатов
+		// вставляет hash — сервер находит запись ПО hash (сам поиск — и есть проверка
+		// целостности: опечатка/чужой hash просто не найдётся), сливает values в
+		// measurement_results и помечает запись consumed_at/consumed_by_result_id, чтобы тот
+		// же hash нельзя было случайно использовать повторно для другой заявки.
+		`CREATE TABLE IF NOT EXISTS instrument_result_buffer (
+			hash TEXT PRIMARY KEY,
+			values JSONB NOT NULL,
+			created_by TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+			consumed_at TIMESTAMPTZ,
+			consumed_by_result_id BIGINT REFERENCES measurement_results(id) ON DELETE SET NULL
+		)`,
 	}
 	for _, q := range stmts {
 		if _, err := s.pool.Exec(ctx, q); err != nil {
