@@ -347,6 +347,38 @@ func TestEvalAggregatedFormulasSkipsFailingFormulaContinuesRest(t *testing.T) {
 	}
 }
 
+// Живая жалоба (2026-08-28): испытатель ввёл "Масса до испытания" (mass_before), но
+// ещё не успел ввести "Масса после" (mass_after) — может готовить следующую серию,
+// пока не закончил текущую, ввод не обязан идти по порядку зависимостей формулы.
+// mass_loss=(mass_before-mass_after)/mass_before падает ("параметр mass_after не
+// найден"), но num_channels (формула ДО сломанной) и place_upper (формула ПОСЛЕ)
+// должны досчитаться как обычно — тот же принцип, что уже применён к
+// aggregated-формулам (см. TestEvalAggregatedFormulasSkipsFailingFormulaContinuesRest).
+func TestEvalSeriesFormulasSkipsFailingFormulaContinuesRest(t *testing.T) {
+	formulas := []map[string]any{
+		{"apply_level": "series", "expression": "num_channels_raw * 2", "target_parameter": "num_channels"},
+		{"expression": "((mass_before - mass_after) / mass_before) * 100", "target_parameter": "mass_loss"}, // apply_level по умолчанию = "series"
+		{"apply_level": "series", "expression": "place_raw", "target_parameter": "place_upper"},
+		{"apply_level": "aggregated", "expression": "avg(mass_loss)", "target_parameter": "average_mass_loss"}, // aggregated — должна остаться пропущенной здесь, не относится к этому уровню
+	}
+	values := map[string]any{"mass_before": 100.0, "num_channels_raw": 2.0, "place_raw": "ЛПИ"}
+	env := buildFormulaEnv(nil, values, nil)
+	result := evalSeriesFormulas(1378, 1, formulas, env)
+
+	if got := result["num_channels"]; got != 4.0 {
+		t.Errorf("num_channels: got %v, want 4.0 (формула ДО сломанной должна досчитаться)", got)
+	}
+	if got := result["place_upper"]; got != "ЛПИ" {
+		t.Errorf("place_upper: got %v, want \"ЛПИ\" (формула ПОСЛЕ сломанной должна досчитаться)", got)
+	}
+	if _, ok := result["mass_loss"]; ok {
+		t.Errorf("mass_loss: got %v, want отсутствие в результате (mass_after не введён, формула должна быть пропущена)", result["mass_loss"])
+	}
+	if _, ok := result["average_mass_loss"]; ok {
+		t.Errorf("average_mass_loss: got %v, want отсутствие (это aggregated-формула, не уровня series)", result["average_mass_loss"])
+	}
+}
+
 // Реальный инцидент (2026-08-26): заявка 287/2026, метод ГГ — combustibility_group
 // = min_grade(...) над 5 classification-выходами не считалась НИКОГДА, ни для одной
 // заявки метода, т.к. evalAggregatedFormulas (первый проход) вызывается ДО

@@ -458,6 +458,18 @@ func buildFormulaEnv(seriesValues []map[string]any, current map[string]any, rank
 // задан) над values текущей серии; результат вписывается в values. Формулы уровня
 // "aggregated" здесь пропускаются — см. applyAggregatedFormulas (считаются раз на
 // заявку+метод, пишутся в aggregated_results, а не в values серии).
+//
+// Формула, которую не удалось посчитать, ПРОПУСКАЕТСЯ (с логом), а не прерывает
+// сохранение всей серии (2026-08-28, живая жалоба: ввёл "Масса до", ещё не успел
+// ввести "Масса после" — испытатель может готовить следующую серию, пока не
+// закончил текущую, ввод не обязан идти по порядку формулы mass_loss =
+// (mass_before-mass_after)/mass_before — тот же класс бага, что уже нашли и
+// починили для aggregated-формул 2026-08-25 (см. evalAggregatedFormulas), просто
+// на уровне серии: saveResultSeries вызывал applyFormulas ДО INSERT, поэтому
+// ошибка одной производной формулы отменяла запись вообще ВСЕХ введённых
+// значений серии, включая те, что формула не использует). Цель непосчитанной
+// формулы просто остаётся неопределённой в values, остальные формулы считаются
+// как обычно — тот же принцип, что у evalAggregatedFormulas.
 func (s *Server) applyFormulas(ctx context.Context, requestID, methodID, equipmentID int64, seriesValues []map[string]any, values map[string]any) error {
 	cfg, err := s.loadMethodConfig(ctx, methodID)
 	if err != nil {
@@ -469,25 +481,46 @@ func (s *Server) applyFormulas(ctx context.Context, requestID, methodID, equipme
 	}
 	env := buildFormulaEnv(seriesValues, values, rankOrder)
 	s.injectCalibrationCurves(ctx, requestID, methodID, equipmentID, cfg, env)
-	for _, f := range cfg.Formulas {
+	for target, res := range evalSeriesFormulas(requestID, methodID, cfg.Formulas, env) {
+		values[target] = res
+	}
+	return nil
+}
+
+// evalSeriesFormulas считает формулы уровня "series" (apply_level не задан или
+// "series") по готовому env, пропуская (с логом) те, что не удалось посчитать —
+// тот же принцип, что уже применён к aggregated-формулам (см. evalAggregatedFormulas,
+// найдено 2026-08-25 на этой же заявке 287/2026: одна сломанная формула прерывала
+// ВСЕ остальные). Для series-уровня цена ошибки была ещё выше: applyFormulas
+// вызывается ДО INSERT в saveResultSeries — ошибка одной производной формулы
+// (2026-08-28, живая жалоба: ввёл "Масса до", "Масса после" ещё не готова —
+// mass_loss=(mass_before-mass_after)/mass_before падал на отсутствующем
+// mass_after) отменяла сохранение ВСЕХ введённых значений серии, не только саму
+// формулу — испытателю не давало переключиться на другую серию, хотя ввод не
+// обязан идти по порядку зависимостей формулы. Цель непосчитанной формулы просто
+// остаётся неопределённой, остальные формулы считаются как обычно. Вынесена в
+// чистую функцию (без обращения к БД) для юнит-теста, как и evalAggregatedFormulas.
+func evalSeriesFormulas(requestID, methodID int64, formulas []map[string]any, env *FormulaEnv) map[string]any {
+	result := map[string]any{}
+	for _, f := range formulas {
 		if lvl, _ := f["apply_level"].(string); lvl == "aggregated" {
 			continue
 		}
 		expr, _ := f["expression"].(string)
 		target, _ := f["target_parameter"].(string)
-		if strings.TrimSpace(expr) == "" {
+		if strings.TrimSpace(expr) == "" || target == "" {
 			continue
 		}
 		res, err := runFormula(expr, env)
 		if err != nil {
-			return err
+			log.Printf("evalSeriesFormulas: request=%d method=%d target=%q: %v (пропущено, серия сохраняется без него)",
+				requestID, methodID, target, err)
+			continue
 		}
-		if target != "" {
-			values[target] = res
-			env.Params[target] = res
-		}
+		result[target] = res
+		env.Params[target] = res
 	}
-	return nil
+	return result
 }
 
 // evalAggregatedFormulas считает формулы уровня "aggregated" по готовому env, пропуская
