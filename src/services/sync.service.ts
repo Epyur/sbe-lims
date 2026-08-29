@@ -3,6 +3,7 @@ import { getService } from '../../../sbe-core/src/bridge';
 import { errorMessage } from '../../../sbe-core/src/utils/errors';
 import type {
   AggregatedResult,
+  AuditLogEntry,
   Equipment,
   EquipmentCalibration,
   EquipmentDocument,
@@ -272,6 +273,25 @@ export class LimsSyncService {
       return Array.isArray(data.emails) ? data.emails : [];
     } catch (e: unknown) {
       console.warn('ЛИМС: не JSON в ответе sent-emails:', errorMessage(e));
+      return [];
+    }
+  }
+
+  /** Журнал изменений заявки/результатов (2026-08-29, WP8) — смена статуса +
+   * создание/правка серий результатов, newest-first, без пагинации (см. спеку). */
+  async listAuditLog(requestId: number): Promise<AuditLogEntry[]> {
+    const token = await this.getToken();
+    const res = await this.request({
+      url: `${this.baseUrl}/api/lab/requests/${requestId}/audit-log`,
+      method: 'GET',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    this.assertOk(res);
+    try {
+      const data = JSON.parse(res.text) as { entries?: AuditLogEntry[] };
+      return Array.isArray(data.entries) ? data.entries : [];
+    } catch (e: unknown) {
+      console.warn('ЛИМС: не JSON в ответе audit-log:', errorMessage(e));
       return [];
     }
   }
