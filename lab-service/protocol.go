@@ -119,6 +119,16 @@ func tableColumnHeader(c TableColumn, attrsByID map[string]MethodAttribute) stri
 		}
 		return "Серия"
 	}
+	// "sequential" (2026-08-29, WP5) — та же нумерация i+1, что у "series_no"
+	// (см. renderTableHTML/renderTableDocx ниже), только другая дефолтная подпись —
+	// для таблиц, где "Серия" семантически не подходит (напр. таблица оборудования,
+	// прямой запрос MVP-документа "заменять № серии на № п/п").
+	if c.Kind == "sequential" {
+		if c.Label != "" {
+			return c.Label
+		}
+		return "№ п/п"
+	}
 	// photo_before/photo_after (2026-08-28) — top-level измерение measurement_results,
 	// не атрибут метода, поэтому columnLabel(AttributeID, ...) тут не резолвит: свои
 	// дефолтные подписи, как у series_no выше.
@@ -448,7 +458,7 @@ func renderTableHTML(ctx *placeholderCtx, columns []TableColumn) string {
 	for i, sv := range ctx.series {
 		b.WriteString("<tr>")
 		for _, c := range columns {
-			if c.Kind == "series_no" {
+			if c.Kind == "series_no" || c.Kind == "sequential" {
 				fmt.Fprintf(&b, "<td>%d</td>", i+1)
 				continue
 			}
@@ -704,7 +714,7 @@ func renderTableDocx(ctx *placeholderCtx, columns []TableColumn) string {
 	for i, sv := range ctx.series {
 		b.WriteString(`<w:tr>`)
 		for _, c := range columns {
-			if c.Kind == "series_no" {
+			if c.Kind == "series_no" || c.Kind == "sequential" {
 				fmt.Fprintf(&b, `<w:tc>%s</w:tc>`, docxCenteredParagraph("", strconv.Itoa(i+1)))
 				continue
 			}

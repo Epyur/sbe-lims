@@ -377,6 +377,30 @@ func TestRenderTableSeriesNoColumn(t *testing.T) {
 	}
 }
 
+// "sequential" (2026-08-29, WP5) — тот же i+1, что series_no, но своя дефолтная
+// подпись "№ п/п" (для таблиц, где "Серия" не подходит по смыслу, напр.
+// таблица оборудования).
+func TestRenderTableSequentialColumn(t *testing.T) {
+	ctx := testCtx()
+	columns := []TableColumn{{Kind: "sequential"}, {AttributeID: "mass_loss"}}
+	html := renderNodeHTML(ctx, RichNode{Type: "table", Columns: columns})
+	if !strings.Contains(html, "<th>№ п/п</th>") {
+		t.Errorf("html missing default sequential header: %s", html)
+	}
+	if !strings.Contains(html, "<td>1</td>") || !strings.Contains(html, "<td>3</td>") {
+		t.Errorf("html missing 1-based sequential numbers: %s", html)
+	}
+	docx := renderNodeDocx(ctx, RichNode{Type: "table", Columns: columns})
+	if !strings.Contains(docx, "<w:t>№ п/п</w:t>") {
+		t.Errorf("docx missing default sequential header: %s", docx)
+	}
+
+	custom := renderNodeHTML(ctx, RichNode{Type: "table", Columns: []TableColumn{{Kind: "sequential", Label: "Пункт"}}})
+	if !strings.Contains(custom, "<th>Пункт</th>") {
+		t.Errorf("html should respect explicit label override: %s", custom)
+	}
+}
+
 // Центрирование таблиц результатов (2026-08-24, по прямому запросу пользователя
 // — "таблица результатов... выравнивание по центру и границы"). Границы были
 // уже и в HTML (td,th{border:...}), и в DOCX (<w:tblBorders>) — не хватало
