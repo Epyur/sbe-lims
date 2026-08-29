@@ -110,6 +110,11 @@ type emailIngestConfig struct {
 	pollInterval time.Duration
 	methodMap    map[string]int64
 	labID        int64
+	// defaultProjectCode (2026-08-29) — проект для заявок БЕЗ ЕКН в письме
+	// (основное правило "ЕКН как проект", ensureEknProject, применяется только
+	// когда ekn != ""; без этого письма без ЕКН оставались без проекта вовсе).
+	// Пусто — старое поведение (project_id=NULL), настраивается в плагине.
+	defaultProjectCode string
 }
 
 // loadEmailIngestConfig читает LAB_MAIL_* из env. Возвращает (nil, false), если
@@ -167,6 +172,9 @@ func loadEmailIngestConfigCore() (*emailIngestConfig, bool) {
 		return nil, false
 	}
 	cfg.labID = labID
+	// defaultProjectCode (2026-08-29) — опционально, отсутствие не отключает
+	// воркер (в отличие от обязательных полей выше): пусто — старое поведение.
+	cfg.defaultProjectCode = strings.TrimSpace(os.Getenv("LAB_MAIL_DEFAULT_PROJECT_CODE"))
 	return cfg, true
 }
 
@@ -460,6 +468,19 @@ RETURNING id`, productName, string(charsJSON)).Scan(&objectID); err != nil {
 		}
 		if effProjectID > 0 {
 			pi.code = ekn
+		}
+	} else if cfg.defaultProjectCode != "" {
+		// Заявка без ЕКН в письме — вместо project_id=NULL (старое поведение)
+		// падает в общий проект по умолчанию, настроенный в плагине (2026-08-29,
+		// напр. "EML" — все заявки почтового приёма без ЕКН собираются в одном
+		// месте, не расходятся никуда). НЕ помечается is_ekn (это не ЕКН-проект).
+		effProjectID, err = s.ensureProjectByCode(ctx, tx, cfg.defaultProjectCode, false)
+		if err != nil {
+			log.Printf("email ingest: ensureProjectByCode (default): %v", err)
+			return
+		}
+		if effProjectID > 0 {
+			pi.code = cfg.defaultProjectCode
 		}
 	}
 

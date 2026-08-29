@@ -1238,6 +1238,26 @@ export class LimsView extends ItemView {
           void this.renderSeriesList(container, req);
         });
       });
+      // Пересчитать (2026-08-29, восстановлено по живой жалобе — старая кнопка
+      // "🔄 Рассчитать" потерялась при переписывании этого экрана под WP3a, см.
+      // git 75bc592; тогда казалось избыточной, т.к. saveResultSeries и так
+      // пересчитывает формулы на каждое сохранение — но это не покрывает случай
+      // "формулу метода поправили/добавили ПОСЛЕ того, как серия уже сохранена":
+      // нужен способ пересчитать существующую серию БЕЗ повторного ввода всех
+      // значений. Новая версия — per-series (старая всегда считала только
+      // первую серию заявки), тот же ✏️/🗑-паттерн ряда.
+      const calcBtn = row.createEl('button', { text: '🔄 Пересчитать', cls: 'tn-btn tn-btn-ghost' });
+      calcBtn.addEventListener('click', () => {
+        void (async () => {
+          try {
+            await this.plugin.syncService.calculateSeries(req.id, s.series_num);
+            new Notice(`Серия ${s.series_num} пересчитана`);
+            void this.renderSeriesList(container, req);
+          } catch (e: unknown) {
+            new Notice(`Ошибка: ${errorMessage(e)}`);
+          }
+        })();
+      });
       const delBtn = row.createEl('button', { text: '🗑', cls: 'tn-btn tn-btn-ghost' });
       delBtn.addEventListener('click', () => {
         void (async () => {

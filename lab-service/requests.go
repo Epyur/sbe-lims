@@ -169,12 +169,21 @@ func (s *Server) loadProjectInfo(ctx context.Context, projectID int64) (projectI
 // ensureEknProject находит проект с code = ekn; если нет — создаёт (is_ekn=true).
 // Возвращает project_id (0 при пустом ekn). Используется, когда у заявки нет проекта, но указан ЕКН.
 func (s *Server) ensureEknProject(ctx context.Context, tx pgx.Tx, ekn string) (int64, error) {
-	ekn = strings.TrimSpace(ekn)
-	if ekn == "" {
+	return s.ensureProjectByCode(ctx, tx, ekn, true)
+}
+
+// ensureProjectByCode находит проект с code = code; если нет — создаёт. isEkn
+// помечает проект как автоматически созданный из ЕКН письма (см. ensureEknProject
+// выше) — для проекта по умолчанию почтового приёма БЕЗ ЕКН (2026-08-29,
+// email_ingest.go applyApplicationEmail, LAB_MAIL_DEFAULT_PROJECT_CODE) isEkn=false
+// (это не ЕКН-проект, просто общий "накопитель" для писем без указанного ЕКН).
+func (s *Server) ensureProjectByCode(ctx context.Context, tx pgx.Tx, code string, isEkn bool) (int64, error) {
+	code = strings.TrimSpace(code)
+	if code == "" {
 		return 0, nil
 	}
 	var projectID int64
-	err := tx.QueryRow(ctx, `SELECT id FROM projects WHERE code = $1`, ekn).Scan(&projectID)
+	err := tx.QueryRow(ctx, `SELECT id FROM projects WHERE code = $1`, code).Scan(&projectID)
 	if err == nil {
 		return projectID, nil
 	}
@@ -182,8 +191,8 @@ func (s *Server) ensureEknProject(ctx context.Context, tx pgx.Tx, ekn string) (i
 		return 0, err
 	}
 	err = tx.QueryRow(ctx, `
-INSERT INTO projects (code, name, is_ekn, owner_email) VALUES ($1, $1, true, $2)
-RETURNING id`, ekn, "").Scan(&projectID)
+INSERT INTO projects (code, name, is_ekn, owner_email) VALUES ($1, $1, $2, $3)
+RETURNING id`, code, isEkn, "").Scan(&projectID)
 	if err != nil {
 		return 0, err
 	}
