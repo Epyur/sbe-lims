@@ -602,6 +602,60 @@ func TestFilterBlocksForKind(t *testing.T) {
 	}
 }
 
+// "№ п/п" (WP6, путь б, 2026-08-29) — нумерует только блоки, содержащие
+// heading_number-плейсхолдер где-то в себе; блок без него просто пропускается
+// (не сбивает счёт последующих).
+func TestComputeHeadingNumbers(t *testing.T) {
+	numberedHeading := RichNode{Type: "heading", Children: []InlineNode{
+		{Type: "text", Text: "Раздел "},
+		{Type: "placeholder", Source: "heading_number"},
+	}}
+	plainParagraph := RichNode{Type: "paragraph", Children: []InlineNode{{Type: "text", Text: "просто текст"}}}
+	numberedInList := RichNode{Type: "bullet_list", Items: [][]InlineNode{
+		{{Type: "text", Text: "пункт "}, {Type: "placeholder", Source: "heading_number"}},
+	}}
+	numberedInStaticTable := RichNode{Type: "static_table", Rows: [][][]InlineNode{
+		{{{Type: "placeholder", Source: "heading_number"}}, {{Type: "text", Text: "B"}}},
+	}}
+
+	blocks := []DocumentBlock{
+		{ID: "a", Content: []RichNode{numberedHeading}},
+		{ID: "b", Content: []RichNode{plainParagraph}},
+		{ID: "c", Content: []RichNode{numberedInList}},
+		{ID: "d", Content: []RichNode{plainParagraph, numberedInStaticTable}},
+	}
+	got := computeHeadingNumbers(blocks)
+	want := map[string]int{"a": 1, "c": 2, "d": 3}
+	if len(got) != len(want) {
+		t.Fatalf("computeHeadingNumbers() = %+v, want %+v", got, want)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("computeHeadingNumbers()[%q] = %d, want %d", k, got[k], v)
+		}
+	}
+	if _, ok := got["b"]; ok {
+		t.Errorf("block b has no placeholder, should not be numbered: %+v", got)
+	}
+}
+
+func TestResolvePlaceholderHeadingNumber(t *testing.T) {
+	ctx := testCtx()
+	ctx.headingNumbers = map[string]int{"b1": 1, "b2": 2}
+	ctx.currentBlockID = "b2"
+	got := resolvePlaceholder(ctx, InlineNode{Type: "placeholder", Source: "heading_number"})
+	if got != "2" {
+		t.Errorf("resolvePlaceholder(heading_number) = %q, want %q", got, "2")
+	}
+	// Блок вне headingNumbers (напр. плейсхолдер вставлен, но computeHeadingNumbers
+	// почему-то не нашёл этот блок среди отфильтрованных для kind) — пустая строка,
+	// не паника/дамп.
+	ctx.currentBlockID = "unknown"
+	if got := resolvePlaceholder(ctx, InlineNode{Type: "placeholder", Source: "heading_number"}); got != "" {
+		t.Errorf("resolvePlaceholder(heading_number) for unknown block = %q, want empty", got)
+	}
+}
+
 // parseMethodPresentation — легаси-фолбэк на ДВА шага назад (v1 плоские поля
 // 2026-08-21, v2 секции 2026-08-22) в блоки (v3, 2026-08-23) — без потери
 // уже настроенных методов.

@@ -72,6 +72,17 @@ type placeholderCtx struct {
 	// методам одного документа), а не по одному на метод — иначе relationship id/имена
 	// media-файлов пересеклись бы между методами.
 	photoRegistry *docxPhotoRegistry
+	// headingNumbers/currentBlockID (2026-08-29, WP6, путь б) — "№ п/п"-плейсхолдер
+	// внутри вручную набранного текста блока. headingNumbers считается ОДИН раз на
+	// метод (computeHeadingNumbers, по уже отфильтрованному для текущего kind
+	// списку блоков) — блокID → его порядковый номер среди блоков, СОДЕРЖАЩИХ этот
+	// плейсхолдер где-то в себе (не среди всех видимых блоков — админ сам решает,
+	// для каких блоков нужна нумерация, просто вставляя/не вставляя плейсхолдер).
+	// currentBlockID — мутируется перед рендером содержимого каждого блока (см.
+	// protocolHTML/protocolDocx), чтобы resolvePlaceholder знал, какой блок сейчас
+	// рендерится (ctx — указатель, общий на весь рендер метода).
+	headingNumbers map[string]int
+	currentBlockID string
 }
 
 // showInKind — какой из трёх флагов блока проверять для запрошенного вида
@@ -96,6 +107,62 @@ func filterBlocksForKind(blocks []DocumentBlock, kind string) []DocumentBlock {
 		}
 	}
 	return out
+}
+
+// computeHeadingNumbers — WP6 (путь б, 2026-08-29): "№ п/п"-плейсхолдер внутри
+// вручную набранного текста блока (см. placeholderCtx.headingNumbers). Считает
+// по УЖЕ отфильтрованному для текущего вида вывода (kind) списку блоков —
+// нумерует только блоки, СОДЕРЖАЩИЕ этот плейсхолдер где-то в своём содержимом
+// (не все видимые блоки подряд) — блок без плейсхолдера просто пропускается,
+// не сбивая счёт остальных.
+func computeHeadingNumbers(blocks []DocumentBlock) map[string]int {
+	out := make(map[string]int, len(blocks))
+	n := 0
+	for _, b := range blocks {
+		if blockHasHeadingNumberPlaceholder(b) {
+			n++
+			out[b.ID] = n
+		}
+	}
+	return out
+}
+
+func blockHasHeadingNumberPlaceholder(b DocumentBlock) bool {
+	for _, node := range b.Content {
+		if richNodeHasHeadingNumberPlaceholder(node) {
+			return true
+		}
+	}
+	return false
+}
+
+// richNodeHasHeadingNumberPlaceholder ищет source="heading_number" в любом из
+// мест, где вообще может быть InlineNode: paragraph/heading (Children), bullet_list
+// (Items), static_table (Rows) — table ("table", данные серий) плейсхолдер
+// вставить нельзя (ячейки не редактируются текстом, см. renderTableNodeEditor).
+func richNodeHasHeadingNumberPlaceholder(node RichNode) bool {
+	for _, c := range node.Children {
+		if c.Type == "placeholder" && c.Source == "heading_number" {
+			return true
+		}
+	}
+	for _, item := range node.Items {
+		for _, c := range item {
+			if c.Type == "placeholder" && c.Source == "heading_number" {
+				return true
+			}
+		}
+	}
+	for _, row := range node.Rows {
+		for _, cell := range row {
+			for _, c := range cell {
+				if c.Type == "placeholder" && c.Source == "heading_number" {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // columnLabel — явная подпись, иначе имя атрибута, иначе сам id.
@@ -340,6 +407,12 @@ func toFloatOK(v any) (float64, bool) {
 // resolvePlaceholder — значение одного плейсхолдера ВНЕ таблицы (внутри
 // таблицы колонки резолвятся построчно по сериям, см. renderTableHTML/Docx).
 func resolvePlaceholder(ctx *placeholderCtx, n InlineNode) string {
+	if n.Source == "heading_number" {
+		if num, ok := ctx.headingNumbers[ctx.currentBlockID]; ok {
+			return strconv.Itoa(num)
+		}
+		return ""
+	}
 	if n.Source == "system" {
 		return resolveSystemPlaceholder(ctx, n.AttributeID)
 	}
@@ -592,6 +665,7 @@ func protocolHTML(p *protocolData, kind string) string {
 	for _, m := range p.Methods {
 		renderChart := renderBlockChartHTML(&b, m)
 		for _, blk := range m.Blocks {
+			m.Ctx.currentBlockID = blk.ID
 			for _, node := range blk.Content {
 				b.WriteString(renderNodeHTML(m.Ctx, node))
 			}
@@ -952,6 +1026,7 @@ func (s *Server) protocolDocx(ctx context.Context, p *protocolData, kind string)
 	// Жёсткий заголовок убран (2026-08-27) — см. тот же комментарий в protocolHTML.
 	for _, m := range p.Methods {
 		for _, blk := range m.Blocks {
+			m.Ctx.currentBlockID = blk.ID
 			for _, node := range blk.Content {
 				doc.WriteString(renderNodeDocx(m.Ctx, node))
 			}
@@ -1157,17 +1232,19 @@ JOIN methods m ON m.id = r.method_id WHERE r.id = $1 ORDER BY m.id`, requestID)
 			cfg = &MethodConfig{}
 		}
 		targetIndicator, _ := s.loadTargetIndicator(ctx, requestID, m.id)
+		blocks := filterBlocksForKind(cfg.Presentation.Blocks, kind)
 		pctx := &placeholderCtx{
 			req: req, objectName: objectName, objectChars: objectChars,
 			targetIndicator: targetIndicator, inventorName: inventorName, methodName: m.name,
 			attrsByID: methodAttributesByID(cfg),
 			series:    series, stats: stats, agg: agg,
 			photoBefore: photoBefore, photoAfter: photoAfter,
+			headingNumbers: computeHeadingNumbers(blocks),
 		}
 		p.Methods = append(p.Methods, protocolMethod{
 			MethodID:     m.id,
 			MethodName:   m.name,
-			Blocks:       filterBlocksForKind(cfg.Presentation.Blocks, kind),
+			Blocks:       blocks,
 			ChartConfigs: cfg.ChartConfigs,
 			Ctx:          pctx,
 		})
