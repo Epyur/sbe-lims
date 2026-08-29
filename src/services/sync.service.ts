@@ -240,7 +240,7 @@ export class LimsSyncService {
     id: number,
     data: Partial<{
       code: string; name: string; description: string; type: string; parent_lab_id: number;
-      auto_send_email: boolean;
+      auto_send_email: boolean; service_email: string;
     }>,
   ): Promise<void> {
     await this.patchEntity(`/api/lab/labs/${id}`, data);
