@@ -154,6 +154,29 @@ lab_operator/lab_admin/владелец. Не трогали: эндпоинт �
 
 ## История работ
 
+### 2026-08-29 — v0.2.26 (редизайн таймера: список кнопок; рекомендуемые значения)
+
+Живая жалоба пользователя после тестирования v0.2.25: единственная жёстко
+названная кнопка «Зафиксировать событие» не годится — разным событиям нужны
+разные названия и разный результат исполнения.
+
+- `types/lims.ts`: `MethodOperatorForm.timer` — было `{capture?, log?}`, стало
+  `{buttons: Array<{label, action: {kind:'capture',booleanFieldId,
+  secondsFieldId} | {kind:'log',attributeId}}>}`. `OperatorFormField` +=
+  `suggestions?: string[]` (кнопки-подсказки под текстовым полем — клик
+  подставляет точный текст, поле остаётся свободным вводом).
+- `lims-view.ts`: `renderTimerWidgetDesktop` переписан на цикл по
+  `timer.buttons`; редактор «Таймер» в конфигураторе — единый список кнопок
+  вместо двух отдельных чекбоксов; `renderDesktopResultField`/
+  `renderOperatorFormRows` — рендер и настройка `suggestions`; защита
+  `Array.isArray(timer.buttons)` от старой формы `{capture,log}`.
+- `npx tsc --noEmit -skipLibCheck` EXIT=0, `npm run build` OK. Версия 0.2.25 →
+  **0.2.26**. Backend менялся (фикс формата `event_log` в протоколе + фикс
+  потери `default`/`visibility` при round-trip `operator_form` — тот же баг,
+  что раньше нашли у `timer`, но на этот раз живой в проде) — полная запись
+  и живая миграция реального метода «ГВ» — `AGENTS.md`/`lab-service/AGENTS.md`
+  в ветке `backend`.
+
 ### 2026-08-28 — v0.2.25 (WP3c ч.2/2 — таймер, захват события, лог наблюдений; WP3 закрыт)
 
 Спека/план: `docs/superpowers/specs/2026-08-28-sbe-lims-timer-widget-design.md`
