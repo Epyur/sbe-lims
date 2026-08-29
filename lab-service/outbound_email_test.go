@@ -79,3 +79,42 @@ func TestShouldAutoSendPartiallyAlreadySent(t *testing.T) {
 		t.Fatal("expected lpitrack dup to still be sent")
 	}
 }
+
+// shouldAutoSendProcessing (2026-08-29, WP2 продолжение — уведомление в LPITrack
+// при переходе заявки в processing, тот же переключатель labs.auto_send_email).
+
+func TestShouldAutoSendProcessingLabDisabled(t *testing.T) {
+	if shouldAutoSendProcessing(false, true, false) {
+		t.Fatal("lab auto-send disabled: expected no processing email")
+	}
+}
+
+func TestShouldAutoSendProcessingNoExternalID(t *testing.T) {
+	if shouldAutoSendProcessing(true, false, false) {
+		t.Fatal("no external_id: expected no processing email (nothing to match in LPITrack)")
+	}
+}
+
+func TestShouldAutoSendProcessingFresh(t *testing.T) {
+	if !shouldAutoSendProcessing(true, true, false) {
+		t.Fatal("expected processing email to be sent on first transition")
+	}
+}
+
+func TestShouldAutoSendProcessingAlreadySent(t *testing.T) {
+	if shouldAutoSendProcessing(true, true, true) {
+		t.Fatal("expected no re-send when already logged as sent (e.g. received<->processing toggling)")
+	}
+}
+
+// legacyExternalKey (2026-08-29) — тема служебного письма должна совпадать с полем
+// «Внешний идентификатор», показанным пользователю (LPIZAYAVKINAPRO-<N>), а не
+// голым external_id.
+func TestLegacyExternalKey(t *testing.T) {
+	if got := legacyExternalKey("775"); got != "LPIZAYAVKINAPRO-775" {
+		t.Fatalf("got %q, want LPIZAYAVKINAPRO-775", got)
+	}
+	if got := legacyExternalKey(""); got != "" {
+		t.Fatalf("empty external_id should stay empty, got %q", got)
+	}
+}

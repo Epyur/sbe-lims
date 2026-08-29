@@ -610,6 +610,14 @@ func (s *Server) migrate(ctx context.Context) error {
 		// видимость важнее), и заодно источник для защиты от повторной автоотправки
 		// (см. triggerCompletionEmails в outbound_email.go).
 		`ALTER TABLE labs ADD COLUMN IF NOT EXISTS auto_send_email BOOLEAN NOT NULL DEFAULT false`,
+		// service_email (2026-08-29) — живая жалоба: письмо в трекер ушло не на тот
+		// адрес (глобальный LAB_LPITRACK_EMAIL из .env не подходил именно этой лабе) —
+		// ручное указание адреса служебных писем (дубль в LPITrack при completed,
+		// уведомление о взятии в работу) per-лаба, приоритетнее env-переменной. Пусто
+		// по умолчанию — тогда используется LAB_LPITRACK_EMAIL, как раньше (обратная
+		// совместимость). Адрес заказчика НЕ отсюда — берётся из requests.owner_email,
+		// этого поля не касается.
+		`ALTER TABLE labs ADD COLUMN IF NOT EXISTS service_email TEXT NOT NULL DEFAULT ''`,
 		`CREATE TABLE IF NOT EXISTS sent_emails (
 			id BIGSERIAL PRIMARY KEY,
 			request_id BIGINT NOT NULL REFERENCES requests(id) ON DELETE CASCADE,

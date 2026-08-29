@@ -173,6 +173,12 @@ WHERE id = $1`, id, newStatus, newAssignedTo)
 	if newStatus == "completed" && existing.Status != "completed" {
 		go s.triggerCompletionEmails(context.WithoutCancel(r.Context()), id)
 	}
+	// WP2 (2026-08-29): та же автоотправка при переходе в processing (см.
+	// triggerProcessingEmail) — newAssignedTo, не existing.AssignedTo, т.к. кanban-move
+	// может назначать испытателя и менять статус ОДНИМ действием.
+	if newStatus == "processing" && existing.Status != "processing" {
+		go s.triggerProcessingEmail(context.WithoutCancel(r.Context()), id, newAssignedTo)
+	}
 
 	full, err := s.loadRequest(r.Context(), id)
 	if err != nil {

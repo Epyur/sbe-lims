@@ -89,6 +89,55 @@ func (s *Server) hasSentEmail(ctx context.Context, requestID int64, recipientTyp
 	return exists
 }
 
+// shouldAutoSendProcessing — чистая функция (см. shouldAutoSend выше, тот же принцип):
+// решает, слать ли уведомление в LPITrack при переходе заявки в processing.
+func shouldAutoSendProcessing(labAutoSend, hasExternalID, alreadySent bool) bool {
+	return labAutoSend && hasExternalID && !alreadySent
+}
+
+// triggerProcessingEmail — вызывается из handleSetRequestStatus/handleKanbanMove СРАЗУ
+// ПОСЛЕ успешного перехода заявки в status="processing" (вызывающий код уже проверяет,
+// что это настоящий переход, не повторное сохранение уже processing-заявки). Тот же
+// принцип, что и triggerCompletionEmails: best-effort (ошибка не блокирует сам переход
+// статуса), гейтится тем же labs.auto_send_email — это то же самое автописьмо,
+// расширенное на ещё один переход статуса, не отдельный переключатель. Только в
+// LPITrack (заказчику на этом этапе сообщать нечего — результатов ещё нет) — с именем
+// назначенного испытателя (assignedTo). Дедуп через тот же журнал sent_emails
+// (recipient_type="lpitrack_processing") — повторный переход в processing (например,
+// туда-обратно через received) не шлёт письмо ещё раз (2026-08-29, прямой запрос
+// пользователя).
+func (s *Server) triggerProcessingEmail(ctx context.Context, requestID int64, assignedTo string) {
+	req, err := s.loadRequest(ctx, requestID)
+	if err != nil {
+		log.Printf("triggerProcessingEmail: load request %d: %v", requestID, err)
+		return
+	}
+	if req.LabID <= 0 {
+		return
+	}
+	var labAutoSend bool
+	if err := s.pool.QueryRow(ctx, `SELECT auto_send_email FROM labs WHERE id = $1`, req.LabID).Scan(&labAutoSend); err != nil {
+		log.Printf("triggerProcessingEmail: load lab %d: %v", req.LabID, err)
+		return
+	}
+	if !shouldAutoSendProcessing(labAutoSend, req.ExternalID != "", s.hasSentEmail(ctx, requestID, "lpitrack_processing")) {
+		return
+	}
+	lpitrackAddr := s.serviceEmailFor(ctx, req.LabID)
+	if lpitrackAddr == "" {
+		log.Printf("triggerProcessingEmail: no service_email/LAB_LPITRACK_EMAIL configured, skip for request %d", requestID)
+		return
+	}
+	tester := assignedTo
+	if tester == "" {
+		tester = "не назначен"
+	}
+	s.sendAndLog(ctx, requestID, "lpitrack_processing", lpitrackAddr, "auto", nil,
+		legacyExternalKey(req.ExternalID),
+		fmt.Sprintf("В работу. Заявка №%s (external_id=%s) взята в работу испытателем %s.",
+			req.CustomerNumber, req.ExternalID, tester))
+}
+
 // sendCompletionEmails строит протокол ОДИН раз (даже если шлём оба письма), затем шлёт
 // то, что запрошено, и пишет каждую попытку в журнал (успех и неудачу одинаково —
 // видимость важнее, см. спеку).
@@ -109,6 +158,23 @@ func customerEmailContent(req Request) (subject, body string) {
 	subject = fmt.Sprintf("Результаты испытания №%s", req.CustomerNumber)
 	body = fmt.Sprintf("Результаты испытания по заявке №%s во вложении.", req.CustomerNumber)
 	return subject, body
+}
+
+// serviceEmailFor — адрес служебных писем этой лабы (дубль в LPITrack при completed,
+// уведомление о взятии в работу) — 2026-08-29, живая жалоба: письмо ушло не на тот
+// адрес, глобальный LAB_LPITRACK_EMAIL (.env) не подходил именно этой лабе. Приоритет —
+// labs.service_email (ручная настройка в карточке лабы), пусто — фоллбэк на env-
+// переменную (обратная совместимость с уже настроенными лабами). Адрес заказчика этой
+// функции не касается — берётся из requests.owner_email, см. sendCompletionEmails.
+func (s *Server) serviceEmailFor(ctx context.Context, labID int64) string {
+	var labServiceEmail string
+	if labID > 0 {
+		_ = s.pool.QueryRow(ctx, `SELECT service_email FROM labs WHERE id = $1`, labID).Scan(&labServiceEmail)
+	}
+	if labServiceEmail != "" {
+		return labServiceEmail
+	}
+	return strings.TrimSpace(os.Getenv("LAB_LPITRACK_EMAIL"))
 }
 
 func (s *Server) sendCompletionEmails(ctx context.Context, req Request, sendCustomer, sendLpitrack bool, triggeredBy string) {
@@ -136,15 +202,27 @@ func (s *Server) sendCompletionEmails(ctx context.Context, req Request, sendCust
 		}
 	}
 	if sendLpitrack {
-		lpitrackAddr := strings.TrimSpace(os.Getenv("LAB_LPITRACK_EMAIL"))
+		lpitrackAddr := s.serviceEmailFor(ctx, req.LabID)
 		if lpitrackAddr == "" {
-			log.Printf("sendCompletionEmails: LAB_LPITRACK_EMAIL not set, skip lpitrack dup for request %d", req.ID)
+			log.Printf("sendCompletionEmails: no service_email/LAB_LPITRACK_EMAIL configured, skip lpitrack dup for request %d", req.ID)
 		} else {
 			s.sendAndLog(ctx, req.ID, "lpitrack", lpitrackAddr, triggeredBy, attachment,
-				fmt.Sprintf("external_id=%s", req.ExternalID),
+				legacyExternalKey(req.ExternalID),
 				fmt.Sprintf("Заявка №%s (external_id=%s) завершена.", req.CustomerNumber, req.ExternalID))
 		}
 	}
+}
+
+// legacyExternalKey — тема служебного письма в LPITrack должна совпадать с исходным
+// ключом легаси-трекера ("LPIZAYAVKINAPRO-<N>", тот же формат, что показывается
+// пользователю в поле «Внешний идентификатор», см. lims-view.ts EXTERNAL_ID_PREFIX) —
+// 2026-08-29, живая жалоба: subject "external_id=775" не совпадал с этим форматом.
+// Обратная операция strings.TrimPrefix — email_ingest.go processMessage.
+func legacyExternalKey(externalID string) string {
+	if externalID == "" {
+		return ""
+	}
+	return "LPIZAYAVKINAPRO-" + externalID
 }
 
 func (s *Server) sendAndLog(ctx context.Context, requestID int64, recipientType, to, triggeredBy string,
@@ -223,24 +301,33 @@ FROM sent_emails WHERE request_id = $1 ORDER BY sent_at DESC`, requestID)
 
 // ---- SMTP-транспорт ----
 
-// sendMailWithAttachment — тот же паттерн, что sbe-core/auth-service/email.go sendMail
-// (net/smtp, локальный exim-релей, STARTTLS с самоподписанным сертификатом), расширенный
-// под MIME multipart/mixed (текстовое тело + опциональное бинарное вложение). Тема письма
-// кодируется по RFC 2047 (Q-encoding) — кириллица в Subject без этого не гарантированно
-// корректно отображается почтовыми клиентами (в отличие от тела, где charset=utf-8 в
-// Content-Type достаточно).
+// sendMailWithAttachment — MIME multipart/mixed (текстовое тело + опциональное
+// бинарное вложение) поверх net/smtp. Тема письма кодируется по RFC 2047 (Q-encoding) —
+// кириллица в Subject без этого не гарантированно корректно отображается почтовыми
+// клиентами (в отличие от тела, где charset=utf-8 в Content-Type достаточно).
+//
+// 2026-08-29, живая жалоба: письма через локальный exim-релей с самоподписанным
+// сертификатом (`noreply@epyur.fvds.ru`, старая схема — см. git history) в ряде случаев
+// попадали в спам. Переведено на аутентифицированную отправку через ТОТ ЖЕ внешний
+// ящик, с которого принимаются заявки (LAB_MAIL_LOGIN/LAB_MAIL_PASSWORD — те же
+// переменные, что и IMAP в email_ingest.go, реальный SMTP-провайдер с валидным
+// сертификатом/SPF/DKIM вместо локального релея, письма шлются "от себя", не спуфят
+// posторонний домен). LAB_SMTP_HOST/PORT остаются переопределяемыми на случай смены
+// почтового провайдера в будущем — по умолчанию Yandex (smtp.yandex.ru:587, STARTTLS).
 func sendMailWithAttachment(to, subject, body string, attachment *emailAttachment) error {
 	host := os.Getenv("LAB_SMTP_HOST")
 	if host == "" {
-		host = "localhost"
+		host = "smtp.yandex.ru"
 	}
 	port := os.Getenv("LAB_SMTP_PORT")
 	if port == "" {
-		port = "25"
+		port = "587"
 	}
+	login := strings.TrimSpace(os.Getenv("LAB_MAIL_LOGIN"))
+	password := os.Getenv("LAB_MAIL_PASSWORD")
 	from := os.Getenv("LAB_SMTP_FROM")
 	if from == "" {
-		from = "noreply@epyur.fvds.ru"
+		from = login
 	}
 
 	encodedSubject := mime.QEncoding.Encode("UTF-8", subject)
@@ -272,6 +359,13 @@ func sendMailWithAttachment(to, subject, body string, attachment *emailAttachmen
 		skipVerify := os.Getenv("LAB_SMTP_SKIP_VERIFY") == "1"
 		if err := c.StartTLS(&tls.Config{ServerName: host, InsecureSkipVerify: skipVerify}); err != nil {
 			return err
+		}
+	}
+	if login != "" && password != "" {
+		if ok, _ := c.Extension("AUTH"); ok {
+			if err := c.Auth(smtp.PlainAuth("", login, password, host)); err != nil {
+				return err
+			}
 		}
 	}
 	if err := c.Mail(from); err != nil {

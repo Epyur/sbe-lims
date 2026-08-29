@@ -621,11 +621,23 @@ export class LimsView extends ItemView {
     // при редактировании существующей лабы (при создании всегда false на сервере,
     // включать имеет смысл, когда лаба уже реально работает с заявками).
     let autoSendCheckbox: HTMLInputElement | undefined;
+    let serviceEmailInput: HTMLInputElement | undefined;
     if (lab) {
       const autoSendRow = form.createDiv({ cls: 'tn-lims-flex' });
       autoSendCheckbox = autoSendRow.createEl('input', { attr: { type: 'checkbox' } });
       autoSendCheckbox.checked = lab.auto_send_email;
       autoSendRow.createSpan({ text: 'Автоматически отправлять письмо заказчику при завершении заявки' });
+
+      // Адрес служебных писем (2026-08-29, живая жалоба — письмо в трекер ушло не на
+      // тот адрес): ручное указание per-лаба, приоритетнее общей настройки почты
+      // (LAB_LPITRACK_EMAIL на сервере) — дубль заявки в LPITrack при завершении и
+      // уведомление о взятии в работу. Адрес заказчика этого поля НЕ касается — берётся
+      // из свойств самой заявки (owner_email).
+      serviceEmailInput = form.createEl('input', {
+        attr: { type: 'text', placeholder: 'Адрес служебных писем (LPITrack) — пусто = из настроек сервера' },
+        cls: 'tn-lims-input',
+      });
+      serviceEmailInput.value = lab.service_email || '';
     }
     const saveBtn = form.createEl('button', { text: lab ? '💾 Сохранить' : '➕ Создать', cls: 'tn-btn tn-btn-primary' });
     const cancelBtn = form.createEl('button', { text: '✖ Отмена', cls: 'tn-btn tn-btn-ghost' });
@@ -645,6 +657,7 @@ export class LimsView extends ItemView {
             type: typeSelect.value,
             parent_lab_id: typeSelect.value === 'external' ? Number(parentSelect.value) : 0,
             auto_send_email: autoSendCheckbox?.checked ?? lab.auto_send_email,
+            service_email: serviceEmailInput?.value.trim() ?? lab.service_email,
           });
           new Notice('Лаборатория обновлена');
         } else {

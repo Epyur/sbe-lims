@@ -703,5 +703,11 @@ WHERE id = $1`, id, req.Status)
 	if req.Status == "completed" && existing.Status != "completed" {
 		go s.triggerCompletionEmails(context.WithoutCancel(r.Context()), id)
 	}
+	// WP2 (2026-08-29): та же автоотправка, только при РЕАЛЬНОМ переходе в processing —
+	// см. triggerProcessingEmail. assigned_to этот эндпоинт не меняет (только чистит на
+	// "new") — существующее значение уже актуально к моменту вызова.
+	if req.Status == "processing" && existing.Status != "processing" {
+		go s.triggerProcessingEmail(context.WithoutCancel(r.Context()), id, existing.AssignedTo)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
