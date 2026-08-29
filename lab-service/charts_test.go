@@ -23,7 +23,7 @@ func TestBuildChartSeriesFromTimeseries(t *testing.T) {
 		"average_temp": []any{20.5, 105.0, 405.0, 905.0},
 		"derivative":   []any{0.0, 8.0, 30.0, 50.0},
 	}
-	seriesValues := []map[string]any{{"smoke_temp_curve": curve}}
+	seriesValues := []seriesValuesRow{{SeriesNum: 1, Values: map[string]any{"smoke_temp_curve": curve}}}
 
 	cfg := map[string]any{
 		"kind": "timeseries",
@@ -69,7 +69,7 @@ func TestBuildChartSeriesFromTimeseriesSecondAxis(t *testing.T) {
 		"time":       []any{0.0, 10.0},
 		"derivative": []any{0.1, 8.5},
 	}
-	seriesValues := []map[string]any{{"smoke_temp_curve": curve}}
+	seriesValues := []seriesValuesRow{{SeriesNum: 1, Values: map[string]any{"smoke_temp_curve": curve}}}
 	cfg := map[string]any{
 		"kind": "timeseries",
 		"timeseries_series": []any{
@@ -98,7 +98,7 @@ func TestBuildChartSeriesFromTimeseriesIndependentXPerSeries(t *testing.T) {
 		"time":     []any{0.0, 5.0, 15.0, 25.0}, // другая частота/сетка точек
 		"channels": map[string]any{"channel_1": []any{10.0, 20.0, 30.0, 40.0}},
 	}
-	seriesValues := []map[string]any{{"curve_a": curveA, "curve_b": curveB}}
+	seriesValues := []seriesValuesRow{{SeriesNum: 1, Values: map[string]any{"curve_a": curveA, "curve_b": curveB}}}
 	cfg := map[string]any{
 		"kind": "timeseries",
 		"timeseries_series": []any{
@@ -122,6 +122,54 @@ func TestBuildChartSeriesFromTimeseriesIndependentXPerSeries(t *testing.T) {
 	}
 }
 
+// Несколько серий эксперимента на одном графике (2026-08-29, прямая жалоба
+// пользователя) — каждая серия рисует свою кривую того же канала; раньше все
+// получали одну и ту же подпись легенды, неотличимые между собой на графике.
+func TestBuildChartSeriesFromTimeseriesMultiSeriesLabels(t *testing.T) {
+	curve1 := map[string]any{"time": []any{0.0, 10.0}, "channels": map[string]any{"channel_1": []any{1.0, 2.0}}}
+	curve2 := map[string]any{"time": []any{0.0, 10.0}, "channels": map[string]any{"channel_1": []any{3.0, 4.0}}}
+	seriesValues := []seriesValuesRow{
+		{SeriesNum: 1, Values: map[string]any{"smoke_temp_curve": curve1}},
+		{SeriesNum: 2, Values: map[string]any{"smoke_temp_curve": curve2}},
+	}
+	cfg := map[string]any{
+		"kind": "timeseries",
+		"timeseries_series": []any{
+			map[string]any{"source_param": "smoke_temp_curve", "channel": "channel_1", "label": "Канал 1"},
+		},
+	}
+	got := buildChartSeriesFromTimeseries(cfg, seriesValues)
+	if len(got) != 2 {
+		t.Fatalf("got %d series, want 2 (one per measurement series)", len(got))
+	}
+	names := map[string]bool{}
+	for _, s := range got {
+		names[s.Name] = true
+	}
+	if !names["Канал 1 (серия 1)"] || !names["Канал 1 (серия 2)"] {
+		t.Errorf("got names %v, want distinct labels per series (\"Канал 1 (серия 1)\"/\"Канал 1 (серия 2)\")", names)
+	}
+}
+
+// Ровно одна серия — подпись БЕЗ номера (не загромождать легенду, если
+// различать всё равно нечего, см. TestBuildChartSeriesFromTimeseries выше —
+// уже проверяет имена без суффикса, этот тест защищает именно от регрессии
+// "стало добавлять номер всегда").
+func TestBuildChartSeriesFromTimeseriesSingleSeriesNoSuffix(t *testing.T) {
+	curve := map[string]any{"time": []any{0.0, 10.0}, "channels": map[string]any{"channel_1": []any{1.0, 2.0}}}
+	seriesValues := []seriesValuesRow{{SeriesNum: 1, Values: map[string]any{"smoke_temp_curve": curve}}}
+	cfg := map[string]any{
+		"kind": "timeseries",
+		"timeseries_series": []any{
+			map[string]any{"source_param": "smoke_temp_curve", "channel": "channel_1", "label": "Канал 1"},
+		},
+	}
+	got := buildChartSeriesFromTimeseries(cfg, seriesValues)
+	if len(got) != 1 || got[0].Name != "Канал 1" {
+		t.Fatalf("got %+v, want exactly one series named \"Канал 1\" (no series-number suffix)", got)
+	}
+}
+
 // Атрибут пустой/не заполнен ни в одной серии — пустой результат, не паника.
 func TestBuildChartSeriesFromTimeseriesNoData(t *testing.T) {
 	cfg := map[string]any{
@@ -130,7 +178,7 @@ func TestBuildChartSeriesFromTimeseriesNoData(t *testing.T) {
 			map[string]any{"source_param": "smoke_temp_curve", "channel": "channel_1"},
 		},
 	}
-	got := buildChartSeriesFromTimeseries(cfg, []map[string]any{{}, {"smoke_temp_curve": "не объект"}})
+	got := buildChartSeriesFromTimeseries(cfg, []seriesValuesRow{{SeriesNum: 1, Values: map[string]any{}}, {SeriesNum: 2, Values: map[string]any{"smoke_temp_curve": "не объект"}}})
 	if len(got) != 0 {
 		t.Errorf("got %+v, want empty (нет валидного значения атрибута ни в одной серии)", got)
 	}

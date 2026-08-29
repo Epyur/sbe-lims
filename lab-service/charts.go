@@ -699,7 +699,7 @@ func (s *Server) handleChart(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// собрать данные: X из x_column, Y из series_config[].source_param
-	seriesValues, err := s.loadSeriesValues(r.Context(), requestID, methodID)
+	seriesValues, err := s.loadSeriesValuesWithSeriesNum(r.Context(), requestID, methodID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
 		return
@@ -783,7 +783,7 @@ WHERE id = $1 AND equipment_id = $2`, calibrationID, equipmentID).Scan(&methodID
 // общая логика для HTTP-хендлера (handleChart) и встраивания в протокол
 // (protocol.go, 2026-08-22 — по просьбе пользователя графики теперь можно вставлять
 // в протокол, как и фото).
-func buildChartSeries(cfg map[string]any, seriesValues []map[string]any) []chartSeries {
+func buildChartSeries(cfg map[string]any, seriesValues []seriesValuesRow) []chartSeries {
 	xCol, _ := cfg["x_column"].(string)
 	seriesCfg, _ := cfg["series_config"].([]any)
 	type sdata struct {
@@ -802,7 +802,8 @@ func buildChartSeries(cfg map[string]any, seriesValues []map[string]any) []chart
 			name = src
 		}
 		var sd sdata
-		for _, sv := range seriesValues {
+		for _, row := range seriesValues {
+			sv := row.Values
 			xv := 0.0
 			if xCol != "" {
 				if f, err := toFloat(sv[xCol]); err == nil {
@@ -850,8 +851,15 @@ func buildChartSeries(cfg map[string]any, seriesValues []map[string]any) []chart
 // "channels":{"channel_1":[...],...}, "average_temp":[...], "derivative":[...]};
 // channel — какой под-ряд взять (имя канала, "average_temp" или "derivative");
 // axis: "y2" — рисовать по второй (правой) оси (см. chartSeries.Y2).
-func buildChartSeriesFromTimeseries(cfg map[string]any, seriesValues []map[string]any) []chartSeries {
+func buildChartSeriesFromTimeseries(cfg map[string]any, seriesValues []seriesValuesRow) []chartSeries {
 	specsRaw, _ := cfg["timeseries_series"].([]any)
+	// Несколько серий эксперимента на одном графике (2026-08-29, прямая жалоба
+	// пользователя) — каждая серия рисует СВОЮ кривую того же канала, раньше
+	// все получали ОДНУ И ТУ ЖЕ подпись легенды (label из конфига/канала),
+	// неотличимые между собой на графике. При >1 серии подпись каждой кривой
+	// дополняется номером серии; при ровно одной серии — без изменений (не
+	// загромождать легенду, если различать всё равно нечего).
+	multiSeries := len(seriesValues) > 1
 	var out []chartSeries
 	for _, specRaw := range specsRaw {
 		spec, ok := specRaw.(map[string]any)
@@ -868,8 +876,8 @@ func buildChartSeriesFromTimeseries(cfg map[string]any, seriesValues []map[strin
 			label = chartTimeseriesLabel(channelKey)
 		}
 		axis, _ := spec["axis"].(string)
-		for _, sv := range seriesValues {
-			raw, ok := sv[srcParam].(map[string]any)
+		for _, row := range seriesValues {
+			raw, ok := row.Values[srcParam].(map[string]any)
 			if !ok {
 				continue
 			}
@@ -891,7 +899,11 @@ func buildChartSeriesFromTimeseries(cfg map[string]any, seriesValues []map[strin
 			if len(yArr) < n {
 				n = len(yArr)
 			}
-			out = append(out, chartSeries{Name: label, X: timeArr[:n], Y: yArr[:n], Y2: axis == "y2"})
+			curveLabel := label
+			if multiSeries {
+				curveLabel = fmt.Sprintf("%s (серия %d)", label, row.SeriesNum)
+			}
+			out = append(out, chartSeries{Name: curveLabel, X: timeArr[:n], Y: yArr[:n], Y2: axis == "y2"})
 		}
 	}
 	return out
@@ -913,7 +925,7 @@ func chartTimeseriesLabel(key string) string {
 // renderChartConfigPNG рендерит один chart_config в PNG — тот же путь, что
 // GET /requests/{id}/chart/{cfg_id}, но без HTTP-обёртки. (nil, nil) — не ошибка,
 // просто нет данных для этого графика (пропускается вызывающим кодом).
-func renderChartConfigPNG(cfg map[string]any, seriesValues []map[string]any) ([]byte, error) {
+func renderChartConfigPNG(cfg map[string]any, seriesValues []seriesValuesRow) ([]byte, error) {
 	var series []chartSeries
 	if kind, _ := cfg["kind"].(string); kind == "timeseries" {
 		series = buildChartSeriesFromTimeseries(cfg, seriesValues)

@@ -400,6 +400,43 @@ ORDER BY series_num`, requestID, methodID)
 	return out, rows.Err()
 }
 
+// seriesValuesRow — values ОДНОЙ серии вместе с её номером (2026-08-29, нужно
+// графикам "kind=timeseries": несколько серий эксперимента накладываются на
+// один график несколькими кривыми — без номера серии подписи легенды
+// неотличимы, см. buildChartSeriesFromTimeseries). Отдельная функция, не
+// расширение loadSeriesValues — та уже используется в 5+ местах (формулы,
+// протокол, экспорт), где series_num не нужен, менять её сигнатуру ради
+// одного вызывающего было бы лишним риском регрессии.
+type seriesValuesRow struct {
+	SeriesNum int
+	Values    map[string]any
+}
+
+func (s *Server) loadSeriesValuesWithSeriesNum(ctx context.Context, requestID, methodID int64) ([]seriesValuesRow, error) {
+	rows, err := s.pool.Query(ctx, `
+SELECT series_num, values FROM measurement_results
+WHERE request_id = $1 AND method_id = $2 AND is_statistical_row = false
+ORDER BY series_num`, requestID, methodID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []seriesValuesRow
+	for rows.Next() {
+		var seriesNum int
+		var raw []byte
+		if err := rows.Scan(&seriesNum, &raw); err != nil {
+			continue
+		}
+		m := map[string]any{}
+		if len(raw) > 0 && string(raw) != "{}" {
+			_ = json.Unmarshal(raw, &m)
+		}
+		out = append(out, seriesValuesRow{SeriesNum: seriesNum, Values: m})
+	}
+	return out, rows.Err()
+}
+
 // loadSeriesPhotos — top-level photo_before/photo_after всех серий (не статистических),
 // параллельно loadSeriesValues (тот же WHERE/ORDER BY, чтобы индексы совпадали с
 // ctx.series в protocol.go). ОТДЕЛЬНАЯ функция, не поле в values из loadSeriesValues —
@@ -672,6 +709,13 @@ ruleLoop:
 		rankOrder = nil
 	}
 	env := buildFormulaEnv(seriesValues, map[string]any{}, rankOrder)
+	// Калибровочные кривые (WP1, 2026-08-28) до сих пор подставлялись только в
+	// applyFormulas (per-series) — aggregated-формулы (напр. КППТП через
+	// average_damage_length, метод РП) не могли использовать interpolate() вовсе,
+	// т.к. env для них не содержал {attr_id}_xs/_ys. equipmentID=0 — тот же
+	// best-effort auto-resolve через resolveSingleMainEquipment, что и для
+	// series-уровня, когда конкретная запись не указывает оборудование явно.
+	s.injectCalibrationCurves(ctx, requestID, methodID, 0, cfg, env)
 	result := evalAggregatedFormulas(requestID, methodID, cfg.Formulas, env)
 	if hasAggregatedClassification {
 		if err := s.applyAggregatedClassification(ctx, requestID, methodID, cfg, result); err != nil {
@@ -1612,61 +1656,15 @@ SELECT method_id FROM measurement_results WHERE request_id = $1 AND series_num =
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
 		return
 	}
-	// пересчитать все серии: для каждой серии применить формулы заново
-	rows, err := s.pool.Query(r.Context(), `
-SELECT id, series_num, values, COALESCE(equipment_id, 0) FROM measurement_results
-WHERE request_id = $1 AND method_id = $2 AND is_statistical_row = false ORDER BY series_num`,
-		requestID, methodID)
-	if err != nil {
+	// пересчитать все серии заявки+метода (общая логика с CLI-командой recalc-all, см. recalc_all.go)
+	if err := s.recalcRequestMethod(r.Context(), requestID, methodID); err != nil {
+		var fe *formulaApplyError
+		if errors.As(err, &fe) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": fe.Error()})
+			return
+		}
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
 		return
-	}
-	defer rows.Close()
-	allValues := []map[string]any{}
-	type rowT struct {
-		id          int64
-		seriesNum   int
-		values      map[string]any
-		equipmentID int64
-	}
-	var rowsList []rowT
-	for rows.Next() {
-		var rw rowT
-		var raw []byte
-		if err := rows.Scan(&rw.id, &rw.seriesNum, &raw, &rw.equipmentID); err != nil {
-			continue
-		}
-		rw.values = map[string]any{}
-		if len(raw) > 0 && string(raw) != "{}" {
-			_ = json.Unmarshal(raw, &rw.values)
-		}
-		rowsList = append(rowsList, rw)
-		allValues = append(allValues, rw.values)
-	}
-	for _, rw := range rowsList {
-		if err := s.applyFormulas(r.Context(), requestID, methodID, rw.equipmentID, allValues, rw.values); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "formula: " + err.Error()})
-			return
-		}
-		if err := s.applyClassification(r.Context(), requestID, methodID, rw.values); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-			return
-		}
-		j, _ := json.Marshal(rw.values)
-		if _, err := s.pool.Exec(r.Context(), `
-UPDATE measurement_results SET values = $2::jsonb, updated_at = now() WHERE id = $1`,
-			rw.id, string(j)); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
-			return
-		}
-	}
-	// статистика
-	if err := s.recomputeStatistics(r.Context(), requestID, methodID); err != nil {
-		log.Printf("statistics: %v", err)
-	}
-	// формулы уровня "aggregated" — пересчитать по всем сериям заявки+метода
-	if err := s.applyAggregatedFormulas(r.Context(), requestID, methodID); err != nil {
-		log.Printf("aggregated formulas: %v", err)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }

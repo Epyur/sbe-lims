@@ -80,6 +80,14 @@ func main() {
 		return
 	}
 
+	// Одноразовый CLI-режим «пересчитать все заявки» (2026-08-29, см. recalc_all.go).
+	if len(os.Args) > 1 && os.Args[1] == "recalc-all" {
+		recalcCtx, recalcCancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		defer recalcCancel()
+		runRecalcAll(recalcCtx, s, os.Args[2:])
+		return
+	}
+
 	if err := s.migrate(ctx); err != nil {
 		log.Fatalf("migrate: %v", err)
 	}

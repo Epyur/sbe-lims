@@ -59,8 +59,13 @@ type placeholderCtx struct {
 	// см. AGENTS.md "Метод: ... — теперь просто плейсхолдер").
 	attrsByID map[string]MethodAttribute
 	series    []map[string]any
-	stats     map[string]any
-	agg       map[string]any
+	// seriesNums — series_num каждой серии из series, тот же индекс = та же
+	// серия (2026-08-29, тот же принцип, что photoBefore/photoAfter ниже) —
+	// нужен графикам "kind=timeseries" внутри блока протокола, чтобы подписать
+	// кривые нескольких серий разными номерами, см. buildChartSeriesFromTimeseries.
+	seriesNums []int
+	stats      map[string]any
+	agg        map[string]any
 	// photoBefore/photoAfter — top-level measurement_results.photo_before/photo_after
 	// каждой серии (2026-08-28), параллельно series (тот же индекс = та же серия) —
 	// см. loadSeriesPhotos. Не часть values, чтобы не течь в DSL-формулы/агрегацию.
@@ -621,6 +626,25 @@ func renderNodeHTML(ctx *placeholderCtx, n RichNode) string {
 	}
 }
 
+// seriesValuesRowsFromCtx — сборка []seriesValuesRow (values + номер серии) из
+// параллельных полей ctx.series/ctx.seriesNums (2026-08-29) — нужна графику
+// внутри блока протокола, чтобы подписать кривые нескольких серий разными
+// номерами (buildChartSeriesFromTimeseries). Защита от рассинхронизации длин
+// (не должна происходить — оба поля заполняются вместе, см. buildProtocol) —
+// на fallback просто без номера (index+1 был бы обманчив при "дырах" в
+// нумерации из-за удалённых серий).
+func seriesValuesRowsFromCtx(ctx *placeholderCtx) []seriesValuesRow {
+	out := make([]seriesValuesRow, len(ctx.series))
+	for i, v := range ctx.series {
+		seriesNum := 0
+		if i < len(ctx.seriesNums) {
+			seriesNum = ctx.seriesNums[i]
+		}
+		out[i] = seriesValuesRow{SeriesNum: seriesNum, Values: v}
+	}
+	return out
+}
+
 func renderBlockChartHTML(b *strings.Builder, m protocolMethod) func(chartID string) {
 	return func(chartID string) {
 		if chartID == "" {
@@ -630,7 +654,7 @@ func renderBlockChartHTML(b *strings.Builder, m protocolMethod) func(chartID str
 		if chartCfg == nil {
 			return
 		}
-		png, err := renderChartConfigPNG(chartCfg, m.Ctx.series)
+		png, err := renderChartConfigPNG(chartCfg, seriesValuesRowsFromCtx(m.Ctx))
 		if err != nil || png == nil {
 			return
 		}
@@ -1220,9 +1244,21 @@ JOIN methods m ON m.id = r.method_id WHERE r.id = $1 ORDER BY m.id`, requestID)
 		mids = append(mids, m)
 	}
 	for _, m := range mids {
-		series, err := s.loadSeriesValues(ctx, requestID, m.id)
+		// seriesRows несёт и values, и series_num (2026-08-29) — нужен графикам
+		// "kind=timeseries" в блоке протокола, чтобы подписать кривые нескольких
+		// серий разными номерами (см. buildChartSeriesFromTimeseries). series/
+		// seriesNums — распаковка ОДНОГО запроса на два параллельных поля
+		// контекста (тот же принцип, что photoBefore/photoAfter — тот же индекс
+		// = та же серия), а не два отдельных запроса к БД.
+		seriesRows, err := s.loadSeriesValuesWithSeriesNum(ctx, requestID, m.id)
 		if err != nil {
 			continue
+		}
+		series := make([]map[string]any, len(seriesRows))
+		seriesNums := make([]int, len(seriesRows))
+		for i, row := range seriesRows {
+			series[i] = row.Values
+			seriesNums[i] = row.SeriesNum
 		}
 		stats, _ := s.loadStatsRow(ctx, requestID, m.id)
 		agg, _ := s.loadAggregatedRow(ctx, requestID, m.id)
@@ -1237,7 +1273,7 @@ JOIN methods m ON m.id = r.method_id WHERE r.id = $1 ORDER BY m.id`, requestID)
 			req: req, objectName: objectName, objectChars: objectChars,
 			targetIndicator: targetIndicator, inventorName: inventorName, methodName: m.name,
 			attrsByID: methodAttributesByID(cfg),
-			series:    series, stats: stats, agg: agg,
+			series:    series, seriesNums: seriesNums, stats: stats, agg: agg,
 			photoBefore: photoBefore, photoAfter: photoAfter,
 			headingNumbers: computeHeadingNumbers(blocks),
 		}
