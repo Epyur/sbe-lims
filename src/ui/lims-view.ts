@@ -1,4 +1,4 @@
-import { FileSystemAdapter, ItemView, Menu, Modal, Notice, WorkspaceLeaf } from 'obsidian';
+import { FileSystemAdapter, ItemView, Menu, Modal, Notice, TFile, WorkspaceLeaf } from 'obsidian';
 import type { App } from 'obsidian';
 import type SbeLimsPlugin from '../main';
 import type {
@@ -33,6 +33,7 @@ import type {
 } from '../types/lims';
 import { OPERATOR_FORM_SYSTEM_FIELDS, renderBlockEditor, SYSTEM_PLACEHOLDERS } from './block-editor';
 import { toggleSubSupPalette } from './subsup';
+import { LIMS_HELP_MD, LIMS_HELP_PATH } from './help';
 import { errorMessage } from '../../../sbe-core/src/utils/errors';
 import { downloadBase64File } from '../../../sbe-core/src/utils/download';
 import { sanitizeAttributesWithRename } from '../services/llm-assist.service';
@@ -360,6 +361,14 @@ export class LimsView extends ItemView {
       void this.renderPage();
     });
 
+    // Справка (WP9, 2026-08-29) — тот же паттерн, что REQUESTS_HELP_MD/openHelp в
+    // sbe-requests: заметка в вольте, создаётся при первом клике, дальше открывается как
+    // обычная заметка Obsidian (можно читать/искать/поправить прямо в вольте).
+    const helpBtnEl = sidebar.createDiv({ cls: 'tn-lims-collapse' });
+    helpBtnEl.createSpan({ text: '❓' });
+    helpBtnEl.createSpan({ cls: 'tn-lims-collapse-lbl', text: 'Справка' });
+    helpBtnEl.addEventListener('click', () => { void this.openHelp(); });
+
     const content = main.createDiv({ cls: 'tn-lims-content' });
     this.pageTitleEl = content.createEl('h1', { cls: 'tn-lims-page-title' });
     this.pageSubEl = content.createDiv({ cls: 'tn-lims-page-sub' });
@@ -406,6 +415,25 @@ export class LimsView extends ItemView {
   private syncOpenGroups(): void {
     // актуальное состояние расставала классов ведёт buildNav по кликам; здесь оставляем
     // группы открытыми, чтобы подменю было видно (фасад).
+  }
+
+  /** Открывает справку плагина. Если заметки нет в вольте — создаёт её (тот же паттерн,
+   * что openHelp в sbe-requests, см. help.ts). */
+  private async openHelp(): Promise<void> {
+    try {
+      const adapter = this.app.vault.adapter;
+      if (!(await adapter.exists(LIMS_HELP_PATH))) {
+        await adapter.write(LIMS_HELP_PATH, LIMS_HELP_MD);
+      }
+      const file = this.app.vault.getAbstractFileByPath(LIMS_HELP_PATH);
+      if (file instanceof TFile) {
+        await this.app.workspace.getLeaf(false).openFile(file);
+      } else {
+        new Notice('Не удалось найти файл справки');
+      }
+    } catch (e: unknown) {
+      new Notice(`Не удалось открыть справку: ${errorMessage(e)}`);
+    }
   }
 
   private toggleCollapse(): void {
