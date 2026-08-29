@@ -175,10 +175,36 @@ function domToInlineNodes(root: HTMLElement): InlineNode[] {
   return out;
 }
 
-function insertChipAtCursor(editable: HTMLElement, chip: HTMLElement): void {
+/** Снимок текущего выделения ВНУТРИ editable — вызывать ДО открытия модалки
+ * (PlaceholderPickerModal), пока курсор реально там, где его поставил
+ * пользователь. Живая жалоба (2026-08-29): открытие модалки уводит фокус/
+ * `window.getSelection()` из поля — к моменту закрытия модалки и вызова
+ * `insertChipAtCursor` браузер после `editable.focus()` подставлял СВОЁ
+ * умолчание (обычно начало содержимого), поэтому плейсхолдер вставлялся не
+ * туда, куда целился пользователь, а в начало строки. */
+function saveSelectionRange(editable: HTMLElement): Range | null {
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0 || !editable.contains(sel.anchorNode)) return null;
+  return sel.getRangeAt(0).cloneRange();
+}
+
+function insertChipAtCursor(editable: HTMLElement, chip: HTMLElement, savedRange?: Range | null): void {
   editable.focus();
   const sel = window.getSelection();
-  if (!sel || sel.rangeCount === 0 || !editable.contains(sel.anchorNode)) {
+  if (!sel) {
+    editable.appendChild(chip);
+    editable.appendChild(document.createTextNode(' '));
+    return;
+  }
+  // Восстанавливаем СОХРАНЁННУЮ (до открытия модалки) позицию курсора — то,
+  // что вернёт window.getSelection() ПРЯМО СЕЙЧАС (после .focus() выше),
+  // может уже не совпадать с тем, где пользователь реально стоял (см. коммент
+  // saveSelectionRange).
+  if (savedRange) {
+    sel.removeAllRanges();
+    sel.addRange(savedRange);
+  }
+  if (sel.rangeCount === 0 || !editable.contains(sel.anchorNode)) {
     editable.appendChild(chip);
     editable.appendChild(document.createTextNode(' '));
     return;
@@ -232,8 +258,9 @@ function renderInlineEditable(
   subBtn.addEventListener('mousedown', (ev) => ev.preventDefault());
   subBtn.addEventListener('click', () => { editable.focus(); document.execCommand('subscript'); serialize(); });
   placeholderBtn.addEventListener('click', () => {
+    const savedRange = saveSelectionRange(editable);
     new PlaceholderPickerModal(deps.app, deps.attrs, (node) => {
-      insertChipAtCursor(editable, buildChipEl(node, deps.attrs));
+      insertChipAtCursor(editable, buildChipEl(node, deps.attrs), savedRange);
       serialize();
     }).open();
   });

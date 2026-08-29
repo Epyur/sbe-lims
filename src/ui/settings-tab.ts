@@ -13,6 +13,7 @@ const LAB_MAIL_ENV_KEYS = [
   'LAB_MAIL_PASSWORD',
   'LAB_MAIL_POLL_INTERVAL_SECONDS',
   'LAB_MAIL_METHOD_MAP',
+  'LAB_MAIL_DEFAULT_PROJECT_CODE',
 ] as const;
 
 export class LimsSettingsTab extends PluginSettingTab {
@@ -99,6 +100,7 @@ export class LimsSettingsTab extends PluginSettingTab {
       statusEl.createEl('div', { text: describeKey('LAB_MAIL_IMAP_SERVER', 'IMAP-сервер'), cls: 'tn-muted' });
       statusEl.createEl('div', { text: describeKey('LAB_MAIL_LOGIN', 'Логин'), cls: 'tn-muted' });
       statusEl.createEl('div', { text: describeKey('LAB_MAIL_PASSWORD', 'Пароль'), cls: 'tn-muted' });
+      statusEl.createEl('div', { text: describeKey('LAB_MAIL_DEFAULT_PROJECT_CODE', 'Проект по умолчанию (без ЕКН)'), cls: 'tn-muted' });
 
       let enabled = byKey.get('LAB_MAIL_ENABLED')?.set ?? false;
       let imapServer = '';
@@ -106,6 +108,7 @@ export class LimsSettingsTab extends PluginSettingTab {
       let password = '';
       let pollSeconds = '';
       let methodMap = '';
+      let defaultProjectCode = '';
 
       new Setting(container)
         .setName('Включить приём почты')
@@ -141,6 +144,11 @@ export class LimsSettingsTab extends PluginSettingTab {
           t.inputEl.rows = 3;
         });
 
+      new Setting(container)
+        .setName('Проект по умолчанию (без ЕКН)')
+        .setDesc('Код проекта для заявок из письма БЕЗ указанного ЕКН (заявки С ЕКН всегда собираются в проект = сам ЕКН, это правило не меняется). Например "EML". Пусто — не менять; заявки без ЕКН и без этой настройки остаются без проекта, как раньше.')
+        .addText(t => t.setPlaceholder('EML').onChange(v => { defaultProjectCode = v.trim(); }));
+
       new Setting(container).addButton(b => b
         .setButtonText('💾 Сохранить и применить')
         .setCta()
@@ -159,6 +167,7 @@ export class LimsSettingsTab extends PluginSettingTab {
             }
             values.LAB_MAIL_METHOD_MAP = methodMap;
           }
+          if (defaultProjectCode) values.LAB_MAIL_DEFAULT_PROJECT_CODE = defaultProjectCode;
           try {
             await apstore.auth.setAppEnv('lab', values);
             new Notice('Изменения поставлены в очередь — применятся в течение минуты (сервис перезапустится).');

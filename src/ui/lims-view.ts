@@ -92,6 +92,15 @@ function fullRequestNumber(req: LimsRequest): string {
     || (req.number_seq > 0 ? `${req.number_seq}/${req.number_year}` : `#${req.id}`);
 }
 
+/** Номер заявки + external_id в скобках, если он есть (2026-08-29, прямой
+ * запрос пользователя — быстро сверять заявку с историческим номером письма
+ * LPITrack в карточках/списках, не открывая деталь). Пусто у заявок, никогда
+ * не приходивших по почте (заведены вручную) — тогда просто номер, без скобок. */
+function requestNumberLabel(req: LimsRequest): string {
+  const num = req.lab_number || fullRequestNumber(req);
+  return req.external_id ? `${num} (${req.external_id})` : num;
+}
+
 /** Kanban-доска «Очередь лаборатории»: заявка в колонке "Завершённые" видна
  * ровно 10 РАБОЧИХ дней (Пн–Пт) от completed_at, затем пропадает из канбана
  * (сама заявка/статус не трогается — она всё ещё видна на плоской странице
@@ -743,7 +752,7 @@ export class LimsView extends ItemView {
         // место, где показывается короткий "лабораторный" номер (lab_number,
         // без кода проекта); везде остальном (деталь заявки, протокол,
         // имя файла) — полный fullRequestNumber (customer_number).
-        head.createEl('h4', { text: `№ ${r.lab_number || fullRequestNumber(r)}` });
+        head.createEl('h4', { text: `№ ${requestNumberLabel(r)}` });
         head.createSpan({ cls: 'tn-lims-req-card-status', text: STATUS_LABELS[r.status] || r.status });
         card.createDiv({ cls: 'tn-lims-req-card-title', text: r.title || '(без названия)' });
         const meta = card.createDiv({ cls: 'tn-lims-req-card-meta' });
@@ -912,7 +921,7 @@ export class LimsView extends ItemView {
       card.addEventListener('dragstart', (ev) => { this.draggedCard = req; ev.stopPropagation(); });
       card.addEventListener('dragend', () => { this.draggedCard = null; });
     }
-    card.createDiv({ text: `№ ${req.lab_number || fullRequestNumber(req)}` });
+    card.createDiv({ text: `№ ${requestNumberLabel(req)}` });
     card.createDiv({ cls: 'tn-lims-meta', text: req.title || '(без названия)' });
     card.createDiv({ cls: 'tn-lims-meta', text: this.methodName(req.method_id) });
     card.addEventListener('click', () => void this.renderRequestDetail(req));
@@ -1004,7 +1013,8 @@ export class LimsView extends ItemView {
     const back = this.bodyEl.createEl('button', { text: '← Назад', cls: 'tn-btn tn-btn-ghost' });
     back.addEventListener('click', () => void this.renderRequests(this.currentRequestsFilter));
 
-    this.bodyEl.createEl('h3', { text: `№ ${fullRequestNumber(req)} — ${req.title || 'без названия'}` });
+    const extIdSuffix = req.external_id ? ` (${req.external_id})` : '';
+    this.bodyEl.createEl('h3', { text: `№ ${fullRequestNumber(req)}${extIdSuffix} — ${req.title || 'без названия'}` });
 
     // Все детали заявки, как у заявителя (sbe-requests) — сразу под номером,
     // единым блоком (2026-08-21, по просьбе пользователя).
@@ -1218,6 +1228,31 @@ export class LimsView extends ItemView {
       );
       return;
     }
+    // Пересчитать (2026-08-29) — ОДНА кнопка на всю заявку, не на каждую серию
+    // (прямой запрос пользователя после живого использования: серий может быть
+    // много, пересчитывать по одной неудобно). Backend и раньше пересчитывал
+    // ВСЕ серии метода заявки при вызове (см. handleCalculateSeries) — просто
+    // клиент раньше вызывал его для каждой серии в UI отдельно; передаём номер
+    // первой серии — этого достаточно, эндпоинт сам находит метод и находит/
+    // пересчитывает остальные.
+    const calcAllBtn = container.createEl('button', { text: '🔄 Пересчитать всю заявку', cls: 'tn-btn tn-btn-ghost tn-lims-mb8' });
+    calcAllBtn.addEventListener('click', () => {
+      void (async () => {
+        try {
+          await this.plugin.syncService.calculateSeries(req.id, series[0].series_num);
+          new Notice('Заявка пересчитана');
+          // Перерисовываем ВСЮ карточку заявки (не только список серий) — живая
+          // жалоба: пересчитанные агрегированные/классификационные значения
+          // видны только в «Кратком виде» (renderShortView) ниже списка серий,
+          // отдельный вызов сервера, который renderSeriesList не трогает; без
+          // этого пользователю приходилось выходить из заявки и заходить
+          // заново, чтобы увидеть результат пересчёта.
+          void this.renderRequestDetail(req);
+        } catch (e: unknown) {
+          new Notice(`Ошибка: ${errorMessage(e)}`);
+        }
+      })();
+    });
     const cfg = this.methodConfigOf(req.method_id);
     for (const s of series) {
       const row = container.createDiv({ cls: 'tn-lims-flex tn-lims-mb8' });
