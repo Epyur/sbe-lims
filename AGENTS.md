@@ -154,6 +154,23 @@ lab_operator/lab_admin/владелец. Не трогали: эндпоинт �
 
 ## История работ
 
+### 2026-08-29 — v0.2.28 (WP4 — created_by/updated_by серий результатов)
+
+Реальный UI редактирования серии уже был (`renderSeriesEditForm`, WP3a) —
+добавлен последний недостающий кусок: факт «кто/когда менял», без gating прав
+на его основе (тот же паттерн, что уже есть у
+`equipment_calibrations.created_by`).
+
+- `types/lims.ts`: `MeasurementResult` += `created_by`/`updated_by: string`.
+- `lims-view.ts` (`renderSeriesList`): под названием серии — `изменено:
+  <email>`, если `updated_by` не пусто.
+- `npx tsc --noEmit -skipLibCheck` EXIT=0, `npm run build` OK. Версия 0.2.27 →
+  **0.2.28**. Backend менялся (новые колонки `measurement_results.created_by`/
+  `updated_by`, сигнатура `saveResultSeries`) — полная запись и живой E2E
+  (created_by сохраняется при создании, не меняется при повторном сохранении
+  другим пользователем) — `AGENTS.md`/`lab-service/AGENTS.md` в ветке
+  `backend`.
+
 ### 2026-08-29 — v0.2.27 (WP5 — «№ серии» → «№ п/п» для динамических таблиц)
 
 Новый `TableColumn.kind="sequential"` — рендерится идентично `series_no`

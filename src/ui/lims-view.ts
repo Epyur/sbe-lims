@@ -1224,6 +1224,12 @@ export class LimsView extends ItemView {
       const summary = Object.entries(s.values).slice(0, 3)
         .map(([k, v]) => `${k}=${Array.isArray(v) ? `${v.length} точек` : String(v)}`).join(', ');
       row.createSpan({ text: `Серия ${s.series_num}${summary ? ' — ' + summary : ''}` });
+      // Кто создал/изменил (2026-08-29, WP4) — только факт фиксации, без прав на
+      // основе этого поля (решение пользователя — редактировать может любой
+      // испытатель/админ лабы); '' у серий, созданных до этой доработки.
+      if (s.updated_by) {
+        row.createSpan({ cls: 'tn-lims-meta', text: `изменено: ${s.updated_by}` });
+      }
       const editHost = container.createDiv();
       const editBtn = row.createEl('button', { text: '✏️ Править', cls: 'tn-btn tn-btn-ghost' });
       editBtn.addEventListener('click', () => {
