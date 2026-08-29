@@ -761,7 +761,9 @@ func (s *Server) applyResultPayload(ctx context.Context, requestID, methodID int
 	// метода несколько единиц "Основного" оборудования, калибровочная кривая (WP1) для
 	// таких результатов просто не подставится (см. calibration_curve.go
 	// injectCalibrationCurves — best-effort, не блокирует сохранение).
-	_, _, err = s.saveResultSeries(ctx, requestID, methodID, 0, 0, explicitSeriesNum, values, photoBefore, photoAfter)
+	// "email-ingest" (2026-08-29, WP4) — нет реального пользователя, письмо
+	// разбирается автоматическим процессом; отличимо от настоящего email в UI.
+	_, _, err = s.saveResultSeries(ctx, requestID, methodID, 0, 0, explicitSeriesNum, values, photoBefore, photoAfter, "email-ingest")
 	return err
 }
 

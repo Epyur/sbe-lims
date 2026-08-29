@@ -807,6 +807,40 @@ legacy-писем метода «Flam» — кнопка «Зафиксиров�
   (`TableColumn.kind`), `src/ui/block-editor.ts` (`renderTableNodeEditor`) —
   см. `sbe-lims/AGENTS.md` (v0.2.27).
 
+## WP4 — created_by/updated_by серий результатов (2026-08-29)
+
+Роадмап: `docs/superpowers/plans/2026-08-27-mvp-roadmap-plan.md`, WP4.
+Модель прав уже решена раньше (упрощена — строгий gating не в MVP), реальный
+UI редактирования серии уже есть (`renderSeriesEditForm`, WP3a) — оставался
+только сам факт «кто/когда менял», тем же паттерном, что уже есть у
+`equipment_calibrations.created_by` (`equipment_ext.go`).
+
+- `main.go`: `ALTER TABLE measurement_results ADD COLUMN IF NOT EXISTS
+  created_by/updated_by TEXT NOT NULL DEFAULT ''`.
+- `results.go`: `MeasurementResult` += `CreatedBy`/`UpdatedBy`; `handleListResults`
+  SELECT/scan расширен; `saveResultSeries` += параметр `who string` — INSERT
+  пишет `created_by=$9, updated_by=$9`, `ON CONFLICT DO UPDATE` пишет ТОЛЬКО
+  `updated_by = EXCLUDED.updated_by` (`created_by` НЕ в SET-списке — при
+  конфликте Postgres сохраняет исходное значение колонки, первый автор не
+  перезаписывается повторным сохранением). Вызовы: `handleCreateResult` →
+  `currentEmail(r)`; `email_ingest.go` → литерал `"email-ingest"` (нет
+  реального пользователя, письмо разбирается автоматическим процессом).
+- Авто-статистическая строка (`is_statistical_row=true`, `recomputeStatistics`)
+  НЕ проходит через `saveResultSeries` — `created_by`/`updated_by` у неё
+  остаются пустыми, это ожидаемо (не результат действия человека).
+- **Живой E2E** (throwaway-метод id=11, throwaway-заявка id=1422, оба удалены
+  после проверки): создание серии от `polishchuk@tn.ru` → `created_by=
+  updated_by="polishchuk@tn.ru"`; повторное сохранение ТОЙ ЖЕ серии от
+  `nasonova.m@tn.ru` (второй реальный admin-email из `lab_permissions`) →
+  `created_by` остался `"polishchuk@tn.ru"`, `updated_by` стал
+  `"nasonova.m@tn.ru"` — именно так, как задумано.
+- Backend деплой — обязателен (новые колонки + сигнатура функции), выполнен,
+  health ok.
+- Клиент (только десктоп — `renderSeriesList`, «изменено: `<email>`» под
+  названием серии) — см. `sbe-lims/AGENTS.md` (v0.2.28). Мобильный не
+  затронут (там нет журнала/списка серий с историей правок, только форма
+  ввода).
+
 ## Системные поля формы испытателя — per-series, не per-request (WP3b, 2026-08-28)
 
 Спека/план: `docs/superpowers/specs/2026-08-28-sbe-lims-system-fields-per-series-design.md` +

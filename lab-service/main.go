@@ -666,6 +666,15 @@ WHERE mr.request_id = r.id AND mr.is_statistical_row = false AND COALESCE(r.amb_
   AND mr.series_num = (SELECT MAX(series_num) FROM measurement_results mr2
                        WHERE mr2.request_id = mr.request_id AND mr2.method_id = mr.method_id
                          AND mr2.is_statistical_row = false)`,
+		// WP4 (2026-08-29) — кто создал/последний раз изменил серию (email вошедшего
+		// пользователя; для автоматических сохранений из email-приёма — литерал
+		// "email-ingest", см. saveResultSeries/email_ingest.go). Строгих прав на
+		// основе этого поля НЕТ (решение пользователя — редактировать может любой
+		// испытатель/админ лабы) — только факт фиксации + база для будущего
+		// журнала изменений (WP8). Тот же паттерн, что уже есть у
+		// equipment_calibrations.created_by.
+		`ALTER TABLE measurement_results ADD COLUMN IF NOT EXISTS created_by TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE measurement_results ADD COLUMN IF NOT EXISTS updated_by TEXT NOT NULL DEFAULT ''`,
 	}
 	for _, q := range stmts {
 		if _, err := s.pool.Exec(ctx, q); err != nil {

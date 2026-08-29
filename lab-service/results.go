@@ -32,8 +32,13 @@ type MeasurementResult struct {
 	CalculationType   string         `json:"calculation_type"`
 	SourceSeriesCount int            `json:"source_series_count"`
 	SourceSeriesRange string         `json:"source_series_range"`
-	CreatedAt         string         `json:"created_at"`
-	UpdatedAt         string         `json:"updated_at"`
+	// CreatedBy/UpdatedBy (2026-08-29, WP4) — email того, кто создал/последний
+	// раз изменил серию (или "email-ingest" для автоматических сохранений из
+	// письма) — см. saveResultSeries.
+	CreatedBy string `json:"created_by"`
+	UpdatedBy string `json:"updated_by"`
+	CreatedAt string `json:"created_at"`
+	UpdatedAt string `json:"updated_at"`
 }
 
 type AggregatedResult struct {
@@ -1102,7 +1107,7 @@ func (s *Server) handleListResults(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.pool.Query(r.Context(), `
 SELECT id, request_id, method_id, COALESCE(inventor_id, 0), COALESCE(equipment_id, 0), series_num, values,
 	file_links, photo_before, photo_after, is_statistical_row, calculation_type,
-	source_series_count, source_series_range, created_at, updated_at
+	source_series_count, source_series_range, created_by, updated_by, created_at, updated_at
 FROM measurement_results WHERE request_id = $1 ORDER BY series_num, id`, id)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
@@ -1116,7 +1121,7 @@ FROM measurement_results WHERE request_id = $1 ORDER BY series_num, id`, id)
 		var ca, ua time.Time
 		if err := rows.Scan(&m.ID, &m.RequestID, &m.MethodID, &m.InventorID, &m.EquipmentID, &m.SeriesNum,
 			&valsRaw, &linksRaw, &m.PhotoBefore, &m.PhotoAfter, &m.IsStatisticalRow,
-			&m.CalculationType, &m.SourceSeriesCount, &m.SourceSeriesRange, &ca, &ua); err != nil {
+			&m.CalculationType, &m.SourceSeriesCount, &m.SourceSeriesRange, &m.CreatedBy, &m.UpdatedBy, &ca, &ua); err != nil {
 			log.Printf("results scan: %v", err)
 			continue
 		}
@@ -1229,7 +1234,7 @@ func (s *Server) handleCreateResult(w http.ResponseWriter, r *http.Request) {
 	}
 
 	id, seriesNum, err := s.saveResultSeries(r.Context(), requestID, req.MethodID, req.InventorID, req.EquipmentID,
-		req.SeriesNum, req.Values, req.PhotoBefore, req.PhotoAfter)
+		req.SeriesNum, req.Values, req.PhotoBefore, req.PhotoAfter, currentEmail(r))
 	if err != nil {
 		if req.InstrumentHash != "" {
 			// saveResultSeries не удался ПОСЛЕ успешного claimInstrumentBuffer выше
@@ -1358,7 +1363,7 @@ func (e *formulaApplyError) Unwrap() error { return e.err }
 // email-ingestion воркером (email_ingest.go, applyResultPayload) — без HTTP-обёртки.
 // seriesNum <= 0 — авто-выбор следующего свободного номера серии.
 func (s *Server) saveResultSeries(ctx context.Context, requestID, methodID, inventorID, equipmentID int64,
-	seriesNum int, values map[string]any, photoBefore, photoAfter string) (int64, int, error) {
+	seriesNum int, values map[string]any, photoBefore, photoAfter, who string) (int64, int, error) {
 	var err error
 	if seriesNum <= 0 {
 		seriesNum, err = s.nextSeriesNum(ctx, requestID, methodID)
@@ -1391,14 +1396,15 @@ func (s *Server) saveResultSeries(ctx context.Context, requestID, methodID, inve
 	var id int64
 	err = s.pool.QueryRow(ctx, `
 INSERT INTO measurement_results (request_id, method_id, inventor_id, equipment_id, series_num, values,
-	photo_before, photo_after, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, now())
+	photo_before, photo_after, created_by, updated_by, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $9, now())
 ON CONFLICT (request_id, method_id, series_num) DO UPDATE SET
 	values = EXCLUDED.values, inventor_id = EXCLUDED.inventor_id, equipment_id = EXCLUDED.equipment_id,
-	photo_before = EXCLUDED.photo_before, photo_after = EXCLUDED.photo_after, updated_at = now()
+	photo_before = EXCLUDED.photo_before, photo_after = EXCLUDED.photo_after,
+	updated_by = EXCLUDED.updated_by, updated_at = now()
 RETURNING id`,
 		requestID, methodID, nullableID(inventorID), nullableID(equipmentID), seriesNum, string(valsJSON),
-		photoBefore, photoAfter).Scan(&id)
+		photoBefore, photoAfter, who).Scan(&id)
 	if err != nil {
 		log.Printf("save result series: %v", err)
 		return 0, 0, err

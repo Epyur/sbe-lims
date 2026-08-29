@@ -498,6 +498,12 @@ export interface MeasurementResult {
   calculation_type: string;
   source_series_count: number;
   source_series_range: string;
+  /** Кто создал/последний раз изменил серию (2026-08-29, WP4) — email или
+   * "email-ingest" для автоматических сохранений из письма; '' у серий,
+   * созданных ДО этой доработки. Только для отображения — прав на основе
+   * этого поля нет (см. renderSeriesList). */
+  created_by: string;
+  updated_by: string;
   created_at: string;
   updated_at: string;
 }
