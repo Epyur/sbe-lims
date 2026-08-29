@@ -348,6 +348,10 @@ WHERE id = $1 AND updated_at < $12`,
 	if tag.RowsAffected() == 0 {
 		return false, nil
 	}
+	// WP8 (2026-08-29): журнал изменений (см. audit_log.go) — офлайн-правка клиента,
+	// синхронизированная позже, тоже реальная смена статуса пользователем.
+	// logStatusChange сама не пишет строку, если p.Status == existing.Status.
+	s.logStatusChange(ctx, p.ID, email, existing.Status, p.Status)
 	return true, nil
 }
 

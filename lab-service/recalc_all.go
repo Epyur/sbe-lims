@@ -53,7 +53,9 @@ WHERE is_statistical_row = false ORDER BY request_id, method_id`)
 
 	ok, failed := 0, 0
 	for i, p := range pairs {
-		if err := s.recalcRequestMethod(ctx, p.requestID, p.methodID); err != nil {
+		// who="" — recalc-all не пишет журнал изменений (см. audit_log.go, границы
+		// спеки WP8): системный массовый пересчёт, не действие пользователя.
+		if err := s.recalcRequestMethod(ctx, p.requestID, p.methodID, ""); err != nil {
 			failed++
 			log.Printf("recalc-all: заявка %d метод %d: ОШИБКА: %v", p.requestID, p.methodID, err)
 			continue
@@ -69,8 +71,10 @@ WHERE is_statistical_row = false ORDER BY request_id, method_id`)
 // recalcRequestMethod пересчитывает формулы/классификацию/статистику/агрегаты
 // для всех серий одной пары (заявка, метод) — общая логика, вынесенная из
 // handleCalculateSeries (results.go), чтобы её же использовал массовый
-// recalc-all без HTTP-запроса на заявку.
-func (s *Server) recalcRequestMethod(ctx context.Context, requestID, methodID int64) error {
+// recalc-all без HTTP-запроса на заявку. who — email инициировавшего пересчёт
+// пользователя, для журнала изменений (WP8, см. audit_log.go); "" — не логировать
+// (recalc-all, системный пересчёт без пользователя, см. границы спеки WP8).
+func (s *Server) recalcRequestMethod(ctx context.Context, requestID, methodID int64, who string) error {
 	rows, err := s.pool.Query(ctx, `
 SELECT id, series_num, values, COALESCE(equipment_id, 0) FROM measurement_results
 WHERE request_id = $1 AND method_id = $2 AND is_statistical_row = false ORDER BY series_num`,
@@ -79,10 +83,11 @@ WHERE request_id = $1 AND method_id = $2 AND is_statistical_row = false ORDER BY
 		return err
 	}
 	type rowT struct {
-		id          int64
-		seriesNum   int
-		values      map[string]any
-		equipmentID int64
+		id           int64
+		seriesNum    int
+		values       map[string]any
+		beforeValues map[string]any
+		equipmentID  int64
 	}
 	var rowsList []rowT
 	allValues := []map[string]any{}
@@ -94,8 +99,10 @@ WHERE request_id = $1 AND method_id = $2 AND is_statistical_row = false ORDER BY
 			return err
 		}
 		rw.values = map[string]any{}
+		rw.beforeValues = map[string]any{}
 		if len(raw) > 0 && string(raw) != "{}" {
 			_ = json.Unmarshal(raw, &rw.values)
+			_ = json.Unmarshal(raw, &rw.beforeValues)
 		}
 		rowsList = append(rowsList, rw)
 		allValues = append(allValues, rw.values)
@@ -118,6 +125,7 @@ UPDATE measurement_results SET values = $2::jsonb, updated_at = now() WHERE id =
 			rw.id, string(j)); err != nil {
 			return err
 		}
+		s.logResultSave(ctx, requestID, methodID, rw.seriesNum, who, rw.beforeValues, rw.values)
 	}
 
 	if err := s.recomputeStatistics(ctx, requestID, methodID); err != nil {

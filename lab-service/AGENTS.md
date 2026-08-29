@@ -1292,6 +1292,54 @@ docker compose exec lab wget -qO- http://localhost:3000/api/lab/health   # вн�
 
 ## История
 
+- **2026-08-29 — WP8: журнал изменений заявки/результатов.** Спека
+  (`docs/superpowers/specs/2026-08-29-sbe-lims-audit-log-design.md`) и план
+  (`docs/superpowers/plans/2026-08-29-sbe-lims-audit-log-plan.md`) написаны и
+  одобрены пользователем в этой же сессии, реализовано сразу следом.
+  - **Схема**: одна таблица `request_audit_log` (не две — единый
+    хронологический список без merge-sort на клиенте), разреженные колонки:
+    `kind='status'` использует `old_status`/`new_status`, `kind=
+    'result_created'|'result_updated'` использует `method_id`/`series_num`/
+    `values_before`/`values_after` (JSONB, полный снимок, не per-field diff —
+    решение пользователя, узкий охват).
+  - **Новый файл `audit_log.go`**: `logStatusChange` (не пишет строку при
+    `old==new` — вынесено в чистую `shouldLogStatusChange`, юнит-тест без БД),
+    `logResultSave` (`who==""` → не логировать вовсе — см. ниже про recalc-all;
+    kind по чистой `resultSaveKind(before)`), `handleListAuditLog` (`GET
+    /requests/{id}/audit-log`, та же видимость, что у `handleListSentEmails` —
+    `requireLabRead`, newest-first, без пагинации).
+  - **Точки записи статуса** (все три места, что меняют `requests.status`):
+    `handleSetRequestStatus` (`requests.go`), Kanban-move (`kanban.go`), sync
+    push (`sync.go`, `pushUpdate` — офлайн-правка клиента, синхронизированная
+    позже, тоже реальная смена статуса пользователем, залогирована наравне с
+    остальными путями). Везде — сразу после успешного `UPDATE`, `who =
+    currentEmail(r)`/`email` пуша.
+  - **Точка записи результатов** — ВНУТРИ `saveResultSeries` (`results.go`),
+    единственной общей функции для HTTP create-result, email-ingestion и
+    инструмент-буфера: новый `SELECT values ... WHERE series_num=$3` ДО
+    апсерта даёт снимок "до" (`nil`, если серии ещё нет — `result_created`),
+    `logResultSave` вызывается после успешного апсерта со значениями "после"
+    (уже с посчитанными формулами/классификацией, как реально лежит в БД).
+  - **`handleCalculateSeries` vs `recalc-all`** — разделены явным параметром
+    `who string` в `recalcRequestMethod` (`recalc_all.go`): HTTP-хендлер
+    «Пересчитать» передаёт `currentEmail(r)` (реальное действие пользователя —
+    логируется как `result_updated` на каждую серию), CLI `recalc-all`
+    передаёт `""` (`logResultSave` тогда не пишет вовсе — системный массовый
+    пересчёт, не действие человека, см. границы спеки).
+  - `go build`/`go vet`/`go test` (новый `audit_log_test.go`:
+    `shouldLogStatusChange`/`resultSaveKind`) — чисто. Задеплоено на VDS (`scp`
+    + `docker compose build lab` + `up -d lab`), миграция прошла (таблица +
+    индекс по `request_id, created_at DESC`), health ok.
+  - **Живой E2E**: полный прогон `recalc-all` по всей БД (454 пары) на живых
+    продакшен-данных — журнал остался **0 строк** до и после, подтверждает,
+    что `who=""` действительно ничего не пишет даже при реальной нагрузке.
+    **НЕ проверено этой сессией**: реальная запись через HTTP-пути (смена
+    статуса в UI/Kanban, сохранение серии, «Пересчитать») и чтение через новый
+    UI «История» (sbe-lims/sbe-requests) — нет валидного JWT для скриптового
+    вызова этих эндпоинтов извне контейнера; пользователю стоит сменить статус
+    реальной/тестовой заявки и открыть «История» в карточке, чтобы подтвердить
+    весь путь целиком.
+
 - **2026-08-29 — исходящая почта переведена на аутентифицированную отправку
   через тот же внешний ящик, с которого принимаются заявки.** Живая жалоба:
   письма через локальный exim-релей с самоподписанным сертификатом

@@ -137,6 +137,8 @@ func main() {
 	// WP2 (2026-08-28) — исходящая почта: ручная отправка + журнал заявки.
 	mux.HandleFunc("POST /api/lab/requests/{id}/send-email", s.requirePerm("editor")(s.handleSendRequestEmail))
 	mux.HandleFunc("GET /api/lab/requests/{id}/sent-emails", s.requirePerm("viewer")(s.handleListSentEmails))
+	// WP8 (2026-08-29): журнал изменений заявки/результатов, см. audit_log.go.
+	mux.HandleFunc("GET /api/lab/requests/{id}/audit-log", s.requirePerm("viewer")(s.handleListAuditLog))
 
 	// Группы
 	mux.HandleFunc("GET /api/lab/groups", s.requirePerm("viewer")(s.handleListGroups))
@@ -691,6 +693,28 @@ WHERE mr.request_id = r.id AND mr.is_statistical_row = false AND COALESCE(r.amb_
 		// equipment_calibrations.created_by.
 		`ALTER TABLE measurement_results ADD COLUMN IF NOT EXISTS created_by TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE measurement_results ADD COLUMN IF NOT EXISTS updated_by TEXT NOT NULL DEFAULT ''`,
+		// WP8 (2026-08-29) — журнал изменений заявки/результатов, см.
+		// docs/superpowers/specs/2026-08-29-sbe-lims-audit-log-design.md. Одна таблица
+		// (не две) — единый хронологический список без merge-sort на клиенте.
+		// Разреженные колонки: kind='status' использует old_status/new_status,
+		// kind='result_created'/'result_updated' использует method_id/series_num/
+		// values_before/values_after — осознанный компромисс ради единого API/UI.
+		// Только уровень приложения (см. audit_log.go) — прямые SQL-изменения (как
+		// массовые скрипты этой же сессии) в журнал не попадают.
+		`CREATE TABLE IF NOT EXISTS request_audit_log (
+			id BIGSERIAL PRIMARY KEY,
+			request_id BIGINT NOT NULL REFERENCES requests(id) ON DELETE CASCADE,
+			kind TEXT NOT NULL,
+			who TEXT NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+			old_status TEXT,
+			new_status TEXT,
+			method_id BIGINT,
+			series_num INT,
+			values_before JSONB,
+			values_after JSONB
+		)`,
+		`CREATE INDEX IF NOT EXISTS request_audit_log_request_idx ON request_audit_log(request_id, created_at DESC)`,
 	}
 	for _, q := range stmts {
 		if _, err := s.pool.Exec(ctx, q); err != nil {

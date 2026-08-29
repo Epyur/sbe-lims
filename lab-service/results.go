@@ -1416,6 +1416,23 @@ func (s *Server) saveResultSeries(ctx context.Context, requestID, methodID, inve
 		}
 	}
 
+	// WP8 (2026-08-29): снимок ДО апсерта — nil, если серии с этим номером ещё нет
+	// (kind="result_created" в logResultSave ниже), иначе прежнее values (kind=
+	// "result_updated"). Отдельный SELECT, не переиспользует allSeries ниже — тому
+	// нужны значения ВСЕХ серий метода, этому — только текущей, и до её мутации
+	// формулами/классификацией (см. вызов logResultSave после апсерта).
+	var beforeValues map[string]any
+	var beforeRaw []byte
+	if err := s.pool.QueryRow(ctx, `
+SELECT values FROM measurement_results
+WHERE request_id = $1 AND method_id = $2 AND series_num = $3 AND is_statistical_row = false`,
+		requestID, methodID, seriesNum).Scan(&beforeRaw); err == nil {
+		beforeValues = map[string]any{}
+		if len(beforeRaw) > 0 {
+			_ = json.Unmarshal(beforeRaw, &beforeValues)
+		}
+	}
+
 	// собрать все серии (для формул/статистики) с уже сохранёнными
 	allSeries, err := s.loadSeriesValues(ctx, requestID, methodID)
 	if err != nil {
@@ -1453,6 +1470,9 @@ RETURNING id`,
 		log.Printf("save result series: %v", err)
 		return 0, 0, err
 	}
+	// WP8 (2026-08-29): журнал изменений (см. audit_log.go) — logResultSave сама не
+	// пишет строку, если who=="" (recalc-all, см. границы спеки).
+	s.logResultSave(ctx, requestID, methodID, seriesNum, who, beforeValues, values)
 
 	// статистика: пересчитать стат-строку
 	if err := s.recomputeStatistics(ctx, requestID, methodID); err != nil {
@@ -1656,8 +1676,10 @@ SELECT method_id FROM measurement_results WHERE request_id = $1 AND series_num =
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
 		return
 	}
-	// пересчитать все серии заявки+метода (общая логика с CLI-командой recalc-all, см. recalc_all.go)
-	if err := s.recalcRequestMethod(r.Context(), requestID, methodID); err != nil {
+	// пересчитать все серии заявки+метода (общая логика с CLI-командой recalc-all, см.
+	// recalc_all.go) — who=currentEmail(r), в отличие от recalc-all (CLI, who=""), т.к.
+	// это реальное HTTP-действие пользователя — журнал изменений должен его видеть (WP8).
+	if err := s.recalcRequestMethod(r.Context(), requestID, methodID, currentEmail(r)); err != nil {
 		var fe *formulaApplyError
 		if errors.As(err, &fe) {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": fe.Error()})

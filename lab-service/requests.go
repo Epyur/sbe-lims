@@ -709,5 +709,8 @@ WHERE id = $1`, id, req.Status)
 	if req.Status == "processing" && existing.Status != "processing" {
 		go s.triggerProcessingEmail(context.WithoutCancel(r.Context()), id, existing.AssignedTo)
 	}
+	// WP8 (2026-08-29): журнал изменений — та же best-effort дисциплина, что и письма
+	// выше (см. audit_log.go). logStatusChange сама не пишет строку при old==new.
+	s.logStatusChange(r.Context(), id, currentEmail(r), existing.Status, req.Status)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
