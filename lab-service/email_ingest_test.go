@@ -456,3 +456,44 @@ func TestMatchPhotoFields(t *testing.T) {
 		}
 	})
 }
+
+// Легаси-письма без поля "type" (2026-08-29) — до появления служебных
+// атрибутов (type/method, начало работы над новой версией) тип и метод
+// определялись исключительно папкой (прямое подтверждение пользователя).
+func TestLegacyTypeForFolder(t *testing.T) {
+	cases := map[string]string{
+		"LPITrack": "application",
+		"Comb":     "result",
+		"Flam":     "result",
+		"FlamProp": "result",
+	}
+	for folder, want := range cases {
+		if got := legacyTypeForFolder(folder); got != want {
+			t.Errorf("legacyTypeForFolder(%q) = %q, want %q", folder, got, want)
+		}
+	}
+}
+
+func TestLegacyFolderMethodKey(t *testing.T) {
+	want := map[string]string{"Comb": "method1", "Flam": "method2", "FlamProp": "method3"}
+	for folder, wantKey := range want {
+		if got := legacyFolderMethodKey[folder]; got != wantKey {
+			t.Errorf("legacyFolderMethodKey[%q] = %q, want %q", folder, got, wantKey)
+		}
+	}
+}
+
+func TestLegacyMethodKeyFromAimIndicator(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"Группа горючести", "method1"},
+		{"Группа воспламеняемости", "method2"},
+		{"Группа распространения пламени по поверхности", "method3"},
+		{"", ""},
+		{"что-то незнакомое", ""},
+	}
+	for _, c := range cases {
+		if got := legacyMethodKeyFromAimIndicator(c.in); got != c.want {
+			t.Errorf("legacyMethodKeyFromAimIndicator(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}

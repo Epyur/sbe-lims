@@ -35,6 +35,44 @@ import (
 
 var emailIngestFolders = []string{"LPITrack", "Comb", "Flam", "FlamProp"}
 
+// legacyFolderMethodKey — папка → ключ LAB_MAIL_METHOD_MAP для писем-результатов
+// БЕЗ поля "type" (2026-08-29, см. processMessage) — папка жёстко привязана к
+// методу с самого начала работы почтового приёма, задолго до появления явного
+// поля "method" в письме (прямое подтверждение пользователя).
+var legacyFolderMethodKey = map[string]string{
+	"Comb": "method1", "Flam": "method2", "FlamProp": "method3",
+}
+
+// legacyTypeForFolder — папка → тип письма для легаси-формата без поля "type"
+// (LPITrack всегда заявки, остальные три — всегда результаты своего метода,
+// см. legacyFolderMethodKey).
+func legacyTypeForFolder(folder string) string {
+	if folder == "LPITrack" {
+		return "application"
+	}
+	return "result"
+}
+
+// legacyMethodKeyFromAimIndicator — легаси-заявки (папка LPITrack, до появления
+// явного поля "method") не указывали метод отдельным полем — только
+// aim_indicator свободным текстом ("Группа горючести"/"Группа
+// воспламеняемости"/"Группа распространения пламени по поверхности"), всегда
+// содержащим одно из трёх названий целевых групп. Пустая строка — не удалось
+// распознать (заявка уйдёт в error "unknown method \"\"", как и раньше).
+func legacyMethodKeyFromAimIndicator(aimIndicator string) string {
+	lower := strings.ToLower(aimIndicator)
+	switch {
+	case strings.Contains(lower, "горюч"):
+		return "method1"
+	case strings.Contains(lower, "воспламен"):
+		return "method2"
+	case strings.Contains(lower, "распростран"):
+		return "method3"
+	default:
+		return ""
+	}
+}
+
 const pendingResultMaxAttempts = 20
 
 // resultMetaFields — поля письма-результата, не относящиеся к values серии
@@ -322,6 +360,26 @@ func (s *Server) processMessage(ctx context.Context, folder string, cfg *emailIn
 		return
 	}
 	typ, _ := payload["type"].(string)
+	// Легаси-формат без поля "type" (2026-08-29, прямое подтверждение
+	// пользователя): служебные атрибуты (type/method) появились только в этом
+	// году, с началом работы над новой версией — ДО этого тип письма и метод
+	// определялись ИСКЛЮЧИТЕЛЬНО папкой (LPITrack — всегда заявки, Comb —
+	// всегда результаты ГГ, Flam — всегда результаты ГВ, FlamProp — всегда
+	// результаты РП), НЕ комбинированный формат "заявка+результат в одном
+	// письме" (такого никогда не было). folder — авторитетный источник и типа,
+	// и метода для этой ветки; readable "method" из самого письма для
+	// легаси-заявок обычно отсутствует вовсе — извлекается из aim_indicator
+	// (свободный текст, но всегда содержит одно из трёх названий групп).
+	if typ == "" {
+		typ = legacyTypeForFolder(folder)
+		if typ == "result" {
+			payload["method"] = legacyFolderMethodKey[folder]
+		} else if _, hasMethod := payload["method"]; !hasMethod {
+			if key := legacyMethodKeyFromAimIndicator(stringField(payload, "aim_indicator")); key != "" {
+				payload["method"] = key
+			}
+		}
+	}
 	switch typ {
 	case "application":
 		s.applyApplicationEmail(ctx, cfg, dedupKey, folder, payload)
