@@ -158,6 +158,15 @@ type OperatorFormField struct {
 	Label       string `json:"label,omitempty"`
 	Required    bool   `json:"required"`
 	HelpText    string `json:"help_text,omitempty"`
+	// Default/Visibility/Suggestions (2026-08-28/29, WP3c) — сервер их не
+	// интерпретирует (чистая клиентская схема рендера, см. MethodOperatorForm.Timer
+	// за тем же паттерном) — json.RawMessage, чтобы round-trip через
+	// parseMethodOperatorForm/GET-эндпоинты не терял их молча (та же причина,
+	// что была у Timer — обнаружено, что default/visibility уже страдали этим
+	// же багом в проде до этого фикса, см. AGENTS.md).
+	Default     json.RawMessage `json:"default,omitempty"`
+	Visibility  json.RawMessage `json:"visibility,omitempty"`
+	Suggestions json.RawMessage `json:"suggestions,omitempty"`
 }
 
 // MethodOperatorForm — methods.operator_form: схема формы для испытателя.

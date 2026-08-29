@@ -1264,8 +1264,10 @@ export class LimsView extends ItemView {
 
     // Таймер (2026-08-28, WP3c ч.2) — тот же виджет, что на мобильном (портированный
     // аналог renderTimerWidget), ДО обычных полей формы.
+    // Array.isArray (2026-08-29) — защита от старой формы timer.{capture,log}
+    // (до редизайна кнопок-событий) — buttons тогда undefined.
     const timerConfig = cfg.operator_form.timer;
-    if (timerConfig && (timerConfig.capture || timerConfig.log)) {
+    if (timerConfig && Array.isArray(timerConfig.buttons) && timerConfig.buttons.length > 0) {
       this.renderTimerWidgetDesktop(form, timerConfig, values);
     }
 
@@ -1325,8 +1327,9 @@ export class LimsView extends ItemView {
     });
   }
 
-  /** Таймер формы (2026-08-28, WP3c ч.2) — портированный аналог мобильного
-   * renderTimerWidget. Десктоп — только правка существующей серии (WP3a), нет
+  /** Таймер формы (2026-08-28, WP3c ч.2; переработано 2026-08-29 по живой
+   * жалобе — см. mobile renderTimerWidget за полным описанием) — портированный
+   * аналог мобильного. Десктоп — только правка существующей серии (WP3a), нет
    * механизма "dirty"/неявного сохранения при переключении — onDirty не нужен.
    * Состояние таймера — только этот рендер формы, не сохраняется (стартует
    * заново при каждом открытии формы правки). */
@@ -1385,40 +1388,50 @@ export class LimsView extends ItemView {
       if (input) input.value = value;
     };
 
-    if (timer.capture) {
-      const { booleanFieldId, secondsFieldId } = timer.capture;
-      const captureBtn = wrap.createEl('button', { text: '🔥 Зафиксировать событие', cls: 'tn-btn tn-btn-primary tn-lims-mt8' });
-      captureBtn.addEventListener('click', () => {
-        const seconds = getElapsedSeconds();
-        // 'Да' — строка, не JS true: булев атрибут — select с фиксированными
-        // вариантами ['Да','Нет'] (WP3c ч.1), не настоящий boolean.
-        values[booleanFieldId] = 'Да';
-        values[secondsFieldId] = seconds;
-        syncFieldDisplay(booleanFieldId, 'Да');
-        syncFieldDisplay(secondsFieldId, String(seconds));
-        pause(); // "останавливающая эксперимент" — прямая формулировка роадмапа
-      });
-    }
-
-    if (timer.log) {
-      const { attributeId, events } = timer.log;
-      const logListEl = wrap.createDiv({ cls: 'tn-lims-meta tn-lims-mt8' });
-      const redrawLog = (): void => {
-        const entries = Array.isArray(values[attributeId]) ? values[attributeId] as Array<{ label: string; seconds: number }> : [];
-        logListEl.setText(entries.length > 0 ? entries.map(e => `${e.label} — ${formatMMSS(e.seconds)}`).join('; ') : '');
-      };
-      redrawLog();
-      const logBtnRow = wrap.createDiv({ cls: 'tn-lims-flex tn-lims-mt8' });
-      for (const label of events) {
-        const btn = logBtnRow.createEl('button', { text: label, cls: 'tn-btn tn-btn-ghost' });
-        btn.addEventListener('click', () => {
-          const entries = Array.isArray(values[attributeId]) ? values[attributeId] as unknown[] : [];
-          entries.push({ label, seconds: getElapsedSeconds() });
-          values[attributeId] = entries;
-          redrawLog();
-          // Не останавливает таймер — промежуточное наблюдение (см. спеку).
-        });
+    // Лог наблюдений — общий на ВСЕ log-кнопки, тот же формат "N сек - label",
+    // что и в протоколе (formatEventLog, lab-service/protocol.go).
+    const logAttributeIds = timer.buttons
+      .filter((b): b is typeof b & { action: { kind: 'log'; attributeId: string } } => b.action.kind === 'log')
+      .map(b => b.action.attributeId)
+      .filter((id, i, arr) => arr.indexOf(id) === i);
+    const logPreviewEls = new Map<string, HTMLElement>();
+    if (logAttributeIds.length > 0) {
+      const logPreviewWrap = wrap.createDiv({ cls: 'tn-lims-meta tn-lims-mt8' });
+      for (const attributeId of logAttributeIds) {
+        logPreviewEls.set(attributeId, logPreviewWrap.createDiv());
       }
+    }
+    const redrawLogPreview = (attributeId: string): void => {
+      const el = logPreviewEls.get(attributeId);
+      if (!el) return;
+      const entries = Array.isArray(values[attributeId]) ? values[attributeId] as Array<{ label: string; seconds: number }> : [];
+      el.setText(entries.length > 0 ? entries.map(e => `${e.seconds} сек - ${e.label}`).join('; ') : '');
+    };
+    for (const attributeId of logAttributeIds) redrawLogPreview(attributeId);
+
+    const btnGrid = wrap.createDiv({ cls: 'tn-lims-flex tn-lims-mt8' });
+    for (const btn of timer.buttons) {
+      const el = btnGrid.createEl('button', { text: btn.label, cls: 'tn-btn tn-btn-primary' });
+      el.addEventListener('click', () => {
+        const seconds = getElapsedSeconds();
+        if (btn.action.kind === 'capture') {
+          const { booleanFieldId, secondsFieldId } = btn.action;
+          // 'Да' — строка, не JS true: булев атрибут — select с фиксированными
+          // вариантами ['Да','Нет'] (WP3c ч.1), не настоящий boolean.
+          values[booleanFieldId] = 'Да';
+          values[secondsFieldId] = seconds;
+          syncFieldDisplay(booleanFieldId, 'Да');
+          syncFieldDisplay(secondsFieldId, String(seconds));
+          pause(); // "останавливающая эксперимент" — прямая формулировка роадмапа
+        } else {
+          const { attributeId } = btn.action;
+          const entries = Array.isArray(values[attributeId]) ? values[attributeId] as unknown[] : [];
+          entries.push({ label: btn.label, seconds });
+          values[attributeId] = entries;
+          redrawLogPreview(attributeId);
+          // Не останавливает таймер — промежуточное наблюдение (см. спеку).
+        }
+      });
     }
   }
 
@@ -1473,6 +1486,20 @@ export class LimsView extends ItemView {
       if (v === '') { delete values[field.attribute_id]; return; }
       values[field.attribute_id] = (dataType === 'int' || dataType === 'float') ? Number(v) : v;
     });
+
+    // Рекомендуемые значения (2026-08-29) — см. mobile renderFormField за
+    // полным описанием: кнопки-подсказки, клик подставляет точный текст, поле
+    // остаётся свободным вводом (не select).
+    if (field.suggestions && field.suggestions.length > 0) {
+      const chipsRow = row.createDiv({ cls: 'tn-lims-flex tn-lims-mt8' });
+      for (const suggestion of field.suggestions) {
+        const chip = chipsRow.createEl('button', { text: suggestion, cls: 'tn-btn tn-btn-ghost' });
+        chip.addEventListener('click', () => {
+          input.value = suggestion;
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+      }
+    }
   }
 
   /** Краткий вид результатов — блоки метода с show_in_ui, отрисованные
@@ -2009,10 +2036,12 @@ export class LimsView extends ItemView {
       .filter(f => attrs.some(a => a.id === f.attribute_id) || OPERATOR_FORM_SYSTEM_FIELDS.some(s => s.id === f.attribute_id))
       .map(f => ({ ...f }));
     // Таймер (2026-08-28, WP3c ч.2) — отдельное от operatorFormFields состояние,
-    // см. renderTimerConfigEditor ниже и сборку operator_form в buildPatch.
-    let timerConfig: MethodOperatorForm['timer'] = cfg.operator_form.timer
-      ? { capture: cfg.operator_form.timer.capture ? { ...cfg.operator_form.timer.capture } : undefined,
-        log: cfg.operator_form.timer.log ? { attributeId: cfg.operator_form.timer.log.attributeId, events: [...cfg.operator_form.timer.log.events] } : undefined }
+    // см. redrawTimerConfig ниже и сборку operator_form в buildPatch.
+    // Array.isArray (2026-08-29) — защита от старой формы timer.{capture,log}
+    // (до редизайна кнопок-событий) — buttons тогда undefined, старую конфигурацию
+    // просто не переносим (админ настроит кнопки заново через новый редактор).
+    let timerConfig: MethodOperatorForm['timer'] = cfg.operator_form.timer && Array.isArray(cfg.operator_form.timer.buttons)
+      ? { buttons: cfg.operator_form.timer.buttons.map(b => ({ label: b.label, action: { ...b.action } })) }
       : undefined;
     const operatorFormBody = this.renderCollapsibleSection(form, 'Форма для испытателя (данные эксперимента)');
     operatorFormBody.createDiv({ cls: 'tn-lims-meta' }).setText(
@@ -2053,111 +2082,95 @@ export class LimsView extends ItemView {
       menu.showAtMouseEvent(ev);
     });
 
-    // Таймер (2026-08-28, WP3c ч.2) — фиксированная схема (не общий расширяемый
-    // механизм виджетов): опционально «захват события» (2 уже существующих
-    // атрибута метода) и опционально «лог наблюдений» (1 существующий
-    // event_log-атрибут + список названий кнопок). Ссылается на атрибуты ПО ID
-    // — сами атрибуты заводятся как обычно (renderAttributeRows), не здесь.
+    // Таймер (2026-08-28, WP3c ч.2; переработано 2026-08-29 по живой жалобе —
+    // единственная фиксированная кнопка "Зафиксировать событие" не подходила:
+    // лаборатории называют разные события по-разному, у каждого свой результат
+    // исполнения). Список именованных кнопок — каждая либо "capture" (пишет в
+    // 2 существующих атрибута метода, останавливает таймер, напр. "Зафиксировано
+    // воспламенение"), либо "log" (добавляет запись в один event_log-атрибут,
+    // НЕ останавливает таймер, напр. "зафиксирована вспышка до 5 с"). Ссылается
+    // на атрибуты ПО ID — сами атрибуты заводятся как обычно (renderAttributeRows).
     const timerBody = operatorFormBody.createDiv({ cls: 'tn-lims-mt8' });
     const redrawTimerConfig = (): void => {
       timerBody.empty();
       const enabledLabel = timerBody.createEl('label', { cls: 'tn-lims-flex' });
       const enabledCb = enabledLabel.createEl('input', { attr: { type: 'checkbox' } });
       enabledCb.checked = !!timerConfig;
-      enabledLabel.createSpan({ text: 'Включить таймер (секундомер + захват события/лог наблюдений)' });
+      enabledLabel.createSpan({ text: 'Включить таймер (секундомер + кнопки событий)' });
       enabledCb.addEventListener('change', () => {
-        timerConfig = enabledCb.checked ? {} : undefined;
+        timerConfig = enabledCb.checked ? { buttons: [] } : undefined;
         redrawTimerConfig();
       });
       if (!timerConfig) return;
 
-      const captureLabel = timerBody.createEl('label', { cls: 'tn-lims-flex tn-lims-mt8' });
-      const captureCb = captureLabel.createEl('input', { attr: { type: 'checkbox' } });
-      captureCb.checked = !!timerConfig.capture;
-      captureLabel.createSpan({ text: 'Кнопка «Зафиксировать событие» (пишет в 2 поля, останавливает таймер)' });
-      captureCb.addEventListener('change', () => {
-        const boolAttrs = attrs.filter(a => a.id && a.data_type === 'boolean');
-        const numAttrs = attrs.filter(a => a.id && (a.data_type === 'int' || a.data_type === 'float'));
-        timerConfig!.capture = captureCb.checked
-          ? { booleanFieldId: boolAttrs[0]?.id || '', secondsFieldId: numAttrs[0]?.id || '' }
-          : undefined;
-        redrawTimerConfig();
-      });
-      if (timerConfig.capture) {
-        const boolAttrs = attrs.filter(a => a.id && a.data_type === 'boolean');
-        const numAttrs = attrs.filter(a => a.id && (a.data_type === 'int' || a.data_type === 'float'));
-        if (boolAttrs.length === 0 || numAttrs.length === 0) {
-          timerBody.createDiv({ cls: 'tn-lims-meta' }).setText(
-            'Нужен хотя бы один атрибут метода "Да/Нет" и один числовой (целое/дробное) — заведите их выше.',
-          );
-        } else {
-          const row = timerBody.createDiv({ cls: 'tn-lims-flex' });
-          row.createSpan({ cls: 'tn-lims-meta', text: 'поле-факт:' });
-          const boolSelect = row.createEl('select', { cls: 'tn-lims-select' });
-          for (const a of boolAttrs) boolSelect.createEl('option', { attr: { value: a.id }, text: a.name || a.id });
-          boolSelect.value = timerConfig.capture.booleanFieldId;
-          boolSelect.addEventListener('change', () => { timerConfig!.capture!.booleanFieldId = boolSelect.value; });
-          row.createSpan({ cls: 'tn-lims-meta', text: 'поле-время:' });
-          const numSelect = row.createEl('select', { cls: 'tn-lims-select' });
-          for (const a of numAttrs) numSelect.createEl('option', { attr: { value: a.id }, text: a.name || a.id });
-          numSelect.value = timerConfig.capture.secondsFieldId;
-          numSelect.addEventListener('change', () => { timerConfig!.capture!.secondsFieldId = numSelect.value; });
-        }
-      }
+      const boolAttrs = attrs.filter(a => a.id && a.data_type === 'boolean');
+      const numAttrs = attrs.filter(a => a.id && (a.data_type === 'int' || a.data_type === 'float'));
+      const logAttrs = attrs.filter(a => a.id && a.data_type === 'event_log');
 
-      const logLabel = timerBody.createEl('label', { cls: 'tn-lims-flex tn-lims-mt8' });
-      const logCb = logLabel.createEl('input', { attr: { type: 'checkbox' } });
-      logCb.checked = !!timerConfig.log;
-      logLabel.createSpan({ text: 'Лог наблюдений (кнопки событий, копят записи в один атрибут)' });
-      logCb.addEventListener('change', () => {
-        const logAttrs = attrs.filter(a => a.id && a.data_type === 'event_log');
-        timerConfig!.log = logCb.checked ? { attributeId: logAttrs[0]?.id || '', events: [] } : undefined;
-        redrawTimerConfig();
-      });
-      if (timerConfig.log) {
-        const logAttrs = attrs.filter(a => a.id && a.data_type === 'event_log');
-        if (logAttrs.length === 0) {
-          timerBody.createDiv({ cls: 'tn-lims-meta' }).setText(
-            'Нужен хотя бы один атрибут метода с типом "Лог наблюдений" — заведите его выше.',
-          );
-        } else {
-          const attrRow = timerBody.createDiv({ cls: 'tn-lims-flex' });
-          attrRow.createSpan({ cls: 'tn-lims-meta', text: 'атрибут лога:' });
-          const logAttrSelect = attrRow.createEl('select', { cls: 'tn-lims-select' });
-          for (const a of logAttrs) logAttrSelect.createEl('option', { attr: { value: a.id }, text: a.name || a.id });
-          logAttrSelect.value = timerConfig.log.attributeId;
-          logAttrSelect.addEventListener('change', () => { timerConfig!.log!.attributeId = logAttrSelect.value; });
-
-          // Список названий кнопок — тот же паттерн, что renderSelectOptionsEditor
-          // (опции select-атрибута, WP3c ч.1), но над timerConfig.log.events, а не
-          // MethodAttribute.options — не переиспользуем ту функцию напрямую (её
-          // сигнатура завязана на MethodAttribute), маленькое дублирование дешевле.
-          timerBody.createDiv({ cls: 'tn-lims-meta tn-lims-mt8' }).setText('Названия кнопок лога:');
-          const logEventsListEl = timerBody.createDiv();
-          const redrawLogEvents = (): void => {
-            logEventsListEl.empty();
-            timerConfig!.log!.events.forEach((ev2, i) => {
-              const evRow = logEventsListEl.createDiv({ cls: 'tn-lims-flex' });
-              const evInput = evRow.createEl('input', { attr: { type: 'text' }, cls: 'tn-lims-input' });
-              evInput.value = ev2;
-              evInput.addEventListener('change', () => { timerConfig!.log!.events[i] = evInput.value.trim(); });
-              const rmBtn = evRow.createEl('button', { text: '✖', cls: 'tn-btn tn-btn-ghost' });
-              rmBtn.addEventListener('click', () => { timerConfig!.log!.events.splice(i, 1); redrawLogEvents(); });
-            });
-          };
-          redrawLogEvents();
-          const addEvRow = timerBody.createDiv({ cls: 'tn-lims-flex' });
-          const newEvInput = addEvRow.createEl('input', { attr: { type: 'text', placeholder: 'название кнопки, напр. Вспышка' }, cls: 'tn-lims-input' });
-          const addEvBtn = addEvRow.createEl('button', { text: '➕ Событие', cls: 'tn-btn tn-btn-ghost' });
-          addEvBtn.addEventListener('click', () => {
-            const v = newEvInput.value.trim();
-            if (!v) return;
-            timerConfig!.log!.events.push(v);
-            newEvInput.value = '';
-            redrawLogEvents();
+      timerBody.createDiv({ cls: 'tn-lims-meta tn-lims-mt8' }).setText('Кнопки события:');
+      const buttonsListEl = timerBody.createDiv();
+      const redrawButtons = (): void => {
+        buttonsListEl.empty();
+        timerConfig!.buttons.forEach((btn, i) => {
+          const btnRow = buttonsListEl.createDiv({ cls: 'tn-lims-flex tn-lims-mt8' });
+          const labelInput = btnRow.createEl('input', {
+            attr: { type: 'text', placeholder: 'название кнопки, напр. Зафиксировано воспламенение' },
+            cls: 'tn-lims-input',
           });
-        }
-      }
+          labelInput.value = btn.label;
+          labelInput.addEventListener('change', () => { btn.label = labelInput.value.trim(); });
+
+          const kindSelect = btnRow.createEl('select', { cls: 'tn-lims-select' });
+          kindSelect.createEl('option', { attr: { value: 'capture' }, text: 'Захват события (2 поля, стоп)' });
+          kindSelect.createEl('option', { attr: { value: 'log' }, text: 'Лог наблюдений (не стоп)' });
+          kindSelect.value = btn.action.kind;
+          kindSelect.addEventListener('change', () => {
+            btn.action = kindSelect.value === 'capture'
+              ? { kind: 'capture', booleanFieldId: boolAttrs[0]?.id || '', secondsFieldId: numAttrs[0]?.id || '' }
+              : { kind: 'log', attributeId: logAttrs[0]?.id || '' };
+            redrawButtons();
+          });
+
+          if (btn.action.kind === 'capture') {
+            const action = btn.action;
+            if (boolAttrs.length === 0 || numAttrs.length === 0) {
+              btnRow.createSpan({ cls: 'tn-lims-meta', text: 'нужен атрибут "Да/Нет" и числовой — заведите выше' });
+            } else {
+              const boolSelect = btnRow.createEl('select', { cls: 'tn-lims-select' });
+              for (const a of boolAttrs) boolSelect.createEl('option', { attr: { value: a.id }, text: a.name || a.id });
+              boolSelect.value = action.booleanFieldId;
+              boolSelect.addEventListener('change', () => { action.booleanFieldId = boolSelect.value; });
+              const numSelect = btnRow.createEl('select', { cls: 'tn-lims-select' });
+              for (const a of numAttrs) numSelect.createEl('option', { attr: { value: a.id }, text: a.name || a.id });
+              numSelect.value = action.secondsFieldId;
+              numSelect.addEventListener('change', () => { action.secondsFieldId = numSelect.value; });
+            }
+          } else {
+            const action = btn.action;
+            if (logAttrs.length === 0) {
+              btnRow.createSpan({ cls: 'tn-lims-meta', text: 'нужен атрибут типа "Лог наблюдений" — заведите выше' });
+            } else {
+              const logSelect = btnRow.createEl('select', { cls: 'tn-lims-select' });
+              for (const a of logAttrs) logSelect.createEl('option', { attr: { value: a.id }, text: a.name || a.id });
+              logSelect.value = action.attributeId;
+              logSelect.addEventListener('change', () => { action.attributeId = logSelect.value; });
+            }
+          }
+
+          const rmBtn = btnRow.createEl('button', { text: '✖', cls: 'tn-btn tn-btn-ghost' });
+          rmBtn.addEventListener('click', () => { timerConfig!.buttons.splice(i, 1); redrawButtons(); });
+        });
+      };
+      redrawButtons();
+      const addBtnRow = timerBody.createDiv({ cls: 'tn-lims-flex tn-lims-mt8' });
+      const addBtn = addBtnRow.createEl('button', { text: '➕ Кнопка', cls: 'tn-btn tn-btn-ghost' });
+      addBtn.addEventListener('click', () => {
+        timerConfig!.buttons.push({
+          label: '',
+          action: { kind: 'capture', booleanFieldId: boolAttrs[0]?.id || '', secondsFieldId: numAttrs[0]?.id || '' },
+        });
+        redrawButtons();
+      });
     };
     redrawTimerConfig();
 
@@ -2420,7 +2433,7 @@ export class LimsView extends ItemView {
           onChange();
         });
       }
-      // Другие типы (text/int/float/photo/curve) — без UI дефолта, не запрошено.
+      // Другие типы (int/float/photo/curve) — без UI дефолта, не запрошено.
 
       // Условная видимость — тот же toggle-панель паттерн, что у синонимов
       // атрибута (toggleSynonymsPanel): кнопка добавляет/убирает панель.
@@ -2429,7 +2442,67 @@ export class LimsView extends ItemView {
         cls: 'tn-btn tn-btn-ghost',
       });
       visBtn.addEventListener('click', () => this.toggleVisibilityPanel(row, f, fields, onChange));
+
+      // Рекомендуемые значения (2026-08-29, живая жалоба) — только для обычного
+      // текстового поля: у select/boolean уже есть жёсткий список вариантов,
+      // остальные типы (число/дата/время) не запрошены пользователем.
+      if (resolvedType === 'text') {
+        const sugBtn = row.createEl('button', {
+          text: f.suggestions && f.suggestions.length > 0 ? '💡 рекомендуемые значения ✓' : '💡 рекомендуемые значения',
+          cls: 'tn-btn tn-btn-ghost',
+        });
+        sugBtn.addEventListener('click', () => this.toggleSuggestionsPanel(row, f, onChange));
+      }
     });
+  }
+
+  /** Рекомендуемые значения поля формы (2026-08-29, живая жалоба — испытатель
+   * должен был набирать стандартные формулировки типа "Асбоцементный лист,
+   * толщиной 10 мм" вручную и мог ошибиться в букве). Тот же
+   * toggle-по-кнопке паттерн, что toggleVisibilityPanel/toggleSynonymsPanel;
+   * тот же flat-список-с-добавлением, что renderSelectOptionsEditor, но над
+   * OperatorFormField.suggestions, а не MethodAttribute.options — НЕ
+   * ограничивает ввод (в отличие от select): кнопки только подставляют текст. */
+  private toggleSuggestionsPanel(row: HTMLElement, f: OperatorFormField, onChange: () => void): void {
+    const existing = row.querySelector('.tn-lims-suggestions');
+    if (existing) { existing.remove(); return; }
+    const panel = row.createDiv({ cls: 'tn-lims-suggestions tn-lims-series-form' });
+    panel.createDiv({ cls: 'tn-lims-meta' }).setText(
+      'Кнопки-подсказки под полем — клик подставляет точный текст, поле остаётся свободным вводом:',
+    );
+    const listEl = panel.createDiv();
+    const redraw = (): void => {
+      listEl.empty();
+      (f.suggestions || []).forEach((s, i) => {
+        const sRow = listEl.createDiv({ cls: 'tn-lims-flex' });
+        const sInput = sRow.createEl('input', { attr: { type: 'text' }, cls: 'tn-lims-input' });
+        sInput.value = s;
+        sInput.addEventListener('change', () => { f.suggestions![i] = sInput.value.trim(); });
+        const rmBtn = sRow.createEl('button', { text: '✖', cls: 'tn-btn tn-btn-ghost' });
+        rmBtn.addEventListener('click', () => {
+          f.suggestions!.splice(i, 1);
+          if (f.suggestions!.length === 0) f.suggestions = undefined;
+          redraw();
+        });
+      });
+    };
+    redraw();
+    const addRow = panel.createDiv({ cls: 'tn-lims-flex' });
+    const newInput = addRow.createEl('input', {
+      attr: { type: 'text', placeholder: 'напр. Асбоцементный лист, толщиной 10 мм' },
+      cls: 'tn-lims-input',
+    });
+    const addBtn = addRow.createEl('button', { text: '➕ Значение', cls: 'tn-btn tn-btn-ghost' });
+    addBtn.addEventListener('click', () => {
+      const v = newInput.value.trim();
+      if (!v) return;
+      if (!f.suggestions) f.suggestions = [];
+      f.suggestions.push(v);
+      newInput.value = '';
+      redraw();
+    });
+    const doneBtn = panel.createEl('button', { text: 'Готово', cls: 'tn-btn tn-btn-primary' });
+    doneBtn.addEventListener('click', () => { panel.remove(); onChange(); });
   }
 
   /** Панель условной видимости поля формы (2026-08-28, WP3c) — тот же

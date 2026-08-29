@@ -364,13 +364,15 @@ func seriesPhotoAt(ctx *placeholderCtx, kind string, i int) string {
 	return arr[i]
 }
 
-// formatEventLog — event_log-атрибут (2026-08-28, WP3c ч.2: таймер/захват
-// события/лог наблюдений) в читаемый текст "label1 (Ns); label2 (Ms)" — без
-// этого fmtVal() дал бы нечитаемый дамп Go-структуры (та же причина, что была
-// у "[object Object]" для curve-массивов на десктопе до отдельного фикса).
-// Значение — []any записей {"label":string,"seconds":number}, как пишут
-// клиентские кнопки лога (см. renderTimerWidget); не JSON-массив/не запись
-// без "label" — пропускается, не паникует.
+// formatEventLog — event_log-атрибут (2026-08-28, WP3c ч.2: таймер/лог
+// наблюдений) в читаемый текст "150 сек - label1; 155 сек - label2" (формат
+// зафиксирован по прямому примеру пользователя 2026-08-29 — время ПЕРЕД
+// названием события, не после) — без этого fmtVal() дал бы нечитаемый дамп
+// Go-структуры (та же причина, что была у "[object Object]" для curve-массивов
+// на десктопе до отдельного фикса). Значение — []any записей
+// {"label":string,"seconds":number}, как пишут клиентские кнопки лога (см.
+// renderTimerWidget); не JSON-массив/не запись без "label" — пропускается, не
+// паникует.
 func formatEventLog(v any) string {
 	arr, ok := v.([]any)
 	if !ok {
@@ -386,7 +388,7 @@ func formatEventLog(v any) string {
 		if label == "" {
 			continue
 		}
-		parts = append(parts, fmt.Sprintf("%s (%sс)", label, fmtVal(m["seconds"])))
+		parts = append(parts, fmt.Sprintf("%s сек - %s", fmtVal(m["seconds"]), label))
 	}
 	return strings.Join(parts, "; ")
 }

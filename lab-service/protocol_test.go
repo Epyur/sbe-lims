@@ -254,8 +254,9 @@ func TestRenderTableHTMLPhotoColumn(t *testing.T) {
 	}
 }
 
-// 2026-08-28, WP3c ч.2 — formatEventLog: массив {label,seconds} в читаемый
-// текст, не fmtVal()-дамп Go-структуры.
+// 2026-08-29 — formatEventLog: массив {label,seconds} в читаемый текст, не
+// fmtVal()-дамп Go-структуры. Формат "N сек - label" (время ПЕРЕД названием) —
+// зафиксирован по прямому примеру пользователя после живого тестирования.
 func TestFormatEventLog(t *testing.T) {
 	cases := []struct {
 		name string
@@ -265,14 +266,14 @@ func TestFormatEventLog(t *testing.T) {
 		{"два события", []any{
 			map[string]any{"label": "Вспышка", "seconds": 45.0},
 			map[string]any{"label": "Пробежка пламени", "seconds": 120.0},
-		}, "Вспышка (45с); Пробежка пламени (120с)"},
+		}, "45 сек - Вспышка; 120 сек - Пробежка пламени"},
 		{"пустой массив", []any{}, ""},
 		{"не массив (nil)", nil, ""},
 		{"не массив (строка)", "оops", ""},
 		{"запись без label — пропущена", []any{
 			map[string]any{"seconds": 10.0},
 			map[string]any{"label": "Вспышка", "seconds": 5.0},
-		}, "Вспышка (5с)"},
+		}, "5 сек - Вспышка"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -290,7 +291,7 @@ func TestRenderTableHTMLEventLogColumn(t *testing.T) {
 	got := renderNodeHTML(ctx, RichNode{Type: "table", Columns: []TableColumn{
 		{Kind: "series_no"}, {AttributeID: "events"},
 	}})
-	if !strings.Contains(got, "<td>Вспышка (45с); Пробежка пламени (120с)</td>") {
+	if !strings.Contains(got, "<td>45 сек - Вспышка; 120 сек - Пробежка пламени</td>") {
 		t.Errorf("table missing formatted event_log cell: %s", got)
 	}
 	// Серии 2/3 без events — пустая ячейка, не "[]"/паника.
@@ -312,7 +313,7 @@ func TestRenderInlineHTMLEventLogPlaceholder(t *testing.T) {
 	got := renderNodeHTML(ctx, RichNode{Type: "paragraph", Children: []InlineNode{
 		{Type: "placeholder", Source: "attribute", AttributeID: "events", Agg: "last"},
 	}})
-	if !strings.Contains(got, "Вспышка (45с); Пробежка пламени (120с)") {
+	if !strings.Contains(got, "45 сек - Вспышка; 120 сек - Пробежка пламени") {
 		t.Errorf("inline placeholder missing formatted event_log: %s", got)
 	}
 }
