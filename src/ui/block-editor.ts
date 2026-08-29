@@ -87,6 +87,7 @@ export interface BlockEditorDeps {
 /** Заголовок чипа-плейсхолдера — используется и при вставке, и при построении
  * DOM из уже сохранённого AST (перезагрузка редактора). */
 function resolvePlaceholderLabel(n: InlineNode, attrs: MethodAttribute[]): string {
+  if (n.source === 'heading_number') return '№ п/п';
   if (n.source === 'system') {
     return SYSTEM_PLACEHOLDERS.find(s => s.id === n.attribute_id)?.label || n.attribute_id || '?';
   }
@@ -267,7 +268,17 @@ class PlaceholderPickerModal extends Modal {
     this.contentEl.empty();
     this.titleEl.setText('Вставить плейсхолдер');
 
-    this.contentEl.createDiv({ cls: 'tn-lims-meta' }).setText('Системные (заявка/объект):');
+    // Нумерация (2026-08-29, WP6, путь б) — не данные заявки/метода, а
+    // структурный счётчик: сервер подставляет порядковый номер ЭТОГО БЛОКА
+    // среди блоков (для текущего вида вывода), которые тоже содержат этот
+    // плейсхолдер — вставляется куда угодно внутри вручную набранного текста
+    // (обычно в заголовок), нумерация "бесплатно" не печатается — админ сам
+    // решает, для каких блоков она нужна, просто вставляя плейсхолдер.
+    this.contentEl.createDiv({ cls: 'tn-lims-meta' }).setText('Нумерация:');
+    this.buildRow('№ п/п (по порядку среди блоков с этим плейсхолдером)',
+      () => this.pick({ type: 'placeholder', source: 'heading_number' }));
+
+    this.contentEl.createDiv({ cls: 'tn-lims-meta tn-lims-mt8' }).setText('Системные (заявка/объект):');
     for (const s of SYSTEM_PLACEHOLDERS) {
       this.buildRow(s.label, () => this.pick({ type: 'placeholder', source: 'system', attribute_id: s.id }));
     }
