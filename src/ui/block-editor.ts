@@ -360,6 +360,8 @@ function renderTableNodeEditor(container: HTMLElement, node: RichNode, attrs: Me
       row.createSpan({ text: '⠿', cls: 'tn-lims-meta' });
       if (col.kind === 'series_no') {
         row.createSpan({ text: 'Серия (номер по порядку)' });
+      } else if (col.kind === 'sequential') {
+        row.createSpan({ text: '№ п/п (порядковый номер)' });
       } else if (col.kind === 'photo_before') {
         row.createSpan({ text: '📷 Фото до испытания' });
       } else if (col.kind === 'photo_after') {
@@ -369,6 +371,7 @@ function renderTableNodeEditor(container: HTMLElement, node: RichNode, attrs: Me
         row.createSpan({ text: attrDisplayName(attr, col.attribute_id || '') });
       }
       const defaultLabelHint = col.kind === 'series_no' ? 'подпись (по умолч. «Серия»)'
+        : col.kind === 'sequential' ? 'подпись (по умолч. «№ п/п»)'
         : col.kind === 'photo_before' ? 'подпись (по умолч. «Фото до испытания»)'
         : col.kind === 'photo_after' ? 'подпись (по умолч. «Фото после испытания»)'
         : 'подпись (опц.)';
@@ -393,6 +396,12 @@ function renderTableNodeEditor(container: HTMLElement, node: RichNode, attrs: Me
   if (!node.columns!.some((c: TableColumn) => c.kind === 'series_no')) {
     select.createEl('option', { attr: { value: '__series_no__' }, text: 'Серия (номер по порядку)' });
   }
+  // "sequential" (2026-08-29, WP5) — тот же i+1, что series_no, отдельный пресет
+  // с подписью «№ п/п» — для таблиц, где "Серия" не подходит по смыслу (напр.
+  // таблица оборудования, прямой запрос MVP-документа).
+  if (!node.columns!.some((c: TableColumn) => c.kind === 'sequential')) {
+    select.createEl('option', { attr: { value: '__sequential__' }, text: '№ п/п (порядковый номер)' });
+  }
   // photo_before/photo_after (2026-08-28) — top-level measurement_results.photo_before/
   // photo_after (мобильные пикеры «Фото до/после испытания»), НЕ атрибут метода — до
   // этого фикса протокол их вообще не рисовал, только фото-атрибуты data_type="photo"
@@ -414,6 +423,8 @@ function renderTableNodeEditor(container: HTMLElement, node: RichNode, attrs: Me
     if (!select.value) return;
     if (select.value === '__series_no__') {
       node.columns!.push({ kind: 'series_no' });
+    } else if (select.value === '__sequential__') {
+      node.columns!.push({ kind: 'sequential' });
     } else if (select.value === '__photo_before__') {
       node.columns!.push({ kind: 'photo_before' });
     } else if (select.value === '__photo_after__') {

@@ -350,7 +350,10 @@ export interface InlineNode {
  * пикеры «Фото до/после испытания»), НЕ атрибут метода — до этого фикса
  * протокол их вообще не рисовал (только фото-атрибуты data_type="photo"). */
 export interface TableColumn {
-  kind?: 'attribute' | 'series_no' | 'photo_before' | 'photo_after';
+  /** "sequential" (2026-08-29, WP5) — та же нумерация i+1, что series_no, но
+   * своя дефолтная подпись «№ п/п» — для таблиц, где «Серия» не подходит
+   * (напр. таблица оборудования, прямой запрос MVP-документа). */
+  kind?: 'attribute' | 'series_no' | 'sequential' | 'photo_before' | 'photo_after';
   attribute_id?: string;
   label?: string;
 }
