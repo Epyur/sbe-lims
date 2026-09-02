@@ -24,6 +24,7 @@ func (s *Server) handleMyPermission(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
 		return
 	}
+	role = clampRoleForChannel(role, currentChannel(r))
 	if role == "" {
 		writeJSON(w, http.StatusOK, map[string]any{"email": email, "role": "", "hasAccess": false})
 		return
@@ -89,6 +90,7 @@ func (s *Server) handleSetPermission(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
 			return
 		}
+		actorRole = clampRoleForChannel(actorRole, currentChannel(r))
 		if roleRank(actorRole) < roleRank("superadmin") {
 			writeJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden: superadmin required"})
 			return

@@ -715,6 +715,13 @@ WHERE mr.request_id = r.id AND mr.is_statistical_row = false AND COALESCE(r.amb_
 			values_after JSONB
 		)`,
 		`CREATE INDEX IF NOT EXISTS request_audit_log_request_idx ON request_audit_log(request_id, created_at DESC)`,
+		// Триггеры почтового приёма на проекте (2026-09-02, прямой запрос
+		// пользователя): заявка без ЕКН (или с ЕКН, не создавшим свой автопроект)
+		// маршрутизируется в конкретный проект, если её ЕКН/отправитель совпал с
+		// одним из этих полей — см. projects.go Project, email_ingest.go
+		// findProjectByMailTrigger. Пусто — проект вне авто-маршрутизации.
+		`ALTER TABLE projects ADD COLUMN IF NOT EXISTS mail_trigger_ekn TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE projects ADD COLUMN IF NOT EXISTS mail_trigger_sender TEXT NOT NULL DEFAULT ''`,
 	}
 	for _, q := range stmts {
 		if _, err := s.pool.Exec(ctx, q); err != nil {

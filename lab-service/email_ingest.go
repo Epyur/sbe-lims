@@ -148,11 +148,19 @@ type emailIngestConfig struct {
 	pollInterval time.Duration
 	methodMap    map[string]int64
 	labID        int64
-	// defaultProjectCode (2026-08-29) — проект для заявок БЕЗ ЕКН в письме
-	// (основное правило "ЕКН как проект", ensureEknProject, применяется только
-	// когда ekn != ""; без этого письма без ЕКН оставались без проекта вовсе).
-	// Пусто — старое поведение (project_id=NULL), настраивается в плагине.
-	defaultProjectCode string
+}
+
+// defaultProjectCode — проект для заявок БЕЗ ЕКН в письме (основное правило
+// "ЕКН как проект", ensureEknProject, применяется только когда ekn != "";
+// без этого письма без ЕКН оставались без проекта вовсе). Пусто — старое
+// поведение (project_id=NULL). НЕ кэшируется в emailIngestConfig (2026-09-02,
+// найдено при разборе: cfg загружается ОДИН раз при старте процесса и живёт
+// до следующего docker compose up --build — правку LAB_MAIL_DEFAULT_PROJECT_CODE
+// без пересоздания контейнера воркер не видел, отчего часть писем без ЕКН
+// проскакивала мимо EML с project_id=NULL) — читается заново на каждое письмо,
+// подхватывает изменение сразу, без перезапуска.
+func defaultProjectCode() string {
+	return strings.TrimSpace(os.Getenv("LAB_MAIL_DEFAULT_PROJECT_CODE"))
 }
 
 // loadEmailIngestConfig читает LAB_MAIL_* из env. Возвращает (nil, false), если
@@ -210,9 +218,6 @@ func loadEmailIngestConfigCore() (*emailIngestConfig, bool) {
 		return nil, false
 	}
 	cfg.labID = labID
-	// defaultProjectCode (2026-08-29) — опционально, отсутствие не отключает
-	// воркер (в отличие от обязательных полей выше): пусто — старое поведение.
-	cfg.defaultProjectCode = strings.TrimSpace(os.Getenv("LAB_MAIL_DEFAULT_PROJECT_CODE"))
 	return cfg, true
 }
 
@@ -518,7 +523,16 @@ RETURNING id`, productName, string(charsJSON)).Scan(&objectID); err != nil {
 
 	var effProjectID int64
 	pi := projectInfo{code: "0"}
-	if ekn != "" {
+	if triggerID, triggerCode, terr := s.findProjectByMailTrigger(ctx, tx, ekn, custMail); terr != nil {
+		log.Printf("email ingest: findProjectByMailTrigger: %v", terr)
+		return
+	} else if triggerID > 0 {
+		// Явный триггер проекта (ЕКН или отправитель/домен) — приоритет выше
+		// общего правила "есть ЕКН -> свой автопроект по коду ЕКН" (2026-09-02,
+		// прямой запрос пользователя): конкретное совпадение важнее общего.
+		effProjectID = triggerID
+		pi.code = triggerCode
+	} else if ekn != "" {
 		effProjectID, err = s.ensureEknProject(ctx, tx, ekn)
 		if err != nil {
 			log.Printf("email ingest: ensureEknProject: %v", err)
@@ -527,18 +541,18 @@ RETURNING id`, productName, string(charsJSON)).Scan(&objectID); err != nil {
 		if effProjectID > 0 {
 			pi.code = ekn
 		}
-	} else if cfg.defaultProjectCode != "" {
+	} else if code := defaultProjectCode(); code != "" {
 		// Заявка без ЕКН в письме — вместо project_id=NULL (старое поведение)
 		// падает в общий проект по умолчанию, настроенный в плагине (2026-08-29,
 		// напр. "EML" — все заявки почтового приёма без ЕКН собираются в одном
 		// месте, не расходятся никуда). НЕ помечается is_ekn (это не ЕКН-проект).
-		effProjectID, err = s.ensureProjectByCode(ctx, tx, cfg.defaultProjectCode, false)
+		effProjectID, err = s.ensureProjectByCode(ctx, tx, code, false)
 		if err != nil {
 			log.Printf("email ingest: ensureProjectByCode (default): %v", err)
 			return
 		}
 		if effProjectID > 0 {
-			pi.code = cfg.defaultProjectCode
+			pi.code = code
 		}
 	}
 

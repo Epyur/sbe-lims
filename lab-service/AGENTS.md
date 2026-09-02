@@ -2515,3 +2515,49 @@ docker compose exec lab wget -qO- http://localhost:3000/api/lab/health   # вн�
   номера для новых методов строятся от нового проекта (существующие заморожены), ок.
 - Проекты в pull отдаются всем viewer (без фильтра видимости) — по дизайну (общие
   справочники), отличие от requests (там фильтр).
+
+## Триггеры почтового приёма на проекте + смена родительского проекта (2026-09-02)
+
+Часть работы над «ЦУП Веб» (веб-порталом sbe-requests/sbe-photobank), прямой запрос
+пользователя — при разборе оказалось, что маршрутизация писем без ЕКН в проект EML
+годами работала лишь наполовину.
+
+- **Найден и исправлен баг**: `emailIngestConfig.defaultProjectCode`
+  (`LAB_MAIL_DEFAULT_PROJECT_CODE`) читался из env **один раз при старте процесса**
+  (`loadEmailIngestConfigCore`) и жил в памяти до следующего `docker compose up
+  --build lab`. Если письмо без ЕКН обрабатывалось в окне между рестартом контейнера
+  и обновлением `.env`/приложением значения через `app_env_pending`, заявка уходила
+  с `project_id=NULL` и черновым номером `0-NNN/yyyy-...` — ровно то, что уже
+  случалось на проде (WP7, 2026-08-29, «мигрировано 59+13 заявок ручным UPDATE»)
+  и продолжало происходить точечно после (заявки 1519, 1535 — обе перепривязаны к
+  EML вручную, номер не переиздавался, чтобы не плодить дублей уже отправленных
+  клиенту). Исправление: `defaultProjectCode()` — свободная функция, читает
+  `os.Getenv` заново на каждое письмо (`email_ingest.go`), поле `defaultProjectCode`
+  убрано из `emailIngestConfig`.
+- **Триггеры проекта** (`projects.mail_trigger_ekn`/`mail_trigger_sender`, TEXT,
+  default `''`): заявка без своего ЕКН-автопроекта, поступившая по почте,
+  маршрутизируется в проект с подходящим триггером — точный ЕКН образца или
+  отправитель/домен (`mail_trigger_sender` вида `"@company.ru"` — суффиксное
+  совпадение домена, иначе точное совпадение адреса). Приоритет (решение
+  пользователя): явный триггер проекта → есть ЕКН (свой автопроект по коду ЕКН,
+  как раньше) → `LAB_MAIL_DEFAULT_PROJECT_CODE` (EML). Реализация:
+  `findProjectByMailTrigger`/`matchesMailSenderTrigger` (`requests.go`), вызывается
+  в начале резолва проекта в `applyApplicationEmail` (`email_ingest.go`), ДО веток
+  ЕКН/default. `Project` (`projects.go`) += `MailTriggerEkn`/`MailTriggerSender`;
+  `handleCreateProject`/`handleUpdateProject`/`loadVisibleProjects` — читают/пишут
+  оба поля (в update — `*string`, `nil` = не менять, явная `""` — снять триггер).
+  UI — оба клиента: `sbe-requests` (форма проекта в плагине) и `sbe-web` (портал).
+- **Смена родительского проекта после создания**: `handleUpdateProject` и раньше
+  принимал `parent_id`, просто ни один клиент не давал его поменять (плагин задаёт
+  только при создании). «ЦУП Веб» стал первым клиентом, открывшим это в UI — без
+  защиты от цикла проект можно было сделать потомком самого себя/своего же потомка.
+  Добавлена `projectAndDescendants` (зеркало `photo-service` `folderAndDescendants`)
+  + проверка в `handleUpdateProject` до `UPDATE` (400 на цикл). Плагин тоже получил
+  этот же select в форме редактирования проекта (см. `sbe-requests/AGENTS.md`).
+- Миграция: `ALTER TABLE projects ADD COLUMN IF NOT EXISTS mail_trigger_ekn/
+  mail_trigger_sender TEXT NOT NULL DEFAULT ''` (`main.go`). Бэкфилл: `UPDATE
+  requests SET project_id=2 WHERE id IN (1519,1535)` — разовый, вручную, не через
+  миграцию (не общий случай).
+- `go build`/`go vet`/`go test` — чисто. Задеплоено (`docker compose up -d --build
+  lab`), health ok, колонки подтверждены (`information_schema.columns`), сценарии
+  проверены вручную (триггер ЕКН/отправителя, клэмп цикла на смене родителя).

@@ -199,6 +199,64 @@ RETURNING id`, code, isEkn, "").Scan(&projectID)
 	return projectID, nil
 }
 
+// findProjectByMailTrigger ищет проект с явным триггером почтового приёма
+// (2026-09-02, прямой запрос пользователя): mail_trigger_ekn — точное
+// совпадение ЕКН письма; mail_trigger_sender — отправитель (точный email)
+// или домен (значение вида "@company.ru", суффиксное совпадение). ЕКН-триггер
+// проверяется первым (более узкое/конкретное правило важнее правила по
+// отправителю/домену). Совпадений нет — (0, "", nil), вызывающий код падает
+// на общие правила (свой автопроект по ЕКН, затем EML по умолчанию).
+func (s *Server) findProjectByMailTrigger(ctx context.Context, tx pgx.Tx, ekn, custMail string) (int64, string, error) {
+	if ekn != "" {
+		var id int64
+		var code string
+		err := tx.QueryRow(ctx, `
+SELECT id, code FROM projects WHERE mail_trigger_ekn <> '' AND mail_trigger_ekn = $1 LIMIT 1`, ekn).Scan(&id, &code)
+		if err == nil {
+			return id, code, nil
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return 0, "", err
+		}
+	}
+
+	custMail = strings.ToLower(strings.TrimSpace(custMail))
+	if custMail == "" {
+		return 0, "", nil
+	}
+	rows, err := tx.Query(ctx, `
+SELECT id, code, mail_trigger_sender FROM projects WHERE mail_trigger_sender <> '' ORDER BY id`)
+	if err != nil {
+		return 0, "", err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var code, sender string
+		if err := rows.Scan(&id, &code, &sender); err != nil {
+			return 0, "", err
+		}
+		if matchesMailSenderTrigger(sender, custMail) {
+			return id, code, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, "", err
+	}
+	return 0, "", nil
+}
+
+// matchesMailSenderTrigger — trigger вида "@company.ru" матчит по суффиксу
+// домена, иначе — точное совпадение адреса. custMail уже приведён к нижнему
+// регистру и обрезан вызывающим кодом.
+func matchesMailSenderTrigger(trigger, custMail string) bool {
+	trigger = strings.ToLower(strings.TrimSpace(trigger))
+	if strings.HasPrefix(trigger, "@") {
+		return strings.HasSuffix(custMail, trigger)
+	}
+	return custMail == trigger
+}
+
 // loadRequestFiles возвращает файлы заявки.
 func (s *Server) loadRequestFiles(ctx context.Context, requestID int64) ([]RequestFile, error) {
 	rows, err := s.pool.Query(ctx, `

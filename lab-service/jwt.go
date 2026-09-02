@@ -31,6 +31,9 @@ type jwtClaims struct {
 	Email    string `json:"email"`
 	DeviceID string `json:"device_id"`
 	AppID    string `json:"app_id"`
+	// Channel — "plugin" (Obsidian) или "web" («ЦУП Веб», 2026-09-02, magic-link).
+	// Веб-сессиям эффективная роль superadmin клэмпится до admin, см. requirePerm.
+	Channel string `json:"channel"`
 	jwt.RegisteredClaims
 }
 
@@ -95,6 +98,18 @@ func roleRank(role string) int {
 }
 
 type permEmailCtx struct{}
+type permChannelCtx struct{}
+
+// clampRoleForChannel — «ЦУП Веб» (2026-09-02): веб-сессии (channel="web")
+// никогда не действуют как superadmin, независимо от реальной роли в БД —
+// действия уровня superadmin (создание/правка лабораторий, назначение роли
+// superadmin другим) доступны только через Obsidian-плагин.
+func clampRoleForChannel(role, channel string) string {
+	if channel == "web" && role == "superadmin" {
+		return "admin"
+	}
+	return role
+}
 
 func (s *Server) roleFor(ctx context.Context, appID, email string) (string, error) {
 	var role string
@@ -166,12 +181,14 @@ func (s *Server) requirePerm(minRole string) func(http.HandlerFunc) http.Handler
 				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
 				return
 			}
+			role = clampRoleForChannel(role, claims.Channel)
 			if roleRank(role) < roleRank(minRole) {
 				writeJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden: insufficient role"})
 				return
 			}
 
 			ctx := context.WithValue(r.Context(), permEmailCtx{}, claims.Email)
+			ctx = context.WithValue(ctx, permChannelCtx{}, claims.Channel)
 			next(w, r.WithContext(ctx))
 		}
 	}
@@ -180,6 +197,14 @@ func (s *Server) requirePerm(minRole string) func(http.HandlerFunc) http.Handler
 // currentEmail возвращает email из контекста (установлен requirePerm).
 func currentEmail(r *http.Request) string {
 	if v, ok := r.Context().Value(permEmailCtx{}).(string); ok {
+		return v
+	}
+	return ""
+}
+
+// currentChannel возвращает channel из контекста (установлен requirePerm).
+func currentChannel(r *http.Request) string {
+	if v, ok := r.Context().Value(permChannelCtx{}).(string); ok {
 		return v
 	}
 	return ""
