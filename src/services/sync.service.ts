@@ -409,9 +409,9 @@ export class LimsSyncService {
     id: number,
     data: Partial<{
       code: string; name: string; location: string; responsible: string; status: string;
-      commissioned_at: string; service_life: string;
+      commissioned_at: string; service_life: string; type: 'main' | 'auxiliary';
       verification_cert_number: string; verification_cert_date: string;
-      verification_act_number: string; verification_act_date: string;
+      verification_act_number: string; verification_act_date: string; verification_expiry_date: string;
       calibration_interval_months: number;
     }>,
   ): Promise<void> {
@@ -520,13 +520,16 @@ export class LimsSyncService {
     }
   }
 
-  async setEquipmentMethod(id: number, methodId: number, role: 'main' | 'auxiliary'): Promise<void> {
+  /** Роль связи ('main'/'auxiliary') сервер больше не принимает от клиента —
+   * берёт её из equipment.type привязываемого оборудования (см. AGENTS.md,
+   * «Основное/Вспомогательное» — единая роль на всё оборудование). */
+  async setEquipmentMethod(id: number, methodId: number): Promise<void> {
     const token = await this.getToken();
     const res = await this.request({
       url: `${this.baseUrl}/api/lab/equipment/${id}/methods`,
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ method_id: methodId, role }),
+      body: JSON.stringify({ method_id: methodId }),
     });
     this.assertOk(res);
   }
@@ -592,6 +595,31 @@ export class LimsSyncService {
 
   async removeEquipmentAuxiliary(mainId: number, auxiliaryId: number): Promise<void> {
     await this.deleteEntity(`/api/lab/equipment/${mainId}/auxiliaries/${auxiliaryId}`);
+  }
+
+  /** Настройки оповещений о приближении срока поверки (admin+) — единые на все
+   * оборудование: список получателей (email через запятую), пороги в днях. */
+  async getEquipmentNotifySettings(): Promise<{ enabled: boolean; days: number[]; recipients: string }> {
+    const token = await this.getToken();
+    const res = await this.request({
+      url: `${this.baseUrl}/api/lab/equipment-notify-settings`,
+      method: 'GET',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    this.assertOk(res);
+    const data = JSON.parse(res.text) as { enabled?: boolean; days?: number[]; recipients?: string };
+    return { enabled: !!data.enabled, days: Array.isArray(data.days) ? data.days : [], recipients: data.recipients || '' };
+  }
+
+  async setEquipmentNotifySettings(settings: { enabled: boolean; days: number[]; recipients: string }): Promise<void> {
+    const token = await this.getToken();
+    const res = await this.request({
+      url: `${this.baseUrl}/api/lab/equipment-notify-settings`,
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(settings),
+    });
+    this.assertOk(res);
   }
 
   async listEquipmentDocuments(id: number): Promise<EquipmentDocument[]> {
