@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -318,29 +319,31 @@ type Equipment struct {
 	Status                    string `json:"status"`
 	CommissionedAt            string `json:"commissioned_at"`
 	ServiceLife               string `json:"service_life"`
+	Type                      string `json:"type"`
 	VerificationCertNumber    string `json:"verification_cert_number"`
 	VerificationCertDate      string `json:"verification_cert_date"`
 	VerificationCertFileURL   string `json:"verification_cert_file_url"`
 	VerificationActNumber     string `json:"verification_act_number"`
 	VerificationActDate       string `json:"verification_act_date"`
 	VerificationActFileURL    string `json:"verification_act_file_url"`
+	VerificationExpiryDate    string `json:"verification_expiry_date"`
 	CalibrationIntervalMonths *int   `json:"calibration_interval_months"`
 	CreatedAt                 string `json:"created_at"`
 	UpdatedAt                 string `json:"updated_at"`
 }
 
 const equipmentColumnsSQL = `id, code, name, location, responsible, last_calibration, next_calibration, status,
-	commissioned_at, service_life, verification_cert_number, verification_cert_date, verification_cert_file_url,
-	verification_act_number, verification_act_date, verification_act_file_url, calibration_interval_months,
-	created_at, updated_at`
+	commissioned_at, service_life, type, verification_cert_number, verification_cert_date, verification_cert_file_url,
+	verification_act_number, verification_act_date, verification_act_file_url, verification_expiry_date,
+	calibration_interval_months, created_at, updated_at`
 
 func scanEquipmentRow(row pgx.Row) (Equipment, error) {
 	var it Equipment
-	var lc, nc, commAt, certDate, actDate *time.Time
+	var lc, nc, commAt, certDate, actDate, expiryDate *time.Time
 	var ca, ua time.Time
 	err := row.Scan(&it.ID, &it.Code, &it.Name, &it.Location, &it.Responsible, &lc, &nc, &it.Status,
-		&commAt, &it.ServiceLife, &it.VerificationCertNumber, &certDate, &it.VerificationCertFileURL,
-		&it.VerificationActNumber, &actDate, &it.VerificationActFileURL, &it.CalibrationIntervalMonths,
+		&commAt, &it.ServiceLife, &it.Type, &it.VerificationCertNumber, &certDate, &it.VerificationCertFileURL,
+		&it.VerificationActNumber, &actDate, &it.VerificationActFileURL, &expiryDate, &it.CalibrationIntervalMonths,
 		&ca, &ua)
 	if err != nil {
 		return it, err
@@ -359,6 +362,9 @@ func scanEquipmentRow(row pgx.Row) (Equipment, error) {
 	}
 	if actDate != nil {
 		it.VerificationActDate = actDate.Format("2006-01-02")
+	}
+	if expiryDate != nil {
+		it.VerificationExpiryDate = expiryDate.Format("2006-01-02")
 	}
 	it.CreatedAt = ca.Format(time.RFC3339)
 	it.UpdatedAt = ua.Format(time.RFC3339)
@@ -441,10 +447,12 @@ func (s *Server) handleUpdateEquipment(w http.ResponseWriter, r *http.Request) {
 		Status                    *string `json:"status"`
 		CommissionedAt            *string `json:"commissioned_at"`
 		ServiceLife               *string `json:"service_life"`
+		Type                      *string `json:"type"`
 		VerificationCertNumber    *string `json:"verification_cert_number"`
 		VerificationCertDate      *string `json:"verification_cert_date"`
 		VerificationActNumber     *string `json:"verification_act_number"`
 		VerificationActDate       *string `json:"verification_act_date"`
+		VerificationExpiryDate    *string `json:"verification_expiry_date"`
 		CalibrationIntervalMonths *int    `json:"calibration_interval_months"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -453,6 +461,10 @@ func (s *Server) handleUpdateEquipment(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Code != nil && strings.TrimSpace(*req.Code) == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "code is required"})
+		return
+	}
+	if req.Type != nil && *req.Type != "main" && *req.Type != "auxiliary" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "type must be main or auxiliary"})
 		return
 	}
 	commissionedAt, commissionedPresent, ok := parseOptionalDate(req.CommissionedAt)
@@ -470,6 +482,11 @@ func (s *Server) handleUpdateEquipment(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid verification_act_date (want YYYY-MM-DD)"})
 		return
 	}
+	expiryDate, expiryPresent, ok := parseOptionalDate(req.VerificationExpiryDate)
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid verification_expiry_date (want YYYY-MM-DD)"})
+		return
+	}
 	tag, err := s.pool.Exec(r.Context(), `
 UPDATE equipment SET
 	code = COALESCE($2, code), name = COALESCE($3, name),
@@ -477,19 +494,23 @@ UPDATE equipment SET
 	status = COALESCE($6, status),
 	commissioned_at = CASE WHEN $7::boolean THEN $8::date ELSE commissioned_at END,
 	service_life = COALESCE($9, service_life),
-	verification_cert_number = COALESCE($10, verification_cert_number),
-	verification_cert_date = CASE WHEN $11::boolean THEN $12::date ELSE verification_cert_date END,
-	verification_act_number = COALESCE($13, verification_act_number),
-	verification_act_date = CASE WHEN $14::boolean THEN $15::date ELSE verification_act_date END,
-	calibration_interval_months = COALESCE($16, calibration_interval_months),
+	type = COALESCE($10, type),
+	verification_cert_number = COALESCE($11, verification_cert_number),
+	verification_cert_date = CASE WHEN $12::boolean THEN $13::date ELSE verification_cert_date END,
+	verification_act_number = COALESCE($14, verification_act_number),
+	verification_act_date = CASE WHEN $15::boolean THEN $16::date ELSE verification_act_date END,
+	verification_expiry_date = CASE WHEN $17::boolean THEN $18::date ELSE verification_expiry_date END,
+	calibration_interval_months = COALESCE($19, calibration_interval_months),
 	updated_at = now()
 WHERE id = $1`, id, req.Code, req.Name, req.Location, req.Responsible, req.Status,
 		commissionedPresent, commissionedAt,
 		req.ServiceLife,
+		req.Type,
 		req.VerificationCertNumber,
 		certPresent, certDate,
 		req.VerificationActNumber,
 		actPresent, actDate,
+		expiryPresent, expiryDate,
 		req.CalibrationIntervalMonths)
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -502,6 +523,15 @@ WHERE id = $1`, id, req.Code, req.Name, req.Location, req.Responsible, req.Statu
 	if tag.RowsAffected() == 0 {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "equipment not found"})
 		return
+	}
+	// type — единая роль на всё оборудование (2026-09-03), но method_equipment.role
+	// (per-link) остаётся источником, который читает calibration_curve.go — держим
+	// её синхронной с новым типом вместо переписывания тех запросов (см. AGENTS.md).
+	if req.Type != nil {
+		if _, err := s.pool.Exec(r.Context(),
+			`UPDATE method_equipment SET role = $2 WHERE equipment_id = $1`, id, *req.Type); err != nil {
+			log.Printf("handleUpdateEquipment: sync method_equipment.role: %v", err)
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }

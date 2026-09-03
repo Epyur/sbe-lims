@@ -88,6 +88,14 @@ func main() {
 		return
 	}
 
+	// Постоянный CLI-режим: точечный перенос результатов испытаний из старой
+	// ЛИМС (см. import_legacy_results.go) для заявок проекта OLD, у которых
+	// import-lpitrack-history создал саму заявку, но не результаты.
+	if len(os.Args) > 1 && os.Args[1] == "import-legacy-results" {
+		runImportLegacyResults(ctx, s, os.Args[2:])
+		return
+	}
+
 	if err := s.migrate(ctx); err != nil {
 		log.Fatalf("migrate: %v", err)
 	}
@@ -107,6 +115,11 @@ func main() {
 	// не привязан к стартовому ctx (у него таймаут 30с). Безопасен по умолчанию:
 	// без LAB_MAIL_ENABLED=true не стартует (см. email_ingest.go).
 	s.startEmailIngest(context.Background())
+
+	// Фоновая проверка приближающегося срока поверки оборудования (2026-09-03) —
+	// безопасен по умолчанию: без enabled=true в equipment_notify_settings ничего
+	// не шлёт (см. equipment_notify.go).
+	s.startEquipmentNotifyJob()
 
 	mux := http.NewServeMux()
 
@@ -205,6 +218,8 @@ func main() {
 	mux.HandleFunc("GET /api/lab/equipment/{id}/documents", s.requirePerm("viewer")(s.handleListEquipmentDocuments))
 	mux.HandleFunc("POST /api/lab/equipment/{id}/documents", s.requirePerm("editor")(s.handleUploadEquipmentDocument))
 	mux.HandleFunc("DELETE /api/lab/equipment/{id}/documents/{file_id}", s.requirePerm("editor")(s.handleDeleteEquipmentDocument))
+	mux.HandleFunc("GET /api/lab/equipment-notify-settings", s.requirePerm("admin")(s.handleGetEquipmentNotifySettings))
+	mux.HandleFunc("POST /api/lab/equipment-notify-settings", s.requirePerm("admin")(s.handleSetEquipmentNotifySettings))
 	mux.HandleFunc("GET /api/lab/equipment-links", s.requirePerm("viewer")(s.handleListAllEquipmentLinks))
 	mux.HandleFunc("GET /api/lab/method-equipment", s.requirePerm("viewer")(s.handleListAllMethodEquipment))
 	mux.HandleFunc("POST /api/lab/equipment/{id}/auxiliaries", s.requirePerm("editor")(s.handleAddEquipmentAuxiliary))
@@ -535,6 +550,53 @@ func (s *Server) migrate(ctx context.Context) error {
 		`ALTER TABLE equipment ADD COLUMN IF NOT EXISTS verification_act_file_key TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE equipment ADD COLUMN IF NOT EXISTS verification_act_file_url TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE equipment ADD COLUMN IF NOT EXISTS calibration_interval_months INT`,
+		// type (2026-09-03) — единая роль оборудования "main"/"auxiliary", заменяет
+		// прежний per-method выбор (method_equipment.role, см. ниже) по прямому
+		// запросу пользователя: карточка сама решает, основное это оборудование или
+		// вспомогательное, а не каждая связь с методом отдельно. Колонка
+		// method_equipment.role НЕ удаляется и не перестаёт читаться — её продолжает
+		// использовать calibration_curve.go (resolveSingleMainEquipment,
+		// isMainEquipmentOfMethod); handleUpdateEquipment/handleSetEquipmentMethod
+		// (equipment_ext.go) держат её синхронной с equipment.type, чтобы не
+		// переписывать эти запросы.
+		`ALTER TABLE equipment ADD COLUMN IF NOT EXISTS type TEXT NOT NULL DEFAULT 'main'`,
+		`DO $$ BEGIN
+			IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'equipment_type_check') THEN
+				ALTER TABLE equipment ADD CONSTRAINT equipment_type_check CHECK (type IN ('main', 'auxiliary'));
+			END IF;
+		END $$`,
+		// Бэкофилл при первом накате: оборудование, у которого среди существующих
+		// method_equipment есть роль 'auxiliary' и НЕТ ни одной 'main' — считаем
+		// вспомогательным; остальное (включая оборудование без единой привязки)
+		// остаётся на дефолте колонки 'main'.
+		`UPDATE equipment SET type = 'auxiliary'
+			WHERE id IN (
+				SELECT equipment_id FROM method_equipment GROUP BY equipment_id
+				HAVING bool_or(role = 'auxiliary') AND NOT bool_or(role = 'main')
+			) AND type = 'main'`,
+		// verification_expiry_date (2026-09-03) — срок окончания действия акта
+		// поверки (в отличие от verification_act_date — даты САМОГО акта, у него
+		// раньше не было срока действия вовсе). Основа для оповещений — см.
+		// equipment_notify.go.
+		`ALTER TABLE equipment ADD COLUMN IF NOT EXISTS verification_expiry_date DATE`,
+		// Оповещения о приближении срока поверки (2026-09-03) — единые настройки на
+		// весь модуль (получатели+пороги в днях), по образцу
+		// documents_notify_settings/documents_notifications в sbe-documents, см.
+		// equipment_notify.go.
+		`CREATE TABLE IF NOT EXISTS equipment_notify_settings (
+			id INT PRIMARY KEY DEFAULT 1,
+			enabled BOOLEAN NOT NULL DEFAULT false,
+			days TEXT NOT NULL DEFAULT '30,14,7',
+			recipients TEXT NOT NULL DEFAULT ''
+		)`,
+		`INSERT INTO equipment_notify_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING`,
+		`CREATE TABLE IF NOT EXISTS equipment_notifications (
+			equipment_id BIGINT NOT NULL REFERENCES equipment(id) ON DELETE CASCADE,
+			day INT NOT NULL,
+			email TEXT NOT NULL DEFAULT '',
+			sent_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+			PRIMARY KEY (equipment_id, day, email)
+		)`,
 		// role — 'main'|'auxiliary', на каждой связи оборудование↔метод отдельно (одно
 		// и то же оборудование может быть основным для одного метода и вспомогательным
 		// для другого). is_required — другая, уже существующая семантика, не трогаем.

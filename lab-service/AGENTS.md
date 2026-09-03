@@ -2593,3 +2593,42 @@ docker compose exec lab wget -qO- http://localhost:3000/api/lab/health   # вн�
 - `go build`/`go vet`/`go test` — чисто. Задеплоено (`docker compose up -d --build
   lab`), health ok, колонки подтверждены (`information_schema.columns`), сценарии
   проверены вручную (триггер ЕКН/отправителя, клэмп цикла на смене родителя).
+
+## Оборудование: единая роль, цикл-защита, оповещения о поверке (2026-09-03)
+
+Backend-часть серии UX/модель-фиксов модуля «Оборудование» sbe-lims (клиентская
+часть, полная мотивация — `sbe-lims/AGENTS.md`, запись 2026-09-03).
+
+- **`equipment.type`** (`'main'\|'auxiliary'`, DEFAULT `'main'`, CHECK) — единая роль
+  оборудования, заменяет прежний per-method выбор в `method_equipment.role`
+  (`method_equipment` НЕ переписан — эта колонка используется `calibration_curve.go`,
+  переписывать было рискованно). Вместо этого `handleUpdateEquipment`
+  (`lims_refs.go`) при смене `type` синхронно обновляет
+  `UPDATE method_equipment SET role=$type WHERE equipment_id=$id`, а
+  `handleSetEquipmentMethod` (`equipment_ext.go`) больше не принимает `role` от
+  клиента — сам подставляет `equipment.type` при INSERT. Бэкофилл при накате
+  миграции: оборудование с ролью `'auxiliary'` хотя бы на одной связи и НИ одной
+  `'main'` — считается вспомогательным, остальное — на дефолте `'main'`.
+- **Защита от циклов** в `handleAddEquipmentAuxiliary` (`equipment_ext.go`) —
+  ограничение вложенности `equipment_links` в один уровень снято на клиенте
+  (цепочки любой глубины), поэтому сервер сам не даёт замкнуть граф: рекурсивный
+  CTE проверяет, не входит ли будущий «основной» в список потомков будущего
+  «вспомогательного» — если входит, 400 `"привязка образует цикл"`.
+- **`equipment.verification_expiry_date`** (DATE, nullable) — срок окончания
+  действия акта поверки, вводится вручную (в отличие от `next_calibration`,
+  который сервер сам считает из `calibration_interval_months` + журнала).
+- **Новый файл `equipment_notify.go`** — точная калька
+  `sbe-documents/documents-service/notify.go`: таблицы
+  `equipment_notify_settings` (id=1, enabled/days/recipients) и
+  `equipment_notifications` (дедуп-лог `equipment_id+day+email`),
+  `startEquipmentNotifyJob()` — тикер раз в 6ч (запущен из `main()` рядом с
+  `startEmailIngest`), `checkEquipmentNotifications()` шлёт письма через уже
+  готовый `sendMailWithAttachment` (`outbound_email.go`, те же
+  `LAB_MAIL_*`/`LAB_SMTP_*` креды). Роуты — `GET/POST
+  /api/lab/equipment-notify-settings` (`requirePerm("admin")`).
+- `sbe-lims-mobile` не затронут — обращается к `equipment/{id}/methods` только
+  GET'ом, JSON-контракт ответа не менялся (`role` в `EquipmentMethodLink`
+  по-прежнему присутствует, просто теперь всегда равен `equipment.type`).
+- `go build ./...`/`go vet ./...` — чисто. **Не задеплоено** — только локальная
+  сборка на ветке `backend`; миграции применятся при следующем
+  `docker compose up -d --build lab`. Живой E2E не проводился.

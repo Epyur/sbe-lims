@@ -278,6 +278,11 @@ export class LimsView extends ItemView {
 
   private bodyEl!: HTMLElement;
 
+  /** id оборудования, чьи карточки должны оставаться раскрытыми после перестройки
+   * списка (renderEquipment) — иначе прикрепление/удаление сворачивает всё и
+   * пользователь теряет из виду карточку, с которой только что работал. */
+  private openEquipmentIds = new Set<number>();
+
   constructor(leaf: WorkspaceLeaf, plugin: SbeLimsPlugin) {
     super(leaf);
     this.plugin = plugin;
@@ -1741,7 +1746,10 @@ export class LimsView extends ItemView {
    * заполняется один раз, при первом раскрытии.
    * Возвращает body — вызывающий код (без onFirstOpen) создаёт содержимое сразу в
    * нём вместо родительского контейнера. */
-  private renderCollapsibleSection(parent: HTMLElement, title: string, onFirstOpen?: (body: HTMLElement) => void): HTMLElement {
+  private renderCollapsibleSection(
+    parent: HTMLElement, title: string, onFirstOpen?: (body: HTMLElement) => void,
+    opts?: { initialOpen?: boolean; onToggle?: (open: boolean) => void },
+  ): HTMLElement {
     const head = parent.createDiv({ cls: 'tn-lims-section-head', attr: { role: 'button', tabindex: '0' } });
     const chevron = head.createSpan({ cls: 'tn-lims-section-chevron', text: '▸' });
     head.createSpan({ text: title });
@@ -1756,11 +1764,13 @@ export class LimsView extends ItemView {
         rendered = true;
         onFirstOpen(body);
       }
+      opts?.onToggle?.(open);
     };
     head.addEventListener('click', () => setOpen(!open));
     head.addEventListener('keydown', (ev) => {
       if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); setOpen(!open); }
     });
+    if (opts?.initialOpen) setOpen(true);
     return body;
   }
 
@@ -3912,8 +3922,8 @@ export class LimsView extends ItemView {
       }
       // Оборудование, привязанное хотя бы к одному основному (equipment_links,
       // 2026-08-26), не показывается отдельной карточкой верхнего уровня — только
-      // внутри карточки(-ек) своего основного прибора, как документы (см.
-      // renderEquipmentRelated).
+      // внутри карточки(-ек) своего основного прибора, всегда видимым вложенным
+      // списком, как связанные документы в sbe-documents (см. renderEquipmentCard).
       const auxiliaryIds = new Set(links.map(l => l.auxiliary_equipment_id));
       for (const eq of equipment) {
         if (auxiliaryIds.has(eq.id)) continue;
@@ -3929,11 +3939,21 @@ export class LimsView extends ItemView {
    * не было — дата более свежей из поверок, сертификат/акт). Остальные поля, сканы,
    * документация, журнал калибровок, привязка к методам/оборудованию — только в
    * раскрытых деталях (2026-08-26, прямой запрос пользователя — не перегружать общий
-   * список). nested — карточка вспомогательного прибора внутри карточки основного:
-   * та же полная детализация, но БЕЗ собственного списка вспомогательных (один
-   * уровень вложенности, без рекурсии — см. renderEquipmentRelated). */
+   * список). initialOpen/openEquipmentIds — см. поле класса, сохраняет раскрытость
+   * карточки через перестройку всего списка.
+   *
+   * Вспомогательное оборудование (2026-09-03, по образцу «Документов» —
+   * renderCard/renderChildItem в sbe-documents/src/ui/documents-view.ts: связанные
+   * документы там ВСЕГДА видны вложенным списком внутри карточки родителя в общем
+   * перечне, не только при открытии карточки) — показывается здесь же, СРАЗУ, тем
+   * же рендером карточки рекурсивно (своя картинка/сканы/калибровка нужны и у
+   * вложенного прибора, поэтому не лёгкий read-only рядок, как в «Документах», а
+   * полноценная — но по умолчанию свёрнутая — карточка). В отличие от документов
+   * (там `parent_id` — связь один-к-одному, у вложенного нет своей карточки) у
+   * оборудования связь many-to-many: один вспомогательный прибор, привязанный к
+   * нескольким основным, закономерно отрисуется здесь по разу под КАЖДЫМ из них. */
   private renderEquipmentCard(
-    container: HTMLElement, eq: Equipment, allEquipment: Equipment[], links: EquipmentLink[], nested = false,
+    container: HTMLElement, eq: Equipment, allEquipment: Equipment[], links: EquipmentLink[],
   ): void {
     const card = container.createDiv({ cls: 'tn-lims-method' });
     const verificationDates = [eq.verification_cert_date, eq.verification_act_date].filter(Boolean).sort();
@@ -3943,14 +3963,28 @@ export class LimsView extends ItemView {
       : latestVerification
         ? `поверка ${this.formatDate(latestVerification)}`
         : 'нет данных о калибровке/поверке';
-    const header = `${eq.code} — ${eq.name || 'без названия'} · ${dateLabel}`;
+    const typeLabel = eq.type === 'auxiliary' ? 'Вспомогательное · ' : '';
+    const header = `${eq.code} — ${eq.name || 'без названия'} · ${typeLabel}${dateLabel}`;
     this.renderCollapsibleSection(card, header, (body) => {
-      void this.renderEquipmentCardDetails(body, eq, allEquipment, links, nested);
+      void this.renderEquipmentCardDetails(body, eq, allEquipment, links);
+    }, {
+      initialOpen: this.openEquipmentIds.has(eq.id),
+      onToggle: (open) => { if (open) this.openEquipmentIds.add(eq.id); else this.openEquipmentIds.delete(eq.id); },
     });
+
+    const auxiliaries = links.filter(l => l.main_equipment_id === eq.id);
+    if (auxiliaries.length > 0) {
+      const byId = new Map(allEquipment.map(e => [e.id, e]));
+      const childrenWrap = card.createDiv({ cls: 'tn-lims-equipment-children' });
+      for (const link of auxiliaries) {
+        const auxEq = byId.get(link.auxiliary_equipment_id);
+        if (auxEq) this.renderEquipmentCard(childrenWrap, auxEq, allEquipment, links);
+      }
+    }
   }
 
   private async renderEquipmentCardDetails(
-    body: HTMLElement, eq: Equipment, allEquipment: Equipment[], links: EquipmentLink[], nested: boolean,
+    body: HTMLElement, eq: Equipment, allEquipment: Equipment[], links: EquipmentLink[],
   ): Promise<void> {
     body.createDiv({ cls: 'tn-lims-meta' }).setText('Загрузка…');
     try {
@@ -3983,15 +4017,21 @@ export class LimsView extends ItemView {
       const docsDiv = body.createDiv({ cls: 'tn-lims-mb12' });
       void this.renderEquipmentDocuments(docsDiv, eq);
 
-      const methodsDiv = body.createDiv({ cls: 'tn-lims-mb12' });
-      this.renderEquipmentMethodLinks(methodsDiv, eq, methodLinks);
+      // Привязка к методам — только у «Основного» оборудования (2026-09-03: роль
+      // теперь единая на всё оборудование, eq.type, а не per-method выбор — у
+      // вспомогательного оборудования смысла привязываться к методу напрямую нет,
+      // только к основному/другому вспомогательному прибору, см. renderEquipmentRelated).
+      if (eq.type === 'main') {
+        const methodsDiv = body.createDiv({ cls: 'tn-lims-mb12' });
+        this.renderEquipmentMethodLinks(methodsDiv, eq, methodLinks);
+      }
 
       const relatedDiv = body.createDiv({ cls: 'tn-lims-mb12' });
-      this.renderEquipmentRelated(relatedDiv, eq, allEquipment, links, nested);
+      this.renderEquipmentRelated(relatedDiv, eq, allEquipment, links);
 
-      // Поля калибровки — только если карточка «Основное» хотя бы для одной связи
-      // (прямое решение пользователя, спека 2026-08-26).
-      if (methodLinks.some(l => l.role === 'main')) {
+      // Поля калибровки — только для «Основного» оборудования (2026-09-03: раньше
+      // проверялось по роли связи с методом, теперь — по eq.type напрямую).
+      if (eq.type === 'main') {
         const calibDiv = body.createDiv({ cls: 'tn-lims-mb12' });
         void this.renderEquipmentCalibrationBlock(calibDiv, eq, methodLinks);
       }
@@ -4002,6 +4042,7 @@ export class LimsView extends ItemView {
           if (!window.confirm(`Удалить оборудование «${eq.name}»?`)) return;
           try {
             await this.plugin.syncService.deleteEquipment(eq.id);
+            this.openEquipmentIds.delete(eq.id);
             new Notice('Оборудование удалено');
             await this.renderEquipment();
           } catch (e: unknown) {
@@ -4045,10 +4086,19 @@ export class LimsView extends ItemView {
       attr: { type: 'text', placeholder: 'Нормативный срок эксплуатации, напр. 10 лет' }, cls: 'tn-lims-input',
     });
     lifeInp.value = eq.service_life;
+    // Основное/Вспомогательное (2026-09-03) — единая роль на всё оборудование
+    // (заменяет прежний per-method выбор, см. AGENTS.md). От неё зависит, виден ли
+    // ниже раздел «Привязанные методы» и блок калибровки (renderEquipmentCardDetails).
+    const typeRow = form.createDiv({ cls: 'tn-lims-flex' });
+    const typeCheckbox = typeRow.createEl('input', { attr: { type: 'checkbox' } });
+    typeCheckbox.checked = eq.type !== 'auxiliary';
+    typeRow.createSpan({ text: 'Основное оборудование (снять — вспомогательное)' });
     const saveBtn = form.createEl('button', { text: '💾 Сохранить', cls: 'tn-btn tn-btn-primary' });
     saveBtn.addEventListener('click', async () => {
       if (!codeInp.value.trim() || !nameInp.value.trim()) { new Notice('Укажите код и название'); return; }
       try {
+        const newType: 'main' | 'auxiliary' = typeCheckbox.checked ? 'main' : 'auxiliary';
+        const typeChanged = newType !== eq.type;
         await this.plugin.syncService.updateEquipment(eq.id, {
           code: codeInp.value.trim(),
           name: nameInp.value.trim(),
@@ -4057,9 +4107,24 @@ export class LimsView extends ItemView {
           status: statusInp.value.trim(),
           commissioned_at: commInp.value,
           service_life: lifeInp.value.trim(),
+          type: newType,
         });
         new Notice('Оборудование обновлено');
-        await this.renderEquipment();
+        if (typeChanged) {
+          // Меняется состав видимых секций карточки (методы/калибровка) — точечно
+          // не обновить, нужен полный ре-рендер; карточка остаётся раскрытой сама
+          // (openEquipmentIds), см. renderEquipmentCard.
+          this.openEquipmentIds.add(eq.id);
+          await this.renderEquipment();
+        } else {
+          eq.code = codeInp.value.trim();
+          eq.name = nameInp.value.trim();
+          eq.location = locInp.value.trim();
+          eq.responsible = respInp.value.trim();
+          eq.status = statusInp.value.trim();
+          eq.commissioned_at = commInp.value;
+          eq.service_life = lifeInp.value.trim();
+        }
       } catch (e: unknown) {
         new Notice(`Ошибка: ${errorMessage(e)}`);
       }
@@ -4067,7 +4132,12 @@ export class LimsView extends ItemView {
   }
 
   /** Сертификат/акт поверки — номер+дата (обычный PATCH) + скан (отдельный multipart-
-   * эндпоинт). kind различает, какую пару колонок обновлять на сервере. */
+   * эндпоинт). kind различает, какую пару колонок обновлять на сервере. Сохранение и
+   * загрузка скана НЕ вызывают renderEquipment() (2026-09-03, п.2/п.3 жалобы
+   * пользователя) — карточка не схлопывается, а несохранённые соседние поля (номер/
+   * дата второго блока и т.п.) не стираются: ссылка на текущий скан обновляется
+   * точечно, в самом этом блоке. «Действует до» — только у акта поверки (акт поверки,
+   * не сертификат аттестации, имеет срок действия — новое поле, п.1 жалобы). */
   private renderEquipmentVerificationBlock(
     body: HTMLElement, eq: Equipment, kind: 'verification_cert' | 'verification_act', label: string,
     number: string, date: string, fileUrl: string,
@@ -4076,6 +4146,9 @@ export class LimsView extends ItemView {
     wrap.createEl('strong', { text: label + ': ' });
     if (!this.canEditRefs) {
       wrap.createSpan({ text: `№ ${number || '—'} от ${date ? this.formatDate(date) : '—'}` });
+      if (kind === 'verification_act') {
+        wrap.createSpan({ text: eq.verification_expiry_date ? ` · действует до ${this.formatDate(eq.verification_expiry_date)}` : '' });
+      }
       if (fileUrl) wrap.createEl('a', { text: ' 📎 скан', attr: { href: fileUrl, target: '_blank' } });
       return;
     }
@@ -4084,6 +4157,12 @@ export class LimsView extends ItemView {
     numInp.value = number;
     const dateInp = row.createEl('input', { attr: { type: 'date' }, cls: 'tn-lims-input' });
     dateInp.value = date;
+    let expiryInp: HTMLInputElement | null = null;
+    if (kind === 'verification_act') {
+      row.createSpan({ text: 'Действует до:', cls: 'tn-lims-meta' });
+      expiryInp = row.createEl('input', { attr: { type: 'date' }, cls: 'tn-lims-input' });
+      expiryInp.value = eq.verification_expiry_date;
+    }
     const saveBtn = row.createEl('button', { text: '💾', cls: 'tn-btn tn-btn-ghost' });
     saveBtn.addEventListener('click', async () => {
       try {
@@ -4091,19 +4170,30 @@ export class LimsView extends ItemView {
           await this.plugin.syncService.updateEquipment(eq.id, {
             verification_cert_number: numInp.value.trim(), verification_cert_date: dateInp.value,
           });
+          eq.verification_cert_number = numInp.value.trim();
+          eq.verification_cert_date = dateInp.value;
         } else {
           await this.plugin.syncService.updateEquipment(eq.id, {
             verification_act_number: numInp.value.trim(), verification_act_date: dateInp.value,
+            verification_expiry_date: expiryInp?.value || '',
           });
+          eq.verification_act_number = numInp.value.trim();
+          eq.verification_act_date = dateInp.value;
+          eq.verification_expiry_date = expiryInp?.value || '';
         }
         new Notice('Сохранено');
-        await this.renderEquipment();
       } catch (e: unknown) {
         new Notice(`Ошибка: ${errorMessage(e)}`);
       }
     });
     const fileInp = row.createEl('input', { attr: { type: 'file' } });
     const uploadBtn = row.createEl('button', { text: '📎 Загрузить скан', cls: 'tn-btn tn-btn-ghost' });
+    const scanLinkWrap = row.createSpan();
+    const renderScanLink = (url: string): void => {
+      scanLinkWrap.empty();
+      if (url) scanLinkWrap.createEl('a', { text: '📎 текущий скан', attr: { href: url, target: '_blank' } });
+    };
+    renderScanLink(fileUrl);
     uploadBtn.addEventListener('click', async () => {
       const file = fileInp.files?.[0];
       if (!file) { new Notice('Выберите файл'); return; }
@@ -4111,12 +4201,19 @@ export class LimsView extends ItemView {
         const data = await file.arrayBuffer();
         await this.plugin.syncService.uploadEquipmentScan(eq.id, kind, data, file.name);
         new Notice('Скан загружен');
-        await this.renderEquipment();
+        // Точечное обновление вместо renderEquipment(): свежий URL узнаём из полного
+        // списка (точечного GET одного оборудования на клиенте нет), но правим только
+        // ссылку в ЭТОМ блоке — соседние несохранённые поля не трогаем.
+        const fresh = (await this.plugin.syncService.listEquipment()).find(e => e.id === eq.id);
+        if (fresh) {
+          const url = kind === 'verification_cert' ? fresh.verification_cert_file_url : fresh.verification_act_file_url;
+          if (kind === 'verification_cert') eq.verification_cert_file_url = url; else eq.verification_act_file_url = url;
+          renderScanLink(url);
+        }
       } catch (e: unknown) {
         new Notice(`Ошибка: ${errorMessage(e)}`);
       }
     });
-    if (fileUrl) row.createEl('a', { text: '📎 текущий скан', attr: { href: fileUrl, target: '_blank' } });
   }
 
   private async renderEquipmentDocuments(container: HTMLElement, eq: Equipment): Promise<void> {
@@ -4135,7 +4232,7 @@ export class LimsView extends ItemView {
             try {
               await this.plugin.syncService.deleteEquipmentDocument(eq.id, d.id);
               new Notice('Файл удалён');
-              await this.renderEquipment();
+              await this.renderEquipmentDocuments(container, eq);
             } catch (e: unknown) {
               new Notice(`Ошибка: ${errorMessage(e)}`);
             }
@@ -4153,7 +4250,7 @@ export class LimsView extends ItemView {
             const data = await file.arrayBuffer();
             await this.plugin.syncService.uploadEquipmentDocument(eq.id, data, file.name);
             new Notice('Файл загружен');
-            await this.renderEquipment();
+            await this.renderEquipmentDocuments(container, eq);
           } catch (e: unknown) {
             new Notice(`Ошибка: ${errorMessage(e)}`);
           }
@@ -4165,35 +4262,25 @@ export class LimsView extends ItemView {
     }
   }
 
+  /** Привязка к методам — только у «Основного» оборудования (вызывается из
+   * renderEquipmentCardDetails только когда eq.type === 'main'). Роль связи
+   * ('main') сервер выставляет сам из eq.type (2026-09-03) — здесь только
+   * привязать/отвязать метод, без выбора роли (та раньше жила в per-link select). */
   private renderEquipmentMethodLinks(container: HTMLElement, eq: Equipment, links: EquipmentMethodLink[]): void {
     container.createEl('strong', { text: 'Привязанные методы' });
     if (links.length === 0) container.createDiv({ cls: 'tn-lims-meta' }).setText('Не привязано ни к одному методу.');
     for (const link of links) {
       const row = container.createDiv({ cls: 'tn-lims-flex' });
       row.createSpan({ text: this.methodName(link.method_id) });
-      if (!this.canEditRefs) {
-        row.createSpan({ text: link.role === 'main' ? ' — Основное' : ' — Вспомогательное' });
-        continue;
-      }
-      const roleSelect = row.createEl('select', { cls: 'tn-lims-input' });
-      roleSelect.createEl('option', { value: 'main', text: 'Основное' });
-      roleSelect.createEl('option', { value: 'auxiliary', text: 'Вспомогательное' });
-      roleSelect.value = link.role;
-      roleSelect.addEventListener('change', async () => {
-        try {
-          await this.plugin.syncService.setEquipmentMethod(eq.id, link.method_id, roleSelect.value as 'main' | 'auxiliary');
-          new Notice('Роль обновлена');
-          await this.renderEquipment();
-        } catch (e: unknown) {
-          new Notice(`Ошибка: ${errorMessage(e)}`);
-        }
-      });
+      if (!this.canEditRefs) continue;
       const delBtn = row.createEl('button', { text: '✖', cls: 'tn-btn tn-btn-ghost' });
       delBtn.addEventListener('click', async () => {
         try {
           await this.plugin.syncService.deleteEquipmentMethod(eq.id, link.method_id);
           new Notice('Связь удалена');
-          await this.renderEquipment();
+          const fresh = await this.plugin.syncService.listEquipmentMethods(eq.id);
+          container.empty();
+          this.renderEquipmentMethodLinks(container, eq, fresh);
         } catch (e: unknown) {
           new Notice(`Ошибка: ${errorMessage(e)}`);
         }
@@ -4208,17 +4295,16 @@ export class LimsView extends ItemView {
         for (const m of available) {
           methodSelect.createEl('option', { value: String(m.id), text: `${m.code} — ${m.name || 'без названия'}` });
         }
-        const roleSelect = addRow.createEl('select', { cls: 'tn-lims-input' });
-        roleSelect.createEl('option', { value: 'main', text: 'Основное' });
-        roleSelect.createEl('option', { value: 'auxiliary', text: 'Вспомогательное' });
         const addBtn = addRow.createEl('button', { text: '➕ Привязать метод', cls: 'tn-btn tn-btn-ghost' });
         addBtn.addEventListener('click', async () => {
           const methodId = Number(methodSelect.value);
           if (!methodId) return;
           try {
-            await this.plugin.syncService.setEquipmentMethod(eq.id, methodId, roleSelect.value as 'main' | 'auxiliary');
+            await this.plugin.syncService.setEquipmentMethod(eq.id, methodId);
             new Notice('Метод привязан');
-            await this.renderEquipment();
+            const fresh = await this.plugin.syncService.listEquipmentMethods(eq.id);
+            container.empty();
+            this.renderEquipmentMethodLinks(container, eq, fresh);
           } catch (e: unknown) {
             new Notice(`Ошибка: ${errorMessage(e)}`);
           }
@@ -4230,60 +4316,62 @@ export class LimsView extends ItemView {
   /** Привязка оборудование↔оборудование (2026-08-26, независимо от
    * EquipmentMethodLink — тот определяет видимость блока калибровки для метода,
    * этот — только группировку/отображение в общем списке): вспомогательные
-   * приборы, прикреплённые к этому как к основному (nested-карточки, скрыты из
-   * общего списка верхнего уровня — см. renderEquipment), и основные приборы, к
-   * которым прикреплён этот (если он сам чей-то вспомогательный — many-to-many,
-   * можно быть привязанным к нескольким основным). Вложенные карточки (nested)
-   * не показывают свой собственный список вспомогательных — один уровень
-   * вложенности, без рекурсии. */
+   * приборы, прикреплённые к этому как к основному, и основные приборы, к которым
+   * прикреплён этот (если он сам чей-то вспомогательный — many-to-many, можно
+   * быть привязанным к нескольким основным). Цепочки любой глубины разрешены
+   * (2026-09-03), бэкенд (handleAddEquipmentAuxiliary) отклоняет привязку, которая
+   * замкнула бы цикл. Здесь только управление связью (привязать/отвязать) —
+   * сами карточки вспомогательного оборудования сюда НЕ дублируются: они уже
+   * показаны всегда видимыми прямо в общем перечне под карточкой этого прибора,
+   * см. renderEquipmentCard (2026-09-03, по образцу «Документов» — не показывать
+   * одну и ту же карточку дважды). */
   private renderEquipmentRelated(
-    container: HTMLElement, eq: Equipment, allEquipment: Equipment[], links: EquipmentLink[], nested: boolean,
+    container: HTMLElement, eq: Equipment, allEquipment: Equipment[], links: EquipmentLink[],
   ): void {
     const byId = new Map(allEquipment.map(e => [e.id, e]));
     container.createEl('strong', { text: 'Связанное оборудование' });
 
-    if (!nested) {
-      const auxiliaries = links.filter(l => l.main_equipment_id === eq.id);
-      container.createDiv({ cls: 'tn-lims-meta' }).setText('Вспомогательное оборудование:');
-      if (auxiliaries.length === 0) container.createDiv({ cls: 'tn-lims-meta' }).setText('Не привязано.');
-      for (const link of auxiliaries) {
-        const auxEq = byId.get(link.auxiliary_equipment_id);
-        if (!auxEq) continue;
-        const row = container.createDiv();
-        this.renderEquipmentCard(row, auxEq, allEquipment, links, /* nested */ true);
-        if (this.canEditRefs) {
-          const detachBtn = row.createEl('button', { text: '✖ Отвязать', cls: 'tn-btn tn-btn-ghost' });
-          detachBtn.addEventListener('click', async () => {
-            try {
-              await this.plugin.syncService.removeEquipmentAuxiliary(eq.id, auxEq.id);
-              new Notice('Связь удалена');
-              await this.renderEquipment();
-            } catch (e: unknown) {
-              new Notice(`Ошибка: ${errorMessage(e)}`);
-            }
-          });
-        }
-      }
+    const auxiliaries = links.filter(l => l.main_equipment_id === eq.id);
+    container.createDiv({ cls: 'tn-lims-meta' }).setText('Вспомогательное оборудование:');
+    if (auxiliaries.length === 0) container.createDiv({ cls: 'tn-lims-meta' }).setText('Не привязано.');
+    for (const link of auxiliaries) {
+      const auxEq = byId.get(link.auxiliary_equipment_id);
+      const row = container.createDiv({ cls: 'tn-lims-flex' });
+      row.createSpan({ text: auxEq ? `${auxEq.code} — ${auxEq.name || 'без названия'}` : `#${link.auxiliary_equipment_id}` });
       if (this.canEditRefs) {
-        const linkedAuxIds = new Set(auxiliaries.map(l => l.auxiliary_equipment_id));
-        const candidates = allEquipment.filter(e => e.id !== eq.id && !linkedAuxIds.has(e.id));
-        if (candidates.length > 0) {
-          const addRow = container.createDiv({ cls: 'tn-lims-flex' });
-          const select = addRow.createEl('select', { cls: 'tn-lims-input' });
-          for (const c of candidates) select.createEl('option', { value: String(c.id), text: `${c.code} — ${c.name || 'без названия'}` });
-          const addBtn = addRow.createEl('button', { text: '➕ Прикрепить вспомогательный прибор', cls: 'tn-btn tn-btn-ghost' });
-          addBtn.addEventListener('click', async () => {
-            const auxId = Number(select.value);
-            if (!auxId) return;
-            try {
-              await this.plugin.syncService.addEquipmentAuxiliary(eq.id, auxId);
-              new Notice('Прибор привязан');
-              await this.renderEquipment();
-            } catch (e: unknown) {
-              new Notice(`Ошибка: ${errorMessage(e)}`);
-            }
-          });
-        }
+        const detachBtn = row.createEl('button', { text: '✖ Отвязать', cls: 'tn-btn tn-btn-ghost' });
+        detachBtn.addEventListener('click', async () => {
+          try {
+            await this.plugin.syncService.removeEquipmentAuxiliary(eq.id, link.auxiliary_equipment_id);
+            new Notice('Связь удалена');
+            this.openEquipmentIds.add(link.auxiliary_equipment_id);
+            await this.renderEquipment();
+          } catch (e: unknown) {
+            new Notice(`Ошибка: ${errorMessage(e)}`);
+          }
+        });
+      }
+    }
+    if (this.canEditRefs) {
+      const linkedAuxIds = new Set(auxiliaries.map(l => l.auxiliary_equipment_id));
+      const candidates = allEquipment.filter(e => e.id !== eq.id && !linkedAuxIds.has(e.id));
+      if (candidates.length > 0) {
+        const addRow = container.createDiv({ cls: 'tn-lims-flex' });
+        const select = addRow.createEl('select', { cls: 'tn-lims-input' });
+        for (const c of candidates) select.createEl('option', { value: String(c.id), text: `${c.code} — ${c.name || 'без названия'}` });
+        const addBtn = addRow.createEl('button', { text: '➕ Прикрепить вспомогательный прибор', cls: 'tn-btn tn-btn-ghost' });
+        addBtn.addEventListener('click', async () => {
+          const auxId = Number(select.value);
+          if (!auxId) return;
+          try {
+            await this.plugin.syncService.addEquipmentAuxiliary(eq.id, auxId);
+            new Notice('Прибор привязан');
+            this.openEquipmentIds.add(auxId);
+            await this.renderEquipment();
+          } catch (e: unknown) {
+            new Notice(`Ошибка: ${errorMessage(e)}`);
+          }
+        });
       }
     }
 
@@ -4300,6 +4388,7 @@ export class LimsView extends ItemView {
           try {
             await this.plugin.syncService.removeEquipmentAuxiliary(link.main_equipment_id, eq.id);
             new Notice('Связь удалена');
+            this.openEquipmentIds.add(eq.id);
             await this.renderEquipment();
           } catch (e: unknown) {
             new Notice(`Ошибка: ${errorMessage(e)}`);
@@ -4321,6 +4410,7 @@ export class LimsView extends ItemView {
           try {
             await this.plugin.syncService.addEquipmentAuxiliary(mainId, eq.id);
             new Notice('Прибор привязан');
+            this.openEquipmentIds.add(eq.id);
             await this.renderEquipment();
           } catch (e: unknown) {
             new Notice(`Ошибка: ${errorMessage(e)}`);
@@ -4342,7 +4432,10 @@ export class LimsView extends ItemView {
       container.empty();
       container.createEl('strong', { text: 'Калибровка (основное оборудование)' });
 
-      const mainMethodIds = methodLinks.filter(l => l.role === 'main').map(l => l.method_id);
+      // Раньше role по каждой связи, теперь блок и так рендерится только при
+      // eq.type === 'main' (renderEquipmentCardDetails) — все привязанные методы
+      // это "основные" для этого оборудования.
+      const mainMethodIds = methodLinks.map(l => l.method_id);
       const intervalRow = container.createDiv({ cls: 'tn-lims-flex' });
       intervalRow.createSpan({ text: 'Межкалибровочный период, мес.:', cls: 'tn-lims-meta' });
       if (this.canEditRefs) {
@@ -4355,7 +4448,12 @@ export class LimsView extends ItemView {
           try {
             await this.plugin.syncService.updateEquipment(eq.id, { calibration_interval_months: n });
             new Notice('Сохранено');
-            await this.renderEquipment();
+            // Точечно обновляем только этот блок (next_calibration пересчитал
+            // сервер) — не весь список, см. AGENTS.md/план правок оборудования.
+            const fresh = (await this.plugin.syncService.listEquipment()).find(e => e.id === eq.id);
+            if (fresh) { eq.calibration_interval_months = fresh.calibration_interval_months; eq.next_calibration = fresh.next_calibration; }
+            container.empty();
+            void this.renderEquipmentCalibrationBlock(container, eq, methodLinks);
           } catch (e: unknown) {
             new Notice(`Ошибка: ${errorMessage(e)}`);
           }
@@ -4581,7 +4679,15 @@ export class LimsView extends ItemView {
           result: resultInp.value.trim(),
         }, file ? { data: await file.arrayBuffer(), fileName: file.name } : undefined);
         new Notice('Запись добавлена');
-        await this.renderEquipment();
+        // Точечно перерисовываем только блок калибровки (журнал + пересчитанный
+        // next_calibration) в тот же container, не весь список оборудования.
+        const [methodLinks, fresh] = await Promise.all([
+          this.plugin.syncService.listEquipmentMethods(eq.id),
+          this.plugin.syncService.listEquipment().then(list => list.find(e => e.id === eq.id)),
+        ]);
+        if (fresh) { eq.next_calibration = fresh.next_calibration; eq.last_calibration = fresh.last_calibration; }
+        container.empty();
+        void this.renderEquipmentCalibrationBlock(container, eq, methodLinks);
       } catch (e: unknown) {
         new Notice(`Ошибка: ${errorMessage(e)}`);
       }

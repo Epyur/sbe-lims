@@ -30,8 +30,20 @@ SBE-плагин «ЛИМС» для сотрудников лаборатори
 |---|---|---|---|
 | GET/POST | `/inventors` | viewer / editor+ | `{"inventors":[...]}` / `{name,email,phone?,department?,position?}` → `{id}` |
 | PATCH/DELETE | `/inventors/{id}` | editor+ | частичный `{name?,email?,phone?,department?,position?}` → `{ok}` / → `{ok}`; DELETE 409, если испытатель уже есть в результатах |
-| GET/POST | `/equipment` | viewer / editor+ | `{"equipment":[...]}` / `{code,name,location?,responsible?}` → `{id}` |
-| PATCH/DELETE | `/equipment/{id}` | editor+ | частичный `{code?,name?,location?,responsible?}` → `{ok}` / → `{ok}`; DELETE 409, если используется методом |
+| GET/POST | `/equipment` | viewer / editor+ | `{"equipment":[...]}` / `{code,name,location?,responsible?}` → `{id}` (новое — `type` дефолтится в `'main'` колонкой, не передаётся при создании) |
+| PATCH/DELETE | `/equipment/{id}` | editor+ | частичный `{code?,name?,location?,responsible?,status?,commissioned_at?,service_life?,type?,verification_cert_number?,verification_cert_date?,verification_act_number?,verification_act_date?,verification_expiry_date?,calibration_interval_months?}` → `{ok}` / → `{ok}`; DELETE 409, если используется методом. `type: 'main'\|'auxiliary'` (2026-09-03) — единая роль на всё оборудование; при смене сервер синхронизирует её в `role` каждой существующей связи `method_equipment` (см. ниже) |
+| POST | `/equipment/{id}/scan?kind=verification_cert\|verification_act` | editor+ | multipart `file` → `{ok}`; заполняет `verification_cert_file_url`/`verification_act_file_url` |
+| GET/POST | `/equipment/{id}/calibrations` | viewer / editor+ | `{"calibrations":[EquipmentCalibration]}` / multipart (`calibrated_at,method_id?,amb_temp?,amb_pres?,amb_moist?,values?,result?,file?`) → `{ok}`; сервер пересчитывает `last_calibration`/`next_calibration` оборудования |
+| GET | `/equipment/{id}/calibrations/{calibration_id}/curve-chart/{attr_id}` | viewer | PNG — график калибровочной кривой (атрибут `data_type="curve"`, WP1) |
+| GET/POST | `/equipment/{id}/methods` | viewer / editor+ | `{"methods":[EquipmentMethodLink]}` / `{method_id}` → `{ok}` — роль связи (`main`/`auxiliary`) клиент не передаёт (2026-09-03), сервер берёт её из `equipment.type` |
+| DELETE | `/equipment/{id}/methods/{method_id}` | editor+ | → `{ok}` |
+| GET/POST | `/equipment/{id}/documents` | viewer / editor+ | `{"documents":[EquipmentDocument]}` / multipart `file` → `{ok}` |
+| DELETE | `/equipment/{id}/documents/{file_id}` | editor+ | → `{ok}` |
+| GET | `/equipment-links` | viewer | `{"links":[EquipmentLink]}` — вся таблица оборудование↔оборудование (для дерева основное/вспомогательное) |
+| GET | `/method-equipment` | viewer | `{"links":[MethodEquipmentLink]}` — вся таблица `method_equipment` (для пикера оборудования в форме результатов) |
+| POST | `/equipment/{id}/auxiliaries` | editor+ | `{auxiliary_equipment_id}` → `{ok}`; `{id}` становится ОСНОВНЫМ для `auxiliary_equipment_id`; 400, если привязка образует цикл (2026-09-03, цепочки любой глубины разрешены) |
+| DELETE | `/equipment/{id}/auxiliaries/{auxiliary_id}` | editor+ | → `{ok}` |
+| GET/POST | `/equipment-notify-settings` | admin | `{enabled,days,recipients}` — оповещения о приближении `verification_expiry_date` (2026-09-03), тикер раз в 6ч на сервере |
 | GET | `/lab-members` | viewer (реально) | без `?lab_id=` — полный список, только admin (400 иначе); с `?lab_id=` — ростер ОДНОЙ лабы, доступен любому её участнику (`lab_operator`/`lab_admin`/`lab_auditor`), не только admin (403, если не участник) — 2026-08-24, нужно Kanban-доске: испытателю видеть состав всех ячеек |
 | POST | `/lab-members` | admin, ИЛИ lab_admin именно этой лабы (2026-08-24, делегированные полномочия — любая роль сотрудникам своей лабы, вкл. назначение другого lab_admin) | `{lab_id,email,role}` → `{ok}` |
 | DELETE | `/lab-members/{lab_id}/{email}` | admin, ИЛИ lab_admin именно этой лабы (2026-08-24) | → `{ok}` |
@@ -190,12 +202,36 @@ AggregatedResult{ id, request_id, method_id, calculation_type, result_data,
                   source_series_count, source_series_range, created_at, updated_at }
 
 Inventor{ id, name, email, phone, department, position, created_at, updated_at }
+// last_calibration/next_calibration считает сервер из EquipmentCalibration, клиент не
+// редактирует напрямую. type (2026-09-03) — единая роль на всё оборудование, заменяет
+// прежний per-method выбор (см. EquipmentMethodLink.role ниже — колонка осталась в БД,
+// но теперь синхронна с этим полем, а не редактируется отдельно с каждой связью).
 Equipment{ id, code, name, location, responsible, last_calibration, next_calibration,
-           status, created_at, updated_at }
+           status, commissioned_at, service_life, type: 'main' | 'auxiliary',
+           verification_cert_number, verification_cert_date, verification_cert_file_url,
+           verification_act_number, verification_act_date, verification_act_file_url,
+           verification_expiry_date, calibration_interval_months: number | null,
+           created_at, updated_at }
+EquipmentCalibration{ id, equipment_id, method_id, calibrated_at, amb_temp, amb_pres,
+                      amb_moist, values: Record<string, unknown>, result, file_url,
+                      created_by, created_at }
+// Роль связи оборудование↔метод — теперь всегда равна Equipment.type владельца связи
+// (сервер сам подставляет её при POST /equipment/{id}/methods, см. таблицу выше).
+EquipmentMethodLink{ method_id, role: 'main' | 'auxiliary' }
+MethodEquipmentLink{ method_id, equipment_id, role: 'main' | 'auxiliary' }
+// Привязка оборудование↔оборудование (физическое прикрепление вспомогательного
+// прибора к основному) — независимо от EquipmentMethodLink; many-to-many, цепочки
+// любой глубины (2026-09-03).
+EquipmentLink{ main_equipment_id, auxiliary_equipment_id }
+EquipmentDocument{ id, file_name, file_url, file_size, created_at }
 LabMember{ lab_id, email, role: 'lab_operator' | 'lab_admin' }
 MethodConfig{ formulas: any[], classification: ClassificationRule[], chart_configs: ChartConfig[],
               input_parameters: MethodAttribute[], presentation: MethodPresentation,
-              operator_form: MethodOperatorForm }
+              operator_form: MethodOperatorForm,
+              calibration_attributes: CalibrationAttribute[], calibration_operator_form: MethodOperatorForm }
+// Атрибут «Параметры калибровки» метода — заполняется испытателем при калибровке
+// (проще MethodAttribute — без fill_method/level/formula/aggregation).
+CalibrationAttribute{ id, name, data_type: AttributeDataType }
 ProtocolResponse{ html, docx_base64, generated_at }
 // DashboardData удалён из клиента (2026-08-18) — см. серверный ответ /dashboard
 ```

@@ -319,9 +319,13 @@ func (s *Server) handleListEquipmentMethods(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, map[string]any{"methods": out})
 }
 
-// handleSetEquipmentMethod — POST /equipment/{id}/methods: создаёт или обновляет роль
-// (upsert, одна связь на пару method_id+equipment_id — повторный вызов с новой ролью
-// просто меняет её, как и везде в проекте, где роль редактируется на месте).
+// handleSetEquipmentMethod — POST /equipment/{id}/methods: привязывает метод к
+// оборудованию (upsert). Роль связи ('main'/'auxiliary') клиент больше не
+// присылает (2026-09-03) — берётся из equipment.type привязываемого оборудования:
+// «Основное/Вспомогательное» теперь единая роль на всё оборудование, а не выбор
+// на каждой связи с методом. calibration_curve.go продолжает читать role из
+// method_equipment без изменений — эта колонка держится синхронной с
+// equipment.type здесь и в handleUpdateEquipment (см. lims_refs.go).
 func (s *Server) handleSetEquipmentMethod(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
@@ -329,25 +333,25 @@ func (s *Server) handleSetEquipmentMethod(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var req struct {
-		MethodID int64  `json:"method_id"`
-		Role     string `json:"role"`
+		MethodID int64 `json:"method_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json"})
-		return
-	}
-	if req.Role != "main" && req.Role != "auxiliary" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "role must be main or auxiliary"})
 		return
 	}
 	if req.MethodID <= 0 {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "method_id is required"})
 		return
 	}
+	var equipmentType string
+	if err := s.pool.QueryRow(r.Context(), `SELECT type FROM equipment WHERE id = $1`, id).Scan(&equipmentType); err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "equipment not found"})
+		return
+	}
 	if _, err := s.pool.Exec(r.Context(), `
 INSERT INTO method_equipment (method_id, equipment_id, role) VALUES ($1, $2, $3)
 ON CONFLICT (method_id, equipment_id) DO UPDATE SET role = EXCLUDED.role`,
-		req.MethodID, id, req.Role); err != nil {
+		req.MethodID, id, equipmentType); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
 		return
 	}
@@ -522,6 +526,27 @@ func (s *Server) handleAddEquipmentAuxiliary(w http.ResponseWriter, r *http.Requ
 	}
 	if req.AuxiliaryEquipmentID == id {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "оборудование не может быть привязано само к себе"})
+		return
+	}
+	// Цепочки вспомогательного оборудования разрешены (2026-09-03, многоуровневое
+	// дерево) — но не циклы: если id (будущий основной) уже входит в потомков
+	// req.AuxiliaryEquipmentID (будущего вспомогательного), привязка замкнула бы
+	// граф. Рекурсивный обход существующих equipment_links вниз от
+	// AuxiliaryEquipmentID.
+	var wouldCycle bool
+	if err := s.pool.QueryRow(r.Context(), `
+WITH RECURSIVE reachable AS (
+	SELECT auxiliary_equipment_id AS eid FROM equipment_links WHERE main_equipment_id = $1
+	UNION
+	SELECT el.auxiliary_equipment_id FROM equipment_links el JOIN reachable r ON el.main_equipment_id = r.eid
+)
+SELECT EXISTS(SELECT 1 FROM reachable WHERE eid = $2)`,
+		req.AuxiliaryEquipmentID, id).Scan(&wouldCycle); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
+		return
+	}
+	if wouldCycle {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "привязка образует цикл"})
 		return
 	}
 	if _, err := s.pool.Exec(r.Context(), `

@@ -563,7 +563,8 @@ export interface Inventor {
 
 /** Оборудование (2026-08-26 — эксплуатация/поверка/калибровка, см. AGENTS.md).
  * last_calibration/next_calibration считает сервер из EquipmentCalibration —
- * клиент их не редактирует напрямую. */
+ * клиент их не редактирует напрямую. type — единая роль на всё оборудование
+ * (заменяет per-method EquipmentMethodLink.role, см. AGENTS.md). */
 export interface Equipment {
   id: number;
   code: string;
@@ -575,12 +576,14 @@ export interface Equipment {
   status: string;
   commissioned_at: string;
   service_life: string;
+  type: 'main' | 'auxiliary';
   verification_cert_number: string;
   verification_cert_date: string;
   verification_cert_file_url: string;
   verification_act_number: string;
   verification_act_date: string;
   verification_act_file_url: string;
+  verification_expiry_date: string;
   calibration_interval_months: number | null;
   created_at: string;
   updated_at: string;

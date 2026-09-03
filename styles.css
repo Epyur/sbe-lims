@@ -1040,8 +1040,6 @@
   padding: 6px 8px;
   min-height: 1.6em;
   background: var(--tn-card);
-  color: var(--tn-text);
-  caret-color: var(--tn-text);
   margin-bottom: 6px;
 }
 
