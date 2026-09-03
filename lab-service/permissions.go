@@ -13,10 +13,19 @@ func ownerEmailFromEnv() string {
 }
 
 // handleMyPermission возвращает роль текущего пользователя (по JWT email).
+// real_role — реальная роль БЕЗ учёта активного «просмотра от лица роли»:
+// клиенту нужна она, чтобы решить, показывать ли переключатель ролей — если
+// брать «role» (уже возможно подменённую), суперадмин, включивший просмотр
+// как viewer, потерял бы сам переключатель.
 func (s *Server) handleMyPermission(w http.ResponseWriter, r *http.Request) {
 	email := currentEmail(r)
 	if email == "" {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	rawRole, err := s.rawRole(r.Context(), appIDFromEnv(), email)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
 		return
 	}
 	role, err := s.effectiveRole(r.Context(), appIDFromEnv(), email)
@@ -24,12 +33,11 @@ func (s *Server) handleMyPermission(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
 		return
 	}
-	role = clampRoleForChannel(role, currentChannel(r))
 	if role == "" {
-		writeJSON(w, http.StatusOK, map[string]any{"email": email, "role": "", "hasAccess": false})
+		writeJSON(w, http.StatusOK, map[string]any{"email": email, "role": "", "real_role": rawRole, "hasAccess": false})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"email": email, "role": role, "hasAccess": true})
+	writeJSON(w, http.StatusOK, map[string]any{"email": email, "role": role, "real_role": rawRole, "hasAccess": true})
 }
 
 // handleListPermissions возвращает все права (для admin).
@@ -90,7 +98,6 @@ func (s *Server) handleSetPermission(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
 			return
 		}
-		actorRole = clampRoleForChannel(actorRole, currentChannel(r))
 		if roleRank(actorRole) < roleRank("superadmin") {
 			writeJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden: superadmin required"})
 			return

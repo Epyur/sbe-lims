@@ -132,8 +132,10 @@ func main() {
 	mux.HandleFunc("POST /api/lab/requests", s.requirePerm("editor")(s.handleCreateRequest))
 	mux.HandleFunc("GET /api/lab/requests/{id}", s.requirePerm("viewer")(s.handleGetRequest))
 	mux.HandleFunc("PATCH /api/lab/requests/{id}", s.requirePerm("editor")(s.handleUpdateRequest))
-	mux.HandleFunc("POST /api/lab/requests/{id}/status", s.requirePerm("editor")(s.handleSetRequestStatus))
-	mux.HandleFunc("POST /api/lab/requests/{id}/kanban-move", s.requirePerm("editor")(s.handleKanbanMove))
+	// Смена статуса заявки для editor через веб запрещена (2026-09-03, по решению
+	// пользователя) — через Obsidian-плагин (channel=plugin) editor может, как раньше.
+	mux.HandleFunc("POST /api/lab/requests/{id}/status", s.requirePerm("editor")(s.requireMinRoleForWebChannel("admin")(s.handleSetRequestStatus)))
+	mux.HandleFunc("POST /api/lab/requests/{id}/kanban-move", s.requirePerm("editor")(s.requireMinRoleForWebChannel("admin")(s.handleKanbanMove)))
 	// WP2 (2026-08-28) — исходящая почта: ручная отправка + журнал заявки.
 	mux.HandleFunc("POST /api/lab/requests/{id}/send-email", s.requirePerm("editor")(s.handleSendRequestEmail))
 	mux.HandleFunc("GET /api/lab/requests/{id}/sent-emails", s.requirePerm("viewer")(s.handleListSentEmails))
@@ -217,8 +219,14 @@ func main() {
 
 	// ЛИМС: графики, протокол, дашборд
 	mux.HandleFunc("GET /api/lab/requests/{id}/chart/{cfg_id}", s.requirePerm("viewer")(s.handleChart))
-	mux.HandleFunc("POST /api/lab/requests/{id}/protocol", s.requirePerm("editor")(s.handleProtocol))
-	mux.HandleFunc("GET /api/lab/requests/{id}/export.xlsx", s.requirePerm("editor")(s.handleExportExcel))
+	// protocol/export.xlsx понижены с editor до viewer на роуте (2026-09-03, по
+	// прямому запросу пользователя) — тот же паттерн, что chart/results/audit-log:
+	// реальная видимость проверяется внутри хендлера через requireLabRead
+	// (владелец/заказчик, участник группы, сотрудник лабы, admin+), а не только
+	// глобальной ролью на роуте. Раньше viewer (участник группы) не мог дойти
+	// даже до requireLabRead — падал на этом внешнем гейте.
+	mux.HandleFunc("POST /api/lab/requests/{id}/protocol", s.requirePerm("viewer")(s.handleProtocol))
+	mux.HandleFunc("GET /api/lab/requests/{id}/export.xlsx", s.requirePerm("viewer")(s.handleExportExcel))
 	mux.HandleFunc("GET /api/lab/dashboard", s.requirePerm("viewer")(s.handleDashboard))
 
 	httpServer := &http.Server{

@@ -122,8 +122,8 @@ func buildExportXlsx(cfg *MethodConfig, series []map[string]any, agg, stats map[
 }
 
 // handleExportExcel — GET /requests/{id}/export.xlsx. Роль/видимость — тот же
-// паттерн, что handleProtocol (protocol.go): requirePerm("editor") на роуте +
-// requireLabRead внутри хендлера.
+// паттерн, что handleProtocol (protocol.go): requirePerm("viewer") на роуте +
+// requireLabRead внутри хендлера (реальная видимость — владелец/группа/лаба/admin+).
 func (s *Server) handleExportExcel(w http.ResponseWriter, r *http.Request) {
 	requestID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {

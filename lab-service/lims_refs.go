@@ -80,21 +80,36 @@ func (s *Server) requireLabAccess(ctx context.Context, email string, requestID i
 }
 
 // requireLabRead проверяет право ПРОСМОТРА (результаты/графики/протокол): то же, что
-// requireLabAccess, плюс lab_auditor (только чтение своей лабы).
+// requireLabAccess, плюс lab_auditor (только чтение своей лабы), плюс — 2026-09-03,
+// по прямому запросу пользователя — любой, кому заявка видна по общему правилу
+// видимости (requestVisible: владелец/заказчик по email, участник группы заявки).
+// Раньше заказчик (editor, owner_email) и участник группы (viewer) видели заявку
+// в списке, но получали 403 при попытке открыть её результаты/протокол/экспорт,
+// потому что requireLabRead проверял ТОЛЬКО членство в lab_members — отдельный,
+// более узкий список, не пересекающийся с владельцем/группой.
 func (s *Server) requireLabRead(ctx context.Context, email string, requestID int64) (bool, error) {
 	ok, err := s.requireLabAccess(ctx, email, requestID)
 	if err != nil || ok {
 		return ok, err
 	}
 	labID, err := s.requestLabID(ctx, requestID)
-	if err != nil || labID <= 0 {
-		return false, nil
-	}
-	memberRole, err := s.labMemberRole(ctx, email, labID)
 	if err != nil {
 		return false, err
 	}
-	return memberRole == "lab_auditor", nil
+	if labID > 0 {
+		memberRole, err := s.labMemberRole(ctx, email, labID)
+		if err != nil {
+			return false, err
+		}
+		if memberRole == "lab_auditor" {
+			return true, nil
+		}
+	}
+	req, err := s.loadRequest(ctx, requestID)
+	if err != nil {
+		return false, nil
+	}
+	return s.requestVisible(ctx, req, email)
 }
 
 // requireLabAdminOf — делегированные полномочия lab_admin внутри своей лабы

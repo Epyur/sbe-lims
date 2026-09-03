@@ -57,11 +57,25 @@ func (s *Server) handleListLabs(w http.ResponseWriter, r *http.Request) {
 SELECT id, code, name, description, type, COALESCE(parent_lab_id, 0), auto_send_email, service_email, created_at, updated_at
 FROM labs ORDER BY id`)
 	} else {
+		// 2026-09-03, по прямому запросу пользователя: раньше список лабораторий
+		// строился ТОЛЬКО из lab_members (сотрудники) — заказчик (owner_email) или
+		// участник группы заявки видел саму заявку и её метод, но название
+		// лаборатории не резолвилось (её не было в этом списке), в UI показывался
+		// голый lab_id вместо имени. Тот же принцип видимости, что уже в
+		// requireLabRead/requestVisible — лаборатории СВОИХ видимых заявок тоже
+		// должны попадать в список.
 		rows, err = s.pool.Query(r.Context(), `
 SELECT id, code, name, description, type, COALESCE(parent_lab_id, 0), auto_send_email, service_email, created_at, updated_at
 FROM labs
 WHERE id IN (SELECT lab_id FROM lab_members WHERE email = $1)
    OR parent_lab_id IN (SELECT lab_id FROM lab_members WHERE email = $1)
+   OR id IN (
+        SELECT COALESCE(l2.parent_lab_id, l2.id)
+        FROM requests req
+        JOIN labs l2 ON l2.id = req.lab_id
+        WHERE req.owner_email = $1
+           OR req.group_id IN (SELECT group_id FROM group_members WHERE email = $1)
+      )
 ORDER BY id`, email)
 	}
 	if err != nil {

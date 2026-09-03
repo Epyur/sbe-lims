@@ -99,6 +99,7 @@ func roleRank(role string) int {
 
 type permEmailCtx struct{}
 type permChannelCtx struct{}
+type viewAsRoleCtx struct{}
 
 // clampRoleForChannel — «ЦУП Веб» (2026-09-02): веб-сессии (channel="web")
 // никогда не действуют как superadmin, независимо от реальной роли в БД —
@@ -109,6 +110,19 @@ func clampRoleForChannel(role, channel string) string {
 		return "admin"
 	}
 	return role
+}
+
+// normalizeViewAsRole — валидирует заголовок X-View-As-Role («Просмотр от
+// лица роли», 2026-09-03): пусто/неизвестное значение → выключено. Заведомо
+// не пропускает "superadmin" — не должно быть способом обойти
+// clampRoleForChannel, см. effectiveRole.
+func normalizeViewAsRole(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "viewer", "editor", "admin":
+		return strings.ToLower(strings.TrimSpace(raw))
+	default:
+		return ""
+	}
 }
 
 func (s *Server) roleFor(ctx context.Context, appID, email string) (string, error) {
@@ -125,8 +139,13 @@ func (s *Server) roleFor(ctx context.Context, appID, email string) (string, erro
 	return role, nil
 }
 
-// effectiveRole — персональная роль, иначе общий уровень доступа.
-func (s *Server) effectiveRole(ctx context.Context, appID, email string) (string, error) {
+// rawRole — реальная роль пользователя (персональная либо общий уровень
+// доступа) БЕЗ клэмпа по каналу и БЕЗ учёта «просмотра от лица роли».
+// Использовать для проверок прав — effectiveRole; rawRole — только там, где
+// нужна настоящая роль независимо от активной симуляции (например, показать
+// суперадмину переключатель ролей, даже когда он сам сейчас «смотрит как
+// viewer»).
+func (s *Server) rawRole(ctx context.Context, appID, email string) (string, error) {
 	role, err := s.roleFor(ctx, appID, email)
 	if err != nil {
 		return "", err
@@ -144,6 +163,32 @@ func (s *Server) effectiveRole(ctx context.Context, appID, email string) (string
 		return "", err
 	}
 	return level, nil
+}
+
+// effectiveRole — роль для ВСЕХ проверок прав и фильтрации видимости: реальная
+// роль → клэмп по каналу (web никогда не superadmin) → «просмотр от лица
+// роли», если активен (заголовок X-View-As-Role, см. requirePerm/
+// normalizeViewAsRole). Подмена возможна ТОЛЬКО когда реальная роль —
+// superadmin, канал — web, и запрошенная роль не выше уже клэмпнутой (то есть
+// не выше admin) — так режим просмотра не может стать способом эскалации
+// прав или обхода запрета "superadmin не действует через веб". Проверяется
+// заново на каждый вызов по реальной роли из БД, а не один раз в мидлваре —
+// поэтому симуляция ограничивает вообще ВСЁ (видимость данных, gate в
+// requirePerm, проверки внутри обработчиков), а не только то, что явно
+// вызвало requirePerm.
+func (s *Server) effectiveRole(ctx context.Context, appID, email string) (string, error) {
+	raw, err := s.rawRole(ctx, appID, email)
+	if err != nil {
+		return "", err
+	}
+	channel, _ := ctx.Value(permChannelCtx{}).(string)
+	role := clampRoleForChannel(raw, channel)
+
+	if viewAs, ok := ctx.Value(viewAsRoleCtx{}).(string); ok && viewAs != "" &&
+		channel == "web" && raw == "superadmin" && roleRank(viewAs) <= roleRank(role) {
+		role = viewAs
+	}
+	return role, nil
 }
 
 func (s *Server) requirePerm(minRole string) func(http.HandlerFunc) http.HandlerFunc {
@@ -176,19 +221,26 @@ func (s *Server) requirePerm(minRole string) func(http.HandlerFunc) http.Handler
 				return
 			}
 
-			role, err := s.effectiveRole(r.Context(), claims.AppID, claims.Email)
+			// Контекст (email/channel/view-as) строится ДО первого вызова
+			// effectiveRole — иначе gate ниже проверял бы РЕАЛЬНУЮ роль вместо
+			// симулированной, и «просмотр от лица роли» не ограничивал бы
+			// доступ к самим роутам, только видимость данных внутри них.
+			ctx := context.WithValue(r.Context(), permEmailCtx{}, claims.Email)
+			ctx = context.WithValue(ctx, permChannelCtx{}, claims.Channel)
+			if viewAs := normalizeViewAsRole(r.Header.Get("X-View-As-Role")); viewAs != "" {
+				ctx = context.WithValue(ctx, viewAsRoleCtx{}, viewAs)
+			}
+
+			role, err := s.effectiveRole(ctx, claims.AppID, claims.Email)
 			if err != nil {
 				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
 				return
 			}
-			role = clampRoleForChannel(role, claims.Channel)
 			if roleRank(role) < roleRank(minRole) {
 				writeJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden: insufficient role"})
 				return
 			}
 
-			ctx := context.WithValue(r.Context(), permEmailCtx{}, claims.Email)
-			ctx = context.WithValue(ctx, permChannelCtx{}, claims.Channel)
 			next(w, r.WithContext(ctx))
 		}
 	}
@@ -208,4 +260,33 @@ func currentChannel(r *http.Request) string {
 		return v
 	}
 	return ""
+}
+
+// requireMinRoleForWebChannel — как requirePerm, но поднимает порог роли
+// ТОЛЬКО для channel=web; для channel=plugin — прозрачный проход (базовый
+// minRole уже проверил внешний requirePerm). Смена статуса заявки для editor
+// через веб запрещена (2026-09-03, по решению пользователя) — кнопки в UI
+// остаются видимыми, но неактивными; это финальный страж на случай прямого
+// вызова API. Роль пересчитывается через effectiveRole — значит корректно
+// учитывает и «просмотр от лица роли» (симулирующий editor/viewer суперадмин
+// тоже получит 403, как настоящий editor/viewer).
+func (s *Server) requireMinRoleForWebChannel(minRoleForWeb string) func(http.HandlerFunc) http.HandlerFunc {
+	return func(next http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			if currentChannel(r) != "web" {
+				next(w, r)
+				return
+			}
+			role, err := s.effectiveRole(r.Context(), appIDFromEnv(), currentEmail(r))
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
+				return
+			}
+			if roleRank(role) < roleRank(minRoleForWeb) {
+				writeJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden: insufficient role for web"})
+				return
+			}
+			next(w, r)
+		}
+	}
 }
