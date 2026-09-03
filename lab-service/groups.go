@@ -140,7 +140,12 @@ func (s *Server) handleAddGroupMember(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json"})
 		return
 	}
-	req.Email = strings.TrimSpace(req.Email)
+	// ToLower (2026-09-03, живой баг): auth-service всегда приводит email к
+	// нижнему регистру при входе — участник, добавленный с заглавной буквой,
+	// никогда не проходил регистрозависимую проверку членства (loadVisibleProjects,
+	// visibleRequestsQuery, handleListGroups и т.д.) и молча не видел ни группу,
+	// ни её проекты/заявки/лаборатории. См. AGENTS.md.
+	req.Email = strings.ToLower(strings.TrimSpace(req.Email))
 	req.Role = strings.TrimSpace(req.Role)
 	if req.Email == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "email is required"})
@@ -175,7 +180,8 @@ func (s *Server) handleRemoveGroupMember(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid id"})
 		return
 	}
-	email := r.PathValue("email")
+	// ToLower — см. handleAddGroupMember; email всегда хранится в нижнем регистре.
+	email := strings.ToLower(strings.TrimSpace(r.PathValue("email")))
 	if email == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "email is required"})
 		return

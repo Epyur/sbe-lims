@@ -89,9 +89,25 @@ func TestCanApplyKanbanMoveTesterCannotPullFromNewOrReopenCompleted(t *testing.T
 }
 
 func TestCanApplyKanbanMoveTesterSelfPickupFromNew(t *testing.T) {
-	ok, reason := canApplyKanbanMove(testerAEmail, "", "lab_operator", "new", "received", "", testerAEmail)
-	if !ok {
-		t.Fatalf("tester self-pickup from new must be allowed, got forbidden: %s", reason)
+	// Самозабор в любую из двух рабочих ячеек — "received" (колонка "В работу")
+	// или напрямую "processing" (колонка "В работе", 2026-09-03 — раньше
+	// разрешалось только в received, из-за похожих подписей колонок
+	// перетаскивание сразу в 3-ю ошибочно отклонялось как "нет прав").
+	for _, newStatus := range []string{"received", "processing"} {
+		ok, reason := canApplyKanbanMove(testerAEmail, "", "lab_operator", "new", newStatus, "", testerAEmail)
+		if !ok {
+			t.Fatalf("tester self-pickup from new into %q must be allowed, got forbidden: %s", newStatus, reason)
+		}
+	}
+}
+
+func TestCanApplyKanbanMoveTesterCannotSelfPickupIntoCompleted(t *testing.T) {
+	// Самозабор ограничен received/processing — сразу в completed нельзя, минуя
+	// исполнение (та же дыра, что и раньше не пускала в processing, теперь не
+	// должна открыться и для completed).
+	ok, _ := canApplyKanbanMove(testerAEmail, "", "lab_operator", "new", "completed", "", testerAEmail)
+	if ok {
+		t.Fatal("tester self-pickup from new must not be allowed straight into completed")
 	}
 }
 

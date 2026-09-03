@@ -55,8 +55,12 @@ func normalizeKanbanTarget(oldStatus, oldAssignedTo string, patch kanbanMoveRequ
 //     разрешено всё.
 //  2. Испытатель (lab_operator ИМЕННО этой лабы):
 //     a. Самозабор: неназначенную заявку из "новых" (oldStatus=="new",
-//        oldAssignedTo=="") может забрать СЕБЕ (newAssignedTo==actorEmail) в
-//        статус "received" — и только себе, не кому-то другому.
+//        oldAssignedTo=="") может забрать СЕБЕ (newAssignedTo==actorEmail) сразу
+//        в "received" ИЛИ в "processing" (2026-09-03 — раньше только в
+//        "received"; на доске колонки 2/3 подписаны похоже, "В работу"/
+//        "В работе", и перетаскивание сразу в 3-ю колонку ошибочно отклонялось
+//        как "нет прав", хотя по сути тот же самозабор) — и только себе, не
+//        кому-то другому.
 //     b. Иначе не может менять assigned_to вовсе (переназначение — только
 //        руководитель).
 //     c. Может менять status, только если заявка уже назначена ему
@@ -72,7 +76,7 @@ func canApplyKanbanMove(actorEmail, actorGlobalRole, actorLabRole, oldStatus, ne
 		return false, "forbidden: not a lab_operator/lab_admin of this lab"
 	}
 	if oldStatus == "new" && oldAssignedTo == "" {
-		if newStatus == "received" && newAssignedTo == actorEmail {
+		if (newStatus == "received" || newStatus == "processing") && newAssignedTo == actorEmail {
 			return true, ""
 		}
 		return false, "forbidden: a tester may only self-assign a new request into their own cell"

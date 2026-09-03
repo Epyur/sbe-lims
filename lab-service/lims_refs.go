@@ -631,7 +631,11 @@ func (s *Server) handleSetLabMember(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json"})
 		return
 	}
-	req.Email = strings.TrimSpace(req.Email)
+	// ToLower (2026-09-03, живой баг — см. AGENTS.md): auth-service всегда
+	// приводит email к нижнему регистру при входе; сотрудник, добавленный сюда
+	// с заглавной буквой, никогда не проходил регистрозависимую проверку
+	// lab_members (requestVisible, visibleRequestsQuery и т.д.).
+	req.Email = strings.ToLower(strings.TrimSpace(req.Email))
 	if req.LabID <= 0 || req.Email == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "lab_id and email are required"})
 		return
@@ -690,7 +694,8 @@ func (s *Server) handleRemoveLabMember(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden: must administer this lab"})
 		return
 	}
-	email := r.PathValue("email")
+	// ToLower — см. handleSetLabMember; email всегда хранится в нижнем регистре.
+	email := strings.ToLower(strings.TrimSpace(r.PathValue("email")))
 	_, err = s.pool.Exec(r.Context(),
 		`DELETE FROM lab_members WHERE lab_id = $1 AND email = $2`, labID, email)
 	if err != nil {

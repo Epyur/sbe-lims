@@ -80,7 +80,11 @@ func (s *Server) handleSetPermission(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json"})
 		return
 	}
-	req.Email = strings.TrimSpace(req.Email)
+	// ToLower (2026-09-03, живой баг): auth-service всегда приводит email к
+	// нижнему регистру при входе (magic_link.go/main.go) — если здесь сохранить
+	// как ввёл админ (с заглавной буквой), назначенная роль никогда не совпадёт
+	// с currentEmail(r) при проверке и молча не подействует. См. AGENTS.md.
+	req.Email = strings.ToLower(strings.TrimSpace(req.Email))
 	req.Role = strings.TrimSpace(req.Role)
 	if req.Email == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "email is required"})
