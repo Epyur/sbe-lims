@@ -795,6 +795,18 @@
   font-size: 14px;
 }
 
+/* Вспомогательное оборудование — всегда видимым вложенным списком внутри карточки
+ * основного, прямо в общем перечне (2026-09-03, по образцу .tn-doc-card-children в
+ * sbe-documents: связанные документы там тоже не прячутся за раскрытием карточки). */
+.tn-lims-equipment-children {
+  margin-top: 8px;
+  padding-left: 10px;
+  border-left: 2px solid var(--tn-border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
 /* Заявка в списке (renderRequests) — карточка вместо таблицы, тот же паттерн,
  * что .tn-task-card в sbe-tasks: кликабельна целиком, hover меняет цвет рамки. */
 .tn-lims-req-card {
