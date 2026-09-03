@@ -88,14 +88,6 @@ func main() {
 		return
 	}
 
-	// Постоянный CLI-режим: точечный перенос результатов испытаний из старой
-	// ЛИМС (см. import_legacy_results.go) для заявок проекта OLD, у которых
-	// import-lpitrack-history создал саму заявку, но не результаты.
-	if len(os.Args) > 1 && os.Args[1] == "import-legacy-results" {
-		runImportLegacyResults(ctx, s, os.Args[2:])
-		return
-	}
-
 	if err := s.migrate(ctx); err != nil {
 		log.Fatalf("migrate: %v", err)
 	}
