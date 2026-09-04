@@ -587,15 +587,35 @@ func (s *Server) migrate(ctx context.Context) error {
 		// lab_id — PRIMARY KEY, lab_id = 0 — зарезервированный "общий" ряд (сентинел,
 		// НЕ настоящая лаба — намеренно без REFERENCES labs(id)), на который
 		// откатывается оборудование без lab_id и любая лаба без своего override. Эта
-		// таблица ни разу не деплоилась на VDS (см. AGENTS.md, запись 2026-09-03:
-		// «Деплой на VDS не выполнялся — только локальная сборка»), поэтому колонка
-		// меняется на месте (id→lab_id), без миграции уже накопленных строк.
+		// таблица уже была на VDS (задеплоена вместе с v1.0.1, транзитом через
+		// «main синхронизирован» — вопреки более ранней записи в AGENTS.md
+		// 2026-09-03 «деплой не выполнялся», которая относилась к более раннему
+		// моменту сессии) со старой схемой `id INT PRIMARY KEY DEFAULT 1`, одна
+		// строка. CREATE TABLE IF NOT EXISTS ниже поэтому на реальном сервере —
+		// no-op; колонку id→lab_id приходится переименовывать явно (обнаружено
+		// живым падением "column lab_id does not exist" при первом деплое этой
+		// версии, 2026-09-04). Guard идемпотентен: на уже мигрированной или
+		// изначально свежей базе колонки `id` нет — блок молча пропускается.
+		`DO $$ BEGIN
+			IF EXISTS (
+				SELECT 1 FROM information_schema.columns
+				WHERE table_name = 'equipment_notify_settings' AND column_name = 'id'
+			) AND NOT EXISTS (
+				SELECT 1 FROM information_schema.columns
+				WHERE table_name = 'equipment_notify_settings' AND column_name = 'lab_id'
+			) THEN
+				ALTER TABLE equipment_notify_settings RENAME COLUMN id TO lab_id;
+				ALTER TABLE equipment_notify_settings ALTER COLUMN lab_id DROP DEFAULT;
+				UPDATE equipment_notify_settings SET lab_id = 0 WHERE lab_id = 1;
+			END IF;
+		END $$`,
 		`CREATE TABLE IF NOT EXISTS equipment_notify_settings (
 			lab_id BIGINT PRIMARY KEY DEFAULT 0,
 			enabled BOOLEAN NOT NULL DEFAULT false,
 			days TEXT NOT NULL DEFAULT '30,14,7',
 			recipients TEXT NOT NULL DEFAULT ''
 		)`,
+		`ALTER TABLE equipment_notify_settings ALTER COLUMN lab_id SET DEFAULT 0`,
 		`INSERT INTO equipment_notify_settings (lab_id) VALUES (0) ON CONFLICT (lab_id) DO NOTHING`,
 		`CREATE TABLE IF NOT EXISTS equipment_notifications (
 			equipment_id BIGINT NOT NULL REFERENCES equipment(id) ON DELETE CASCADE,
