@@ -182,6 +182,27 @@ func (s *Server) requireLabAdminOfAll(ctx context.Context, email string, labIDs 
 	return true, nil
 }
 
+// requireAnyLabAdmin — app-admin+ либо lab_admin ХОТЯ БЫ ОДНОЙ лабы вообще, без
+// привязки к конкретной labID (2026-09-04, для настроек, которые не относятся к
+// какой-то одной лабе — напр. equipment-notify-settings: у equipment нет
+// lab_id, "администрирует какую-то лабу" — единственный осмысленный лабовый
+// критерий доступа).
+func (s *Server) requireAnyLabAdmin(ctx context.Context, email string) (bool, error) {
+	role, err := s.effectiveRole(ctx, appIDFromEnv(), email)
+	if err != nil {
+		return false, err
+	}
+	if roleRank(role) >= roleRank("admin") {
+		return true, nil
+	}
+	var exists bool
+	if err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM lab_members WHERE email = $1 AND role = 'lab_admin')`, email).Scan(&exists); err != nil {
+		return false, err
+	}
+	return exists, nil
+}
+
 // ---- Inventors ----
 
 type Inventor struct {
@@ -328,14 +349,17 @@ type Equipment struct {
 	VerificationActFileURL    string `json:"verification_act_file_url"`
 	VerificationExpiryDate    string `json:"verification_expiry_date"`
 	CalibrationIntervalMonths *int   `json:"calibration_interval_months"`
-	CreatedAt                 string `json:"created_at"`
-	UpdatedAt                 string `json:"updated_at"`
+	// LabID (2026-09-04) — явная привязка оборудования к лабе (NULL — не привязано),
+	// см. миграцию в main.go. Основа для per-lab резолва equipment_notify_settings.
+	LabID     *int64 `json:"lab_id"`
+	CreatedAt string `json:"created_at"`
+	UpdatedAt string `json:"updated_at"`
 }
 
 const equipmentColumnsSQL = `id, code, name, location, responsible, last_calibration, next_calibration, status,
 	commissioned_at, service_life, type, verification_cert_number, verification_cert_date, verification_cert_file_url,
 	verification_act_number, verification_act_date, verification_act_file_url, verification_expiry_date,
-	calibration_interval_months, created_at, updated_at`
+	calibration_interval_months, lab_id, created_at, updated_at`
 
 func scanEquipmentRow(row pgx.Row) (Equipment, error) {
 	var it Equipment
@@ -344,7 +368,7 @@ func scanEquipmentRow(row pgx.Row) (Equipment, error) {
 	err := row.Scan(&it.ID, &it.Code, &it.Name, &it.Location, &it.Responsible, &lc, &nc, &it.Status,
 		&commAt, &it.ServiceLife, &it.Type, &it.VerificationCertNumber, &certDate, &it.VerificationCertFileURL,
 		&it.VerificationActNumber, &actDate, &it.VerificationActFileURL, &expiryDate, &it.CalibrationIntervalMonths,
-		&ca, &ua)
+		&it.LabID, &ca, &ua)
 	if err != nil {
 		return it, err
 	}
@@ -395,6 +419,8 @@ func (s *Server) handleCreateEquipment(w http.ResponseWriter, r *http.Request) {
 		Name        string `json:"name"`
 		Location    string `json:"location"`
 		Responsible string `json:"responsible"`
+		// LabID (2026-09-04) — 0/отсутствует = не привязано (см. Equipment.LabID).
+		LabID *int64 `json:"lab_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json"})
@@ -404,11 +430,15 @@ func (s *Server) handleCreateEquipment(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "code is required"})
 		return
 	}
+	var labID *int64
+	if req.LabID != nil && *req.LabID > 0 {
+		labID = req.LabID
+	}
 	var id int64
 	err := s.pool.QueryRow(r.Context(), `
-INSERT INTO equipment (code, name, location, responsible)
-VALUES ($1, $2, $3, $4) ON CONFLICT (code) DO NOTHING RETURNING id`,
-		req.Code, req.Name, req.Location, req.Responsible).Scan(&id)
+INSERT INTO equipment (code, name, location, responsible, lab_id)
+VALUES ($1, $2, $3, $4, $5) ON CONFLICT (code) DO NOTHING RETURNING id`,
+		req.Code, req.Name, req.Location, req.Responsible, labID).Scan(&id)
 	if err != nil {
 		writeJSON(w, http.StatusConflict, map[string]any{"error": "code already exists"})
 		return
@@ -454,6 +484,10 @@ func (s *Server) handleUpdateEquipment(w http.ResponseWriter, r *http.Request) {
 		VerificationActDate       *string `json:"verification_act_date"`
 		VerificationExpiryDate    *string `json:"verification_expiry_date"`
 		CalibrationIntervalMonths *int    `json:"calibration_interval_months"`
+		// LabID (2026-09-04) — как в handleCreateEquipment: nil = поле не пришло,
+		// не трогать колонку; <= 0 (клиент шлёт 0 для «— Не привязано —») = очистить
+		// в NULL; > 0 = назначить эту лабу.
+		LabID *int64 `json:"lab_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json"})
@@ -487,6 +521,16 @@ func (s *Server) handleUpdateEquipment(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid verification_expiry_date (want YYYY-MM-DD)"})
 		return
 	}
+	// lab_id — та же present/value пара, что у дат (parseOptionalDate), но без
+	// парсинга: req.LabID == nil → present=false (не трогать колонку); *req.LabID <= 0
+	// → present=true, value=nil (очистить в NULL, клиент шлёт 0 для «— Не привязано —»);
+	// *req.LabID > 0 → present=true, value=id.
+	labIDPresent := req.LabID != nil
+	var labIDValue *int64
+	if labIDPresent && *req.LabID > 0 {
+		v := *req.LabID
+		labIDValue = &v
+	}
 	tag, err := s.pool.Exec(r.Context(), `
 UPDATE equipment SET
 	code = COALESCE($2, code), name = COALESCE($3, name),
@@ -501,6 +545,7 @@ UPDATE equipment SET
 	verification_act_date = CASE WHEN $15::boolean THEN $16::date ELSE verification_act_date END,
 	verification_expiry_date = CASE WHEN $17::boolean THEN $18::date ELSE verification_expiry_date END,
 	calibration_interval_months = COALESCE($19, calibration_interval_months),
+	lab_id = CASE WHEN $20::boolean THEN $21::bigint ELSE lab_id END,
 	updated_at = now()
 WHERE id = $1`, id, req.Code, req.Name, req.Location, req.Responsible, req.Status,
 		commissionedPresent, commissionedAt,
@@ -511,7 +556,8 @@ WHERE id = $1`, id, req.Code, req.Name, req.Location, req.Responsible, req.Statu
 		req.VerificationActNumber,
 		actPresent, actDate,
 		expiryPresent, expiryDate,
-		req.CalibrationIntervalMonths)
+		req.CalibrationIntervalMonths,
+		labIDPresent, labIDValue)
 	if err != nil {
 		if isUniqueViolation(err) {
 			writeJSON(w, http.StatusConflict, map[string]any{"error": "code already exists"})

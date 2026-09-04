@@ -1292,6 +1292,46 @@ docker compose exec lab wget -qO- http://localhost:3000/api/lab/health   # вн�
 
 ## История
 
+- **2026-09-04 — Настройки лаборатории открыты для lab_admin; оповещения о поверке стали per-lab.**
+  Прямой запрос пользователя: «настройки лаборатории должны быть полностью
+  доступны администратору лаборатории, а не только суперадмину» + «у каждой
+  лаборатории могут быть свои сроки и свои получатели уведомлений».
+  - **`PATCH /api/lab/labs/{id}` (`references.go`, `handleUpdateLab`)**: был
+    буквально `requirePerm("superadmin")` — даже app-admin не проходил.
+    Роут снижен до `requirePerm("editor")`, внутри хендлера —
+    `requireLabAdminOf(ctx, email, id)` (тот же паттерн, что уже был у
+    `handleSetLabMember`) — своя лаба редактируется её lab_admin ИЛИ
+    app-admin+; чужая лаба лабе lab_admin недоступна (403).
+  - **`GET/POST /api/lab/equipment-notify-settings` (`equipment_notify.go`,
+    `main.go`)**: были `requirePerm("admin")` — без учёта `lab_members`.
+    Роуты снижены (`viewer`/`editor`), внутри — новый `requireAnyLabAdmin`
+    (`lims_refs.go`) — app-admin+ ИЛИ lab_admin хотя бы одной лабы (настройки
+    ещё не были по-настоящему per-lab на момент первого прохода правки).
+  - **Оповещения стали per-lab**: `equipment.lab_id` (новая nullable колонка
+    — оборудование раньше не имело привязки к лабе вовсе; `equipment` CRUD
+    в `lims_refs.go` принимает `lab_id`). `equipment_notify_settings`
+    перестроена с одной строки `id=1` на `lab_id BIGINT PRIMARY KEY DEFAULT
+    0` — `lab_id=0` резервируется под общие/дефолтные настройки (fallback
+    для оборудования без своей лабы и для лабы без своего переопределения).
+    `handleGetEquipmentNotifySettings` при отсутствии строки под конкретный
+    `lab_id` отдаёт строку `lab_id=0` с `configured:false`;
+    `handleSetEquipmentNotifySettings` поддерживает `reset:true` (DELETE
+    строки лабы — откат на общие) и различает гейт по `lab_id`: `0` —
+    только app-admin+ (правит не «общие», а буквально «дефолт для всех»,
+    не привязан ни к одной лабе), `>0` — `requireLabAdminOf` (по образцу
+    `handleUpdateLab`). `checkEquipmentNotifications` (фоновая проверка раз
+    в 6ч) больше не читает одну глобальную строку настроек — грузит все
+    строки `equipment_notify_settings` в карту по `lab_id`, резолвит для
+    каждого прибора его эффективные настройки (свои у лабы или общие),
+    затем применяет каскад порогов (`daysLeft <= day` для каждого
+    настроенного порога, как и раньше) и дедуп по (`equipment_id`, `day`,
+    `email`) — семантика не менялась, только источник конфига стал per-lab.
+  - Схема `equipment_notify_settings` ещё не была задеплоена на VDS
+    (задача создана 2026-09-03, деплой не выполнялся) — переопределена на
+    месте в `main.go`, без миграции-переименования колонки.
+  - `go build ./...`/`go vet ./...` EXIT=0. Живой E2E на VDS не проводился
+    (деплой этой правки — по решению пользователя в сессии 2026-09-04).
+
 - **2026-09-03 — «Просмотр от лица роли» (веб) + три фикса видимости заказчика/группы.**
   - **«Просмотр от лица роли»** (по прямому запросу пользователя): заголовок
     `X-View-As-Role: viewer|editor|admin` — только для реального `superadmin`,

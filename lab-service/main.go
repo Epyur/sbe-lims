@@ -120,7 +120,7 @@ func main() {
 	// Справочники
 	mux.HandleFunc("GET /api/lab/labs", s.requirePerm("viewer")(s.handleListLabs))
 	mux.HandleFunc("POST /api/lab/labs", s.requirePerm("superadmin")(s.handleCreateLab))
-	mux.HandleFunc("PATCH /api/lab/labs/{id}", s.requirePerm("superadmin")(s.handleUpdateLab))
+	mux.HandleFunc("PATCH /api/lab/labs/{id}", s.requirePerm("editor")(s.handleUpdateLab))
 	mux.HandleFunc("GET /api/lab/methods", s.requirePerm("viewer")(s.handleListMethods))
 	mux.HandleFunc("POST /api/lab/methods", s.requirePerm("editor")(s.handleCreateMethod))
 	mux.HandleFunc("GET /api/lab/objects", s.requirePerm("viewer")(s.handleListObjects))
@@ -210,8 +210,8 @@ func main() {
 	mux.HandleFunc("GET /api/lab/equipment/{id}/documents", s.requirePerm("viewer")(s.handleListEquipmentDocuments))
 	mux.HandleFunc("POST /api/lab/equipment/{id}/documents", s.requirePerm("editor")(s.handleUploadEquipmentDocument))
 	mux.HandleFunc("DELETE /api/lab/equipment/{id}/documents/{file_id}", s.requirePerm("editor")(s.handleDeleteEquipmentDocument))
-	mux.HandleFunc("GET /api/lab/equipment-notify-settings", s.requirePerm("admin")(s.handleGetEquipmentNotifySettings))
-	mux.HandleFunc("POST /api/lab/equipment-notify-settings", s.requirePerm("admin")(s.handleSetEquipmentNotifySettings))
+	mux.HandleFunc("GET /api/lab/equipment-notify-settings", s.requirePerm("viewer")(s.handleGetEquipmentNotifySettings))
+	mux.HandleFunc("POST /api/lab/equipment-notify-settings", s.requirePerm("editor")(s.handleSetEquipmentNotifySettings))
 	mux.HandleFunc("GET /api/lab/equipment-links", s.requirePerm("viewer")(s.handleListAllEquipmentLinks))
 	mux.HandleFunc("GET /api/lab/method-equipment", s.requirePerm("viewer")(s.handleListAllMethodEquipment))
 	mux.HandleFunc("POST /api/lab/equipment/{id}/auxiliaries", s.requirePerm("editor")(s.handleAddEquipmentAuxiliary))
@@ -571,17 +571,32 @@ func (s *Server) migrate(ctx context.Context) error {
 		// раньше не было срока действия вовсе). Основа для оповещений — см.
 		// equipment_notify.go.
 		`ALTER TABLE equipment ADD COLUMN IF NOT EXISTS verification_expiry_date DATE`,
-		// Оповещения о приближении срока поверки (2026-09-03) — единые настройки на
-		// весь модуль (получатели+пороги в днях), по образцу
+		// equipment.lab_id (2026-09-04) — явная привязка оборудования к лабе, по
+		// прямому решению пользователя (НЕ выводится косвенно из привязанных методов —
+		// method_equipment/method_labs остаются как есть). NULL — оборудование не
+		// привязано ни к одной лабе; такое оборудование, как и любая лаба, не задавшая
+		// свои настройки, попадает под общий (lab_id=0) ряд equipment_notify_settings
+		// ниже (см. equipment_notify.go). Назначается через форму оборудования начиная
+		// с этой версии — существующее оборудование остаётся непривязанным до ручной
+		// правки.
+		`ALTER TABLE equipment ADD COLUMN IF NOT EXISTS lab_id BIGINT REFERENCES labs(id)`,
+		// Оповещения о приближении срока поверки (2026-09-03) — по образцу
 		// documents_notify_settings/documents_notifications в sbe-documents, см.
-		// equipment_notify.go.
+		// equipment_notify.go. Per-lab (2026-09-04, по прямому запросу пользователя —
+		// «у каждой лаборатории могут быть свои сроки и свои получатели уведомлений»):
+		// lab_id — PRIMARY KEY, lab_id = 0 — зарезервированный "общий" ряд (сентинел,
+		// НЕ настоящая лаба — намеренно без REFERENCES labs(id)), на который
+		// откатывается оборудование без lab_id и любая лаба без своего override. Эта
+		// таблица ни разу не деплоилась на VDS (см. AGENTS.md, запись 2026-09-03:
+		// «Деплой на VDS не выполнялся — только локальная сборка»), поэтому колонка
+		// меняется на месте (id→lab_id), без миграции уже накопленных строк.
 		`CREATE TABLE IF NOT EXISTS equipment_notify_settings (
-			id INT PRIMARY KEY DEFAULT 1,
+			lab_id BIGINT PRIMARY KEY DEFAULT 0,
 			enabled BOOLEAN NOT NULL DEFAULT false,
 			days TEXT NOT NULL DEFAULT '30,14,7',
 			recipients TEXT NOT NULL DEFAULT ''
 		)`,
-		`INSERT INTO equipment_notify_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING`,
+		`INSERT INTO equipment_notify_settings (lab_id) VALUES (0) ON CONFLICT (lab_id) DO NOTHING`,
 		`CREATE TABLE IF NOT EXISTS equipment_notifications (
 			equipment_id BIGINT NOT NULL REFERENCES equipment(id) ON DELETE CASCADE,
 			day INT NOT NULL,

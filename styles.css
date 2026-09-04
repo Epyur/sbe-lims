@@ -1032,6 +1032,56 @@
   width: 100%;
 }
 
+/* Панель фильтров списка заявок (2026-09-04, по образцу sbe-requests
+ * requests-view.ts/styles.css) — отдельные поля по категориям (дата/метод/
+ * название объекта/идентификатор/партия/заказчик). Те же токены дизайн-системы
+ * SBE, что и у остальных карточек/панелей (--tn-card/--tn-border/--tn-radius). */
+.tn-lims-filterbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+  background: var(--tn-card);
+  border: 1px solid var(--tn-border);
+  border-radius: var(--tn-radius);
+  padding: 12px 14px;
+}
+
+.tn-lims-filter-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1 1 150px;
+  min-width: 150px;
+}
+
+.tn-lims-filter-lbl {
+  font-size: var(--font-smaller);
+  font-weight: 600;
+  color: var(--tn-muted);
+}
+
+.tn-lims-filter-daterow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.tn-lims-filter-daterow .tn-lims-input {
+  min-width: 0;
+  flex: 1;
+}
+
+.tn-lims-filter-date-sep {
+  color: var(--tn-muted);
+  flex-shrink: 0;
+}
+
+.tn-lims-filter-reset {
+  white-space: nowrap;
+  align-self: flex-end;
+}
+
 /* Блочный редактор представления (2026-08-23) — плейсхолдер-чип внутри
  * форматированного текста + строка contenteditable, на которой он живёт. */
 .tn-lims-chip {

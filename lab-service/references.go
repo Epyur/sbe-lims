@@ -172,6 +172,17 @@ func (s *Server) handleUpdateLab(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid id"})
 		return
 	}
+	// lab_admin своей лабы может редактировать её собственные поля (2026-09-04,
+	// делегированные полномочия — по образцу handleSetLabMember); lab_admin ЧУЖОЙ
+	// лабы получает 403. Маршрут заведён на "editor" (main.go), эта проверка —
+	// внутренняя, реальная граница доступа.
+	if ok, err := s.requireLabAdminOf(r.Context(), currentEmail(r), id); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
+		return
+	} else if !ok {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden: must administer this lab"})
+		return
+	}
 	var req struct {
 		Code        *string `json:"code"`
 		Name        *string `json:"name"`

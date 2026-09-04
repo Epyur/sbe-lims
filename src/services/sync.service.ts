@@ -9,6 +9,7 @@ import type {
   EquipmentDocument,
   EquipmentLink,
   EquipmentMethodLink,
+  EquipmentNotifySettings,
   Inventor,
   Lab,
   LabGroup,
@@ -401,10 +402,15 @@ export class LimsSyncService {
     }
   }
 
-  async createEquipment(data: { code: string; name: string; location?: string; responsible?: string }): Promise<number> {
+  async createEquipment(
+    data: { code: string; name: string; location?: string; responsible?: string; lab_id?: number },
+  ): Promise<number> {
     return this.createEntity('/api/lab/equipment', data);
   }
 
+  /** lab_id: 0 (или отсутствие поля) — не менять/не привязывать; положительное —
+   * назначить эту лабу; см. lab-service handleUpdateEquipment (2026-09-04) — сервер
+   * трактует lab_id<=0 как «очистить в NULL», а отсутствие поля — как «не трогать». */
   async updateEquipment(
     id: number,
     data: Partial<{
@@ -412,7 +418,7 @@ export class LimsSyncService {
       commissioned_at: string; service_life: string; type: 'main' | 'auxiliary';
       verification_cert_number: string; verification_cert_date: string;
       verification_act_number: string; verification_act_date: string; verification_expiry_date: string;
-      calibration_interval_months: number;
+      calibration_interval_months: number; lab_id: number;
     }>,
   ): Promise<void> {
     await this.patchEntity(`/api/lab/equipment/${id}`, data);
@@ -597,27 +603,46 @@ export class LimsSyncService {
     await this.deleteEntity(`/api/lab/equipment/${mainId}/auxiliaries/${auxiliaryId}`);
   }
 
-  /** Настройки оповещений о приближении срока поверки (admin+) — единые на все
-   * оборудование: список получателей (email через запятую), пороги в днях. */
-  async getEquipmentNotifySettings(): Promise<{ enabled: boolean; days: number[]; recipients: string }> {
+  /** Настройки оповещений о приближении срока поверки — per-lab (2026-09-04, по
+   * прямому запросу пользователя: «у каждой лаборатории могут быть свои сроки и
+   * свои получатели уведомлений»). labId=0 — общий/дефолтный ряд. Просмотр доступен
+   * admin+ либо lab_admin хотя бы одной лабы вообще (не обязательно именно labId) —
+   * граница на запись строже, см. setEquipmentNotifySettings. Если у запрошенной
+   * лабы (labId>0) нет своего override, сервер возвращает общий ряд с
+   * configured=false — UI должен показать это как «используются общие настройки». */
+  async getEquipmentNotifySettings(labId: number): Promise<EquipmentNotifySettings> {
     const token = await this.getToken();
     const res = await this.request({
-      url: `${this.baseUrl}/api/lab/equipment-notify-settings`,
+      url: `${this.baseUrl}/api/lab/equipment-notify-settings?lab_id=${labId}`,
       method: 'GET',
       headers: { Authorization: `Bearer ${token}` },
     });
     this.assertOk(res);
-    const data = JSON.parse(res.text) as { enabled?: boolean; days?: number[]; recipients?: string };
-    return { enabled: !!data.enabled, days: Array.isArray(data.days) ? data.days : [], recipients: data.recipients || '' };
+    const data = JSON.parse(res.text) as Partial<EquipmentNotifySettings>;
+    return {
+      lab_id: data.lab_id ?? labId,
+      configured: !!data.configured,
+      enabled: !!data.enabled,
+      days: Array.isArray(data.days) ? data.days : [],
+      recipients: data.recipients || '',
+    };
   }
 
-  async setEquipmentNotifySettings(settings: { enabled: boolean; days: number[]; recipients: string }): Promise<void> {
+  /** reset=true — вернуть эту лабу (labId>0) к общим настройкам вместо upsert'а
+   * (удаляет её override на сервере); enabled/days/recipients игнорируются в этом
+   * случае. labId=0 (общий ряд) — только app-admin+, требует ту же роль, что
+   * правка справочников; lab_admin ЧУЖОЙ лабы получает 403 на labId>0. */
+  async setEquipmentNotifySettings(
+    labId: number,
+    settings: { enabled: boolean; days: number[]; recipients: string },
+    reset?: boolean,
+  ): Promise<void> {
     const token = await this.getToken();
     const res = await this.request({
       url: `${this.baseUrl}/api/lab/equipment-notify-settings`,
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify(settings),
+      body: JSON.stringify({ lab_id: labId, reset: !!reset, ...settings }),
     });
     this.assertOk(res);
   }

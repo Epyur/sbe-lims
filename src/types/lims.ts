@@ -585,8 +585,26 @@ export interface Equipment {
   verification_act_file_url: string;
   verification_expiry_date: string;
   calibration_interval_months: number | null;
+  /** Явная привязка к лабе (2026-09-04, не выводится из привязанных методов) — null,
+   * пока не назначена вручную через форму оборудования. Основа для per-lab резолва
+   * EquipmentNotifySettings. */
+  lab_id: number | null;
   created_at: string;
   updated_at: string;
+}
+
+/** Настройки оповещений о приближении срока поверки — одна запись НА ЛАБУ (lab_id),
+ * lab_id=0 — общий/дефолтный ряд (2026-09-04, по прямому запросу пользователя: «у
+ * каждой лаборатории могут быть свои сроки и свои получатели уведомлений», старые
+ * общие настройки остаются fallback'ом). configured — true, только если для
+ * запрошенной лабы есть СВОЙ ряд (не унаследовано от общего) — см.
+ * sync.service.ts getEquipmentNotifySettings. */
+export interface EquipmentNotifySettings {
+  lab_id: number;
+  configured: boolean;
+  enabled: boolean;
+  days: number[];
+  recipients: string;
 }
 
 /** Запись журнала калибровок оборудования. method_id — чьи calibration_attributes
