@@ -244,6 +244,11 @@ func main() {
 	// даже до requireLabRead — падал на этом внешнем гейте.
 	mux.HandleFunc("POST /api/lab/requests/{id}/protocol", s.requirePerm("viewer")(s.handleProtocol))
 	mux.HandleFunc("GET /api/lab/requests/{id}/export.xlsx", s.requirePerm("viewer")(s.handleExportExcel))
+	// export-summary.xlsx (2026-09-04) — сводный экспорт по списку заявок из
+	// тела запроса (export_summary.go), та же базовая роль на роуте, что и
+	// одиночный export.xlsx; реальная видимость — per-id requireLabRead внутри
+	// хендлера, недоступные id молча исключаются, а не 403 на весь запрос.
+	mux.HandleFunc("POST /api/lab/requests/export-summary.xlsx", s.requirePerm("viewer")(s.handleExportSummaryExcel))
 	mux.HandleFunc("GET /api/lab/dashboard", s.requirePerm("viewer")(s.handleDashboard))
 
 	httpServer := &http.Server{
