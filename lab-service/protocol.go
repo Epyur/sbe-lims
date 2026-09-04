@@ -90,15 +90,20 @@ type placeholderCtx struct {
 	currentBlockID string
 }
 
-// showInKind — какой из трёх флагов блока проверять для запрошенного вида
-// вывода. "protocol" (полный) — поведение по умолчанию для неизвестного
-// значения kind, чтобы старые клиенты без ?template= получали прежнее поведение.
-func showInKind(showInUI, showInExcerpt, showInProtocol bool, kind string) bool {
+// showInKind — какой из флагов блока проверять для запрошенного вида вывода.
+// "protocol" (полный) — поведение по умолчанию для неизвестного значения kind,
+// чтобы старые клиенты без ?template= получали прежнее поведение. "help" —
+// явный отдельный case (2026-09-04, 4-й вид, "Справка" — содержимое подсказки
+// над "Не соответствует" в веб-портале, см. DocumentBlock.ShowInHelp): БЕЗ
+// него default молча резолвил бы "help" во ShowInProtocol, что неверно.
+func showInKind(showInUI, showInExcerpt, showInProtocol, showInHelp bool, kind string) bool {
 	switch kind {
 	case "ui":
 		return showInUI
 	case "excerpt":
 		return showInExcerpt
+	case "help":
+		return showInHelp
 	default:
 		return showInProtocol
 	}
@@ -107,7 +112,7 @@ func showInKind(showInUI, showInExcerpt, showInProtocol bool, kind string) bool 
 func filterBlocksForKind(blocks []DocumentBlock, kind string) []DocumentBlock {
 	out := make([]DocumentBlock, 0, len(blocks))
 	for _, b := range blocks {
-		if showInKind(b.ShowInUI, b.ShowInExcerpt, b.ShowInProtocol, kind) {
+		if showInKind(b.ShowInUI, b.ShowInExcerpt, b.ShowInProtocol, b.ShowInHelp, kind) {
 			out = append(out, b)
 		}
 	}
@@ -706,6 +711,8 @@ func docTitle(kind string) string {
 		return "Краткий вид"
 	case "excerpt":
 		return "Выписка из протокола"
+	case "help":
+		return "Справка"
 	default:
 		return "Протокол испытаний"
 	}
@@ -1290,14 +1297,18 @@ JOIN methods m ON m.id = r.method_id WHERE r.id = $1 ORDER BY m.id`, requestID)
 
 // ---- Handler ----
 
-// templateKindFromQuery — ?template=ui|excerpt|protocol, по умолчанию "protocol"
-// (старое поведение для клиентов без выбора вида).
+// templateKindFromQuery — ?template=ui|excerpt|protocol|help, по умолчанию
+// "protocol" (старое поведение для клиентов без выбора вида). "help" —
+// 2026-09-04, содержимое подсказки над "Не соответствует" в веб-портале
+// (см. DocumentBlock.ShowInHelp).
 func templateKindFromQuery(r *http.Request) string {
 	switch r.URL.Query().Get("template") {
 	case "ui":
 		return "ui"
 	case "excerpt":
 		return "excerpt"
+	case "help":
+		return "help"
 	default:
 		return "protocol"
 	}

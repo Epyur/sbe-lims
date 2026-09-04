@@ -149,6 +149,10 @@ func main() {
 	mux.HandleFunc("GET /api/lab/requests/{id}/sent-emails", s.requirePerm("viewer")(s.handleListSentEmails))
 	// WP8 (2026-08-29): журнал изменений заявки/результатов, см. audit_log.go.
 	mux.HandleFunc("GET /api/lab/requests/{id}/audit-log", s.requirePerm("viewer")(s.handleListAuditLog))
+	// Точечное исправление целевого показателя заказчиком (2026-09-04) — baseline
+	// "viewer", реальная граница внутри handler'а (владелец заявки ИЛИ лаб. доступ),
+	// по образцу handleUpdateLab/handleSetLabMember.
+	mux.HandleFunc("POST /api/lab/requests/{id}/target-indicator", s.requirePerm("viewer")(s.handleSetTargetIndicator))
 
 	// Группы
 	mux.HandleFunc("GET /api/lab/groups", s.requirePerm("viewer")(s.handleListGroups))

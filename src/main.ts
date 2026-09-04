@@ -52,8 +52,9 @@ export default class SbeLimsPlugin extends Plugin {
 
     if (this.settings.lastAnnouncedVersion !== this.manifest.version) {
       void this.announceUpdateSafely(
-        'В панель фильтров списка заявок добавлен фильтр по статусу ' +
-        '(все/активные/завершённые).',
+        'В конфигураторе представления метода появился четвёртый вид вывода ' +
+        '«Справка» — выбранные пункты показываются во всплывающей подсказке ' +
+        'веб-портала при наведении на «Не соответствует».',
       );
     }
   }

@@ -857,3 +857,112 @@ WHERE id = $1`, id, req.Status)
 	s.logStatusChange(r.Context(), id, currentEmail(r), existing.Status, req.Status)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
+
+// handleSetTargetIndicator — узкий эндпоинт (2026-09-04, по прямому запросу
+// пользователя): заказчик (владелец заявки) сам исправляет ОТСУТСТВУЮЩИЙ
+// целевой показатель объекта для метода этой заявки (objects.characteristics.
+// target_indicators[method_id], см. loadTargetIndicator), не имея editor-доступа
+// к объекту в целом. В отличие от handleUpdateObject (references.go — полная
+// замена characteristics целиком, editor-only) делает ТОЧЕЧНЫЙ jsonb_set только
+// по одному ключу — остальные поля characteristics (ekn/batch_number/...) не
+// затрагиваются. Разрешает запись, только если показатель ещё НЕ задан — правка
+// уже заданного значения остаётся editor+ действием через handleUpdateObject
+// (409, если уже есть). После записи пересчитывает формулы/классификацию тем же
+// путём, что handleCalculateSeries (recalcRequestMethod, recalc_all.go), чтобы
+// compliance ("Не оценивается" → оценка) в уже сохранённых результатах сразу
+// обновился без отдельного действия лаборанта.
+func (s *Server) handleSetTargetIndicator(w http.ResponseWriter, r *http.Request) {
+	requestID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid id"})
+		return
+	}
+	var req struct {
+		Indicator string `json:"indicator"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json"})
+		return
+	}
+	req.Indicator = strings.TrimSpace(req.Indicator)
+	if req.Indicator == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "indicator is required"})
+		return
+	}
+
+	ctx := r.Context()
+	var ownerEmail string
+	var objectID, methodID int64
+	err = s.pool.QueryRow(ctx,
+		`SELECT owner_email, object_id, method_id FROM requests WHERE id = $1`, requestID).
+		Scan(&ownerEmail, &objectID, &methodID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeJSON(w, http.StatusNotFound, map[string]any{"error": "request not found"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
+		return
+	}
+
+	// Владелец заявки правит свой же показатель; сотрудник лаборатории заявки
+	// (requireLabAccess — та же граница, что и у расчёта/статуса выше) — тоже,
+	// на случай если он вводит его по просьбе заказчика.
+	email := currentEmail(r)
+	canEdit := email != "" && email == ownerEmail
+	if !canEdit {
+		canEdit, err = s.requireLabAccess(ctx, email, requestID)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
+			return
+		}
+	}
+	if !canEdit {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden: not owner or lab staff"})
+		return
+	}
+
+	rankOrder, err := s.loadMethodRankOrder(ctx, methodID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
+		return
+	}
+	if indexOfString(rankOrder, req.Indicator) < 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "недопустимый целевой показатель для этого метода"})
+		return
+	}
+
+	existing, err := s.loadTargetIndicator(ctx, requestID, methodID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
+		return
+	}
+	if existing != "" {
+		writeJSON(w, http.StatusConflict, map[string]any{"error": "целевой показатель уже задан — правка через справочник объектов"})
+		return
+	}
+
+	if _, err := s.pool.Exec(ctx, `
+UPDATE objects SET
+	characteristics = jsonb_set(coalesce(characteristics, '{}'::jsonb), ARRAY['target_indicators', $1], to_jsonb($2::text), true),
+	updated_at = now()
+WHERE id = $3`, strconv.FormatInt(methodID, 10), req.Indicator, objectID); err != nil {
+		log.Printf("set target indicator: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
+		return
+	}
+
+	// Показатель уже сохранён к этому моменту — ошибка пересчёта ниже не должна
+	// выглядеть как "показатель не сохранился" (неправда). Логируем и сообщаем
+	// об этом отдельным полем, не трогая "ok" (мягкая деградация, как best-effort
+	// шаги в handleDeleteResultSeries/WP2-почта — см. их комментарии).
+	if err := s.recalcRequestMethod(ctx, requestID, methodID, email); err != nil {
+		log.Printf("set target indicator: recompute request %d method %d: %v", requestID, methodID, err)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":      true,
+			"warning": "показатель сохранён, но автоматический пересчёт не выполнен — обратитесь в лабораторию",
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}

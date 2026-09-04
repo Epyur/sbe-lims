@@ -2332,9 +2332,10 @@ export class LimsView extends ItemView {
     // ---- Блок 3б: представление данных — блоки форматированного текста
     // (2026-08-23, визуальный редактор с плейсхолдерами — заменил секции
     // полей от 2026-08-22, отвергнутые пользователем как неподходящая модель
-    // для документа с реквизитами/описаниями/юридическим футером). Ровно 3
-    // вида вывода (Кратко/Выписка/Протокол) — по решению пользователя простые
-    // галочки на каждом блоке, без отдельного списка шаблонов. ----
+    // для документа с реквизитами/описаниями/юридическим футером). Виды
+    // вывода (Кратко/Выписка/Протокол, 2026-09-04 + Справка) — по решению
+    // пользователя простые галочки на каждом блоке, без отдельного списка
+    // шаблонов. ----
     const blocks: DocumentBlock[] = cfg.presentation.blocks.map(b => ({ ...b, content: b.content.map(n => ({ ...n })) }));
     // Авто-блоки графиков (2026-08-26, прямой запрос пользователя): раньше графики
     // показывались в карточке заявки отдельной жёсткой панелью мимо системы блоков
@@ -2352,6 +2353,7 @@ export class LimsView extends ItemView {
         show_in_ui: true,
         show_in_excerpt: false,
         show_in_protocol: true,
+        show_in_help: false,
       });
     }
     const presentationBody = this.renderCollapsibleSection(form, 'Представление данных (короткий вид / выписка / протокол)');
@@ -2359,7 +2361,8 @@ export class LimsView extends ItemView {
       'Блоки — форматированный текст с плейсхолдерами (системными — партия/материал/ЕКН и ' +
       'т.п., атрибутами метода). Динамические данные (несколько серий) — только в таблице; ' +
       'вне таблицы атрибут эксперимента сворачивается до одного значения (среднее/мин/макс/ ' +
-      'первая/последняя серия). Три галочки на каждом блоке — в каком из трёх видов вывода он показывается.',
+      'первая/последняя серия). Галочки на каждом блоке — в каком из видов вывода он показывается ' +
+      '(Справка — содержимое подсказки над "Не соответствует" в веб-портале).',
     );
     const blocksListEl = presentationBody.createDiv();
     redrawBlocks = () => {
@@ -2369,7 +2372,7 @@ export class LimsView extends ItemView {
     redrawBlocks();
     const addBlockBtn = presentationBody.createEl('button', { text: '➕ Добавить блок', cls: 'tn-btn tn-btn-ghost' });
     addBlockBtn.addEventListener('click', () => {
-      blocks.push({ id: `blk_${Date.now()}`, title: 'Новый блок', content: [], show_in_ui: true, show_in_excerpt: false, show_in_protocol: true });
+      blocks.push({ id: `blk_${Date.now()}`, title: 'Новый блок', content: [], show_in_ui: true, show_in_excerpt: false, show_in_protocol: true, show_in_help: false });
       redrawBlocks();
     });
     // Копирование блока из другого метода (2026-08-27, прямой запрос пользователя —
@@ -2775,6 +2778,15 @@ export class LimsView extends ItemView {
       protoCb.checked = block.show_in_protocol;
       protoLabel.createSpan({ text: 'Протокол' });
       protoCb.addEventListener('change', () => { block.show_in_protocol = protoCb.checked; });
+
+      // Справка (2026-09-04) — содержимое всплывающей подсказки над "Не
+      // соответствует" в веб-портале; свой независимый флаг, отдельный от
+      // "Выписка" (раньше подсказка ошибочно переиспользовала show_in_excerpt).
+      const helpLabel = head.createEl('label', { cls: 'tn-lims-flex' });
+      const helpCb = helpLabel.createEl('input', { attr: { type: 'checkbox' } });
+      helpCb.checked = block.show_in_help;
+      helpLabel.createSpan({ text: 'Справка' });
+      helpCb.addEventListener('change', () => { block.show_in_help = helpCb.checked; });
 
       const delBtn = head.createEl('button', { text: '✖ Удалить блок', cls: 'tn-btn tn-btn-ghost' });
       delBtn.addEventListener('click', () => {
