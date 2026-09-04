@@ -823,6 +823,68 @@ func aggregatedAttributeIDs(cfg *MethodConfig) map[string]bool {
 	return out
 }
 
+// resolveResultCompliance находит пару атрибутов (Результат, Соответствие) для
+// метода — "compliance rule" метода — это правило классификации (cfg.Classification),
+// у которого ХОТЯ БЫ ОДНА ветка содержит clause с compare_to.kind=="target_indicator"
+// (сравнение с целевым показателем заявки). Среди subjects этого правила берётся
+// ГЛАВНЫЙ (headline) — тот, чей input_attribute_id ссылается на атрибут уровня
+// "aggregated" (aggregatedAttributeIDs) — его input_attribute_id и есть "Результат"
+// (сырая достигнутая оценка, напр. "Г4"), а output_attribute_id — "Соответствие"
+// ("Соответствует"/"Не соответствует"/"Не оценивается"). Правило может иметь
+// НЕСКОЛЬКО subjects (напр. ГГ — 6: один агрегированный заголовочный
+// combustibility_group -> target_group_compliance, плюс 5 подпунктов вроде
+// smoke_compliance) — нужен только агрегированный; если ни один subject правила не
+// aggregated-level (граничный случай), берём ПЕРВЫЙ subject правила. Если у метода
+// вообще нет правила, сравнивающего с целевым показателем — оба значения пусты.
+// См. AGENTS.md 2026-09-04 (структура подтверждена на живых конфигах ГГ/ГВ/РП).
+func resolveResultCompliance(cfg *MethodConfig) (resultAttrID, complianceAttrID string) {
+	aggIDs := aggregatedAttributeIDs(cfg)
+	for _, rule := range cfg.Classification {
+		branches, _ := rule["branches"].([]any)
+		hasTargetCompare := false
+		for _, b := range branches {
+			branch, ok := b.(map[string]any)
+			if !ok {
+				continue
+			}
+			clauses, _ := branch["clauses"].([]any)
+			for _, c := range clauses {
+				clause, ok := c.(map[string]any)
+				if !ok {
+					continue
+				}
+				compareTo, _ := clause["compare_to"].(map[string]any)
+				if kind, _ := compareTo["kind"].(string); kind == "target_indicator" {
+					hasTargetCompare = true
+				}
+			}
+		}
+		if !hasTargetCompare {
+			continue
+		}
+		subjects, _ := rule["subjects"].([]any)
+		var firstIn, firstOut string
+		for i, sj := range subjects {
+			subject, ok := sj.(map[string]any)
+			if !ok {
+				continue
+			}
+			in, _ := subject["input_attribute_id"].(string)
+			out, _ := subject["output_attribute_id"].(string)
+			if i == 0 {
+				firstIn, firstOut = in, out
+			}
+			if aggIDs[in] {
+				return in, out
+			}
+		}
+		if firstIn != "" {
+			return firstIn, firstOut
+		}
+	}
+	return "", ""
+}
+
 // applyAggregatedClassification — аналог applyClassification, но для subjects,
 // чей output_attribute_id — атрибут уровня "aggregated" (2026-08-23; найдено на
 // методе ГВ: flammability_group читает agg_flam_flow_density — обе aggregated,

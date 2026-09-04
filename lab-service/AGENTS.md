@@ -1292,6 +1292,42 @@ docker compose exec lab wget -qO- http://localhost:3000/api/lab/health   # вн�
 
 ## История
 
+- **2026-09-04 — DELETE проектов/групп (владелец или admin+); автоопределение «Результат»/«Соответствие».**
+  Две задачи пользователя.
+  1. **`DELETE /api/lab/projects/{id}`** (`projects.go`, `handleDeleteProject`) и
+     **`DELETE /api/lab/groups/{id}`** (`groups.go`, `handleDeleteGroup`) — не
+     существовали вовсе до этой сессии. Гейт — тот же owner-or-admin, что уже
+     был у `PATCH`/группового `groupOwnerChecks`. Перед удалением — подсчёт
+     блокирующих ссылок (`requests.project_id`/`projects.parent_id` для
+     проекта; `requests.group_id`/`projects.group_id` для группы —
+     `group_members` не блокирует, каскадится сам) — при наличии ссылок 409 с
+     понятным русским сообщением (новый хелпер `ruPlural` для склонения
+     заявка/заявки/заявок). FK в схеме без `ON DELETE` — сырой `DELETE`
+     упал бы ошибкой Postgres, теперь заранее понятное сообщение.
+  2. **Автоопределение «Результат»/«Соответствие»** — новая
+     `resolveResultCompliance(cfg)` (`results.go`, рядом с
+     `aggregatedAttributeIDs`): вместо привязки к конкретным названиям
+     атрибутов (те произвольны, задаются автором метода) — находит правило
+     классификации, сравнивающее с `target_indicator` заявки, и среди его
+     subjects берёт ГЛАВНЫЙ (agregated-level input) — его `input_attribute_id`
+     = «Результат» (сырая оценка, напр. "Г4"), `output_attribute_id` =
+     «Соответствие» ("Соответствует"/"Не соответствует"/"Не оценивается").
+     Структура подтверждена на живых конфигах ГГ (6 subjects — 1 агрегированный
+     + 5 деталей по под-показателям, берётся только агрегированный)/ГВ/РП —
+     везде одна и та же форма. `requests.go`: `Request` += `Result`/
+     `Compliance` (json `result`/`compliance`), `enrichResultCompliance` —
+     батч-запрос `aggregated_results WHERE calculation_type='formula_aggregated'
+     AND request_id = ANY($1)` (не N+1) + кэш `MethodConfig`/пары атрибутов по
+     `method_id`, вызывается один раз внутри `loadVisibleRequests` — покрывает
+     и `GET /requests`, и `/sync/pull` разом. Используется только веб-версией
+     (список заявок, секции «Результат»/«Соответствие» + подсказка с кратким
+     блоком `ShowInExcerpt` для «Не соответствует» — см. `sbe-web/AGENTS.md`);
+     Obsidian-плагины эти поля не читают.
+  - Сверено на боевых данных: заявка 1378 (метод ГГ) — `combustibility_group=
+    "Г4"`, `target_group_compliance="Не соответствует"` — именно агрегированная
+    пара выбирается верно, не один из 5 второстепенных под-показателей.
+  - `go build ./...`/`go vet ./...`/`go test ./...` — чисто.
+
 - **2026-09-04 — Настройки лаборатории открыты для lab_admin; оповещения о поверке стали per-lab.**
   Прямой запрос пользователя: «настройки лаборатории должны быть полностью
   доступны администратору лаборатории, а не только суперадмину» + «у каждой

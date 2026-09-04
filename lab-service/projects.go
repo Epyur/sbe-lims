@@ -303,6 +303,89 @@ WHERE id = $1`, id, req.ParentID, req.Code, req.Name, req.Description, req.IsEkn
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
+// handleDeleteProject удаляет проект. Тот же owner-or-admin паттерн, что и
+// handleUpdateProject выше. FK requests.project_id/projects.parent_id — обычные
+// REFERENCES без ON DELETE (см. AGENTS.md 2026-09-04) — удаление проекта, на
+// который что-то ссылается, упало бы ошибкой БД; вместо этого считаем ссылки
+// заранее и отвечаем понятным 409 на русском.
+func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid id"})
+		return
+	}
+
+	var ownerEmail string
+	if err := s.pool.QueryRow(r.Context(),
+		`SELECT owner_email FROM projects WHERE id = $1`, id).Scan(&ownerEmail); err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "project not found"})
+		return
+	}
+	email := currentEmail(r)
+	role, err := s.effectiveRole(r.Context(), appIDFromEnv(), email)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
+		return
+	}
+	if ownerEmail != email && roleRank(role) < roleRank("admin") {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden: not owner"})
+		return
+	}
+
+	var requestCount, subprojectCount int
+	if err := s.pool.QueryRow(r.Context(),
+		`SELECT COUNT(*) FROM requests WHERE project_id = $1`, id).Scan(&requestCount); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
+		return
+	}
+	if err := s.pool.QueryRow(r.Context(),
+		`SELECT COUNT(*) FROM projects WHERE parent_id = $1`, id).Scan(&subprojectCount); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
+		return
+	}
+	if requestCount > 0 || subprojectCount > 0 {
+		writeJSON(w, http.StatusConflict, map[string]any{"error": projectDeleteConflictMessage(requestCount, subprojectCount)})
+		return
+	}
+
+	if _, err := s.pool.Exec(r.Context(), `DELETE FROM projects WHERE id = $1`, id); err != nil {
+		log.Printf("delete project: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// projectDeleteConflictMessage — русское сообщение 409 для handleDeleteProject:
+// называет только ненулевые счётчики (см. спеку — "омитить тот счётчик, который
+// равен нулю, грамматически").
+func projectDeleteConflictMessage(requestCount, subprojectCount int) string {
+	parts := make([]string, 0, 2)
+	if requestCount > 0 {
+		parts = append(parts, strconv.Itoa(requestCount)+" "+ruPlural(requestCount, "заявка", "заявки", "заявок"))
+	}
+	if subprojectCount > 0 {
+		parts = append(parts, strconv.Itoa(subprojectCount)+" "+ruPlural(subprojectCount, "подпроект", "подпроекта", "подпроектов"))
+	}
+	return "нельзя удалить проект: на него ссылаются " + strings.Join(parts, " и ")
+}
+
+// ruPlural — русское согласование числительного (1 заявка / 2 заявки / 5 заявок).
+func ruPlural(n int, one, few, many string) string {
+	n = n % 100
+	if n >= 11 && n <= 14 {
+		return many
+	}
+	switch n % 10 {
+	case 1:
+		return one
+	case 2, 3, 4:
+		return few
+	default:
+		return many
+	}
+}
+
 // projectAndDescendants возвращает id проекта и всех его потомков (для защиты
 // от цикла при смене parent_id — зеркало photo-service folderAndDescendants).
 func (s *Server) projectAndDescendants(ctx context.Context, rootID int64) ([]int64, error) {

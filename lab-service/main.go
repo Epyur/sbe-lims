@@ -131,6 +131,9 @@ func main() {
 	mux.HandleFunc("GET /api/lab/projects", s.requirePerm("viewer")(s.handleListProjects))
 	mux.HandleFunc("POST /api/lab/projects", s.requirePerm("editor")(s.handleCreateProject))
 	mux.HandleFunc("PATCH /api/lab/projects/{id}", s.requirePerm("editor")(s.handleUpdateProject))
+	// Удаление проекта (2026-09-04) — владелец/admin, блокируется ссылающимися
+	// заявками/подпроектами (409), см. handleDeleteProject.
+	mux.HandleFunc("DELETE /api/lab/projects/{id}", s.requirePerm("editor")(s.handleDeleteProject))
 
 	// Заявки
 	mux.HandleFunc("GET /api/lab/requests", s.requirePerm("viewer")(s.handleListRequests))
@@ -152,6 +155,9 @@ func main() {
 	mux.HandleFunc("POST /api/lab/groups", s.requirePerm("editor")(s.handleCreateGroup))
 	mux.HandleFunc("POST /api/lab/groups/{id}/members", s.requirePerm("editor")(s.handleAddGroupMember))
 	mux.HandleFunc("DELETE /api/lab/groups/{id}/members/{email}", s.requirePerm("editor")(s.handleRemoveGroupMember))
+	// Удаление группы (2026-09-04) — владелец/admin, блокируется ссылающимися
+	// заявками/проектами (409), см. handleDeleteGroup.
+	mux.HandleFunc("DELETE /api/lab/groups/{id}", s.requirePerm("editor")(s.handleDeleteGroup))
 
 	// Синхронизация кэша плагина
 	mux.HandleFunc("GET /api/lab/sync/pull", s.requirePerm("viewer")(s.handlePull))

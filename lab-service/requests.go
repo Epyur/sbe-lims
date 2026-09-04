@@ -106,6 +106,14 @@ type Request struct {
 	Files       []RequestFile `json:"files"`
 	CreatedAt   string        `json:"created_at"`
 	UpdatedAt   string        `json:"updated_at"`
+	// Result/Compliance (2026-09-04) — НЕ колонки requests, а производные значения,
+	// подставляемые enrichResultCompliance после загрузки: "Результат" (сырая
+	// достигнутая оценка метода, напр. "Г4") и "Соответствие" ("Соответствует"/
+	// "Не соответствует"/"Не оценивается") — см. resolveResultCompliance (results.go)
+	// и AGENTS.md. Пусто, если у метода нет compliance-правила или результаты ещё
+	// не посчитаны.
+	Result     string `json:"result"`
+	Compliance string `json:"compliance"`
 }
 
 // requestColumnsSQL — колонки requests в порядке, ожидаемом scanRequestRow. Единая
@@ -390,7 +398,84 @@ func (s *Server) loadVisibleRequests(ctx context.Context, email string) ([]Reque
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	if err := s.enrichResultCompliance(ctx, requests); err != nil {
+		return nil, err
+	}
 	return requests, nil
+}
+
+// enrichResultCompliance заполняет Request.Result/Compliance по каждой заявке —
+// общая точка для handleListRequests и handlePull (оба идут через
+// loadVisibleRequests, см. выше). Не N+1: MethodConfig и resolveResultCompliance
+// кэшируются по method_id (в видимом наборе заявок методов немного), а
+// aggregated_results читается ОДНИМ батч-запросом по всем id заявок сразу.
+// Источник — та же строка (request_id, method_id, calculation_type=
+// 'formula_aggregated'), куда applyAggregatedFormulas пишет и aggregated-формулы,
+// И classification-выходы уровня "aggregated" (applyAggregatedClassification
+// мутирует тот же result перед записью, см. results.go) — т.е. compliance уже
+// там, если у метода вообще есть aggregated-правило классификации.
+func (s *Server) enrichResultCompliance(ctx context.Context, requests []Request) error {
+	if len(requests) == 0 {
+		return nil
+	}
+	type resultCompliancePair struct{ resultID, complianceID string }
+	pairByMethod := make(map[int64]resultCompliancePair, 8)
+	ids := make([]int64, 0, len(requests))
+	for _, req := range requests {
+		ids = append(ids, req.ID)
+		if req.MethodID <= 0 {
+			continue
+		}
+		if _, ok := pairByMethod[req.MethodID]; ok {
+			continue
+		}
+		cfg, err := s.loadMethodConfig(ctx, req.MethodID)
+		if err != nil {
+			log.Printf("enrichResultCompliance: loadMethodConfig method=%d: %v", req.MethodID, err)
+			pairByMethod[req.MethodID] = resultCompliancePair{}
+			continue
+		}
+		resultID, complianceID := resolveResultCompliance(cfg)
+		pairByMethod[req.MethodID] = resultCompliancePair{resultID, complianceID}
+	}
+
+	rows, err := s.pool.Query(ctx, `
+SELECT request_id, result_data FROM aggregated_results
+WHERE calculation_type = 'formula_aggregated' AND request_id = ANY($1)`, ids)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	dataByRequest := make(map[int64]map[string]any, len(ids))
+	for rows.Next() {
+		var requestID int64
+		var dataRaw []byte
+		if err := rows.Scan(&requestID, &dataRaw); err != nil {
+			log.Printf("enrichResultCompliance scan: %v", err)
+			continue
+		}
+		data := map[string]any{}
+		if len(dataRaw) > 0 && string(dataRaw) != "{}" {
+			_ = json.Unmarshal(dataRaw, &data)
+		}
+		dataByRequest[requestID] = data
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	for i := range requests {
+		pair, ok := pairByMethod[requests[i].MethodID]
+		if !ok || pair.resultID == "" {
+			continue
+		}
+		data := dataByRequest[requests[i].ID]
+		requests[i].Result, _ = data[pair.resultID].(string)
+		if pair.complianceID != "" {
+			requests[i].Compliance, _ = data[pair.complianceID].(string)
+		}
+	}
+	return nil
 }
 
 // ---- Handlers ----

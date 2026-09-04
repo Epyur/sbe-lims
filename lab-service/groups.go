@@ -204,3 +204,59 @@ DELETE FROM group_members WHERE group_id = $1 AND email = $2`, groupID, email)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
+
+// handleDeleteGroup удаляет группу (владелец ИЛИ admin — groupOwnerChecks). Группа,
+// не найденная в БД, и группа, где вызывающий не владелец/админ, отвечают одним и
+// тем же 403 — groupOwnerChecks не различает эти два случая (owner=="" в обоих),
+// то же самое уже делают handleAddGroupMember/handleRemoveGroupMember выше, здесь
+// зеркалим тот же паттерн. group_members каскадируется (ON DELETE CASCADE в схеме)
+// и не блокирует удаление; requests.group_id/projects.group_id — обычные REFERENCES
+// без ON DELETE (см. AGENTS.md 2026-09-04), поэтому считаем ссылки заранее, как и
+// у handleDeleteProject.
+func (s *Server) handleDeleteGroup(w http.ResponseWriter, r *http.Request) {
+	groupID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid id"})
+		return
+	}
+	if _, ok := s.groupOwnerChecks(r.Context(), r, groupID); !ok {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden: not group owner"})
+		return
+	}
+
+	var requestCount, projectCount int
+	if err := s.pool.QueryRow(r.Context(),
+		`SELECT COUNT(*) FROM requests WHERE group_id = $1`, groupID).Scan(&requestCount); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
+		return
+	}
+	if err := s.pool.QueryRow(r.Context(),
+		`SELECT COUNT(*) FROM projects WHERE group_id = $1`, groupID).Scan(&projectCount); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
+		return
+	}
+	if requestCount > 0 || projectCount > 0 {
+		writeJSON(w, http.StatusConflict, map[string]any{"error": groupDeleteConflictMessage(requestCount, projectCount)})
+		return
+	}
+
+	if _, err := s.pool.Exec(r.Context(), `DELETE FROM groups WHERE id = $1`, groupID); err != nil {
+		log.Printf("delete group: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// groupDeleteConflictMessage — русское сообщение 409 для handleDeleteGroup, см.
+// projectDeleteConflictMessage (projects.go) за тем же паттерном.
+func groupDeleteConflictMessage(requestCount, projectCount int) string {
+	parts := make([]string, 0, 2)
+	if requestCount > 0 {
+		parts = append(parts, strconv.Itoa(requestCount)+" "+ruPlural(requestCount, "заявка", "заявки", "заявок"))
+	}
+	if projectCount > 0 {
+		parts = append(parts, strconv.Itoa(projectCount)+" "+ruPlural(projectCount, "проект", "проекта", "проектов"))
+	}
+	return "нельзя удалить группу: на неё ссылаются " + strings.Join(parts, " и ")
+}

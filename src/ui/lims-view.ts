@@ -285,6 +285,9 @@ export class LimsView extends ItemView {
   private filterIdentifier = '';
   private filterBatch = '';
   private filterOwnerEmail = '';
+  /** 'all' | 'active' (new/processing) | 'completed' — 2026-09-04, прямой запрос
+   * пользователя. */
+  private filterStatus: 'all' | 'active' | 'completed' = 'all';
   private filterTimeout: number | null = null;
   /** Kanban-доска «Очередь лаборатории»: заявка, которую в данный момент тащат
    * (см. renderQueueBoard) — module-scope не подходит, т.к. вьюх может быть
@@ -994,6 +997,18 @@ export class LimsView extends ItemView {
       void this.renderRequests(this.currentRequestsFilter);
     });
 
+    const statusGroup = filterBar.createDiv({ cls: 'tn-lims-filter-group' });
+    statusGroup.createEl('label', { text: 'Статус', cls: 'tn-lims-filter-lbl' });
+    const statusSelect = statusGroup.createEl('select', { cls: 'tn-lims-select' });
+    statusSelect.createEl('option', { value: 'all', text: 'Все' });
+    statusSelect.createEl('option', { value: 'active', text: 'Активные' });
+    statusSelect.createEl('option', { value: 'completed', text: 'Завершённые' });
+    statusSelect.value = this.filterStatus;
+    statusSelect.addEventListener('change', () => {
+      this.filterStatus = statusSelect.value as 'all' | 'active' | 'completed';
+      void this.renderRequests(this.currentRequestsFilter);
+    });
+
     const objNameGroup = filterBar.createDiv({ cls: 'tn-lims-filter-group' });
     objNameGroup.createEl('label', { text: 'Название объекта', cls: 'tn-lims-filter-lbl' });
     const objNameInput = objNameGroup.createEl('input', { attr: { type: 'text', placeholder: 'Название объекта' }, cls: 'tn-lims-input' });
@@ -1037,6 +1052,7 @@ export class LimsView extends ItemView {
       this.filterDateFrom = '';
       this.filterDateTo = '';
       this.filterMethodId = null;
+      this.filterStatus = 'all';
       this.filterObjectName = '';
       this.filterIdentifier = '';
       this.filterBatch = '';
@@ -1060,6 +1076,8 @@ export class LimsView extends ItemView {
       if (new Date(r.created_at).getTime() > toMs) return false;
     }
     if (this.filterMethodId !== null && r.method_id !== this.filterMethodId) return false;
+    if (this.filterStatus === 'active' && r.status === 'completed') return false;
+    if (this.filterStatus === 'completed' && r.status !== 'completed') return false;
     const objNameQ = this.filterObjectName.trim().toLowerCase();
     if (objNameQ && !this.objectName(r.object_id).toLowerCase().includes(objNameQ)) return false;
     const idQ = this.filterIdentifier.trim().toLowerCase();
