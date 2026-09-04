@@ -67,63 +67,6 @@ export class LimsSettingsTab extends PluginSettingTab {
     const mailDiv = containerEl.createDiv({ cls: 'tn-lims-meta' });
     mailDiv.setText('Загрузка…');
     void this.renderMailSettings(mailDiv);
-
-    new Setting(containerEl)
-      .setHeading()
-      .setName('Уведомления о сроке поверки (администратор)');
-
-    const notifyDiv = containerEl.createDiv({ cls: 'tn-lims-meta' });
-    notifyDiv.setText('Загрузка…');
-    void this.renderEquipmentNotifySettings(notifyDiv);
-  }
-
-  /** Оповещения о приближении «Действует до» акта поверки оборудования (2026-09-03) —
-   * единые настройки на весь модуль (получатели+пороги в днях), см. AGENTS.md.
-   * Тот же гейт видимости, что «Приём результатов по email» выше. */
-  private async renderEquipmentNotifySettings(container: HTMLElement): Promise<void> {
-    try {
-      const me = await this.plugin.syncService.getMyPermission();
-      if (!me.hasAccess || (me.role !== 'admin' && me.role !== 'superadmin')) {
-        container.setText('Доступно только администратору.');
-        return;
-      }
-      container.empty();
-
-      const settings = await this.plugin.syncService.getEquipmentNotifySettings();
-      let enabled = settings.enabled;
-      let days = settings.days.join(',');
-      let recipients = settings.recipients;
-
-      new Setting(container)
-        .setName('Включить оповещения')
-        .setDesc('Письмо получателям, когда до «Действует до» акта поверки оборудования остаётся заданное число дней.')
-        .addToggle(t => t.setValue(enabled).onChange(v => { enabled = v; }));
-
-      new Setting(container)
-        .setName('За сколько дней предупреждать')
-        .setDesc('Через запятую, например 30,14,7')
-        .addText(t => t.setPlaceholder('30,14,7').setValue(days).onChange(v => { days = v.trim(); }));
-
-      new Setting(container)
-        .setName('Получатели')
-        .setDesc('Email через запятую')
-        .addText(t => t.setPlaceholder('email@tn.ru').setValue(recipients).onChange(v => { recipients = v.trim(); }));
-
-      new Setting(container).addButton(b => b
-        .setButtonText('💾 Сохранить')
-        .setCta()
-        .onClick(async () => {
-          const parsedDays = days.split(',').map(d => Number(d.trim())).filter(d => Number.isFinite(d) && d > 0);
-          try {
-            await this.plugin.syncService.setEquipmentNotifySettings({ enabled, days: parsedDays, recipients });
-            new Notice('Настройки сохранены');
-          } catch (e: unknown) {
-            new Notice(`Ошибка: ${errorMessage(e)}`);
-          }
-        }));
-    } catch (e: unknown) {
-      container.setText(`Не удалось загрузить настройки оповещений: ${errorMessage(e)}`);
-    }
   }
 
   /** Учётка почты (IMAP), с которой lab-service принимает письма-результаты —

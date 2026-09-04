@@ -271,6 +271,21 @@ export class LimsView extends ItemView {
   private myRole = '';
   private myEmail = '';
   private currentRequestsFilter?: (r: LimsRequest) => boolean;
+  // ---- Панель фильтров списка заявок (2026-09-04, по образцу sbe-requests
+  // requests-view.ts) — отдельные поля по категориям (дата/метод/название
+  // объекта/идентификатор/партия/заказчик), комбинируются по И МЕЖДУ СОБОЙ и с
+  // caller-предиктом currentRequestsFilter (см. filteredRequestsList). Каждый
+  // фильтр активен, только если не пуст. filterTimeout — общий дебаунс-таймер
+  // для текстовых полей панели.
+  private filterDateFrom = '';
+  private filterDateTo = '';
+  /** null — фильтр по методу выключен. */
+  private filterMethodId: number | null = null;
+  private filterObjectName = '';
+  private filterIdentifier = '';
+  private filterBatch = '';
+  private filterOwnerEmail = '';
+  private filterTimeout: number | null = null;
   /** Kanban-доска «Очередь лаборатории»: заявка, которую в данный момент тащат
    * (см. renderQueueBoard) — module-scope не подходит, т.к. вьюх может быть
    * несколько, а обработчики drop читают именно СВОЙ инстанс. */
@@ -487,7 +502,7 @@ export class LimsView extends ItemView {
       this.labId = this.labs[0].id;
       this.labSwitchEl.value = String(this.labId);
     }
-    this.settingsBtnEl.style.display = (this.myRole === 'admin' || this.myRole === 'superadmin') ? '' : 'none';
+    this.settingsBtnEl.style.display = (await this.canOpenSettings()) ? '' : 'none';
 
     this.syncNavActive();
     await this.renderPage();
@@ -528,7 +543,7 @@ export class LimsView extends ItemView {
       } else {
         this.labId = null;
       }
-      this.settingsBtnEl.style.display = (this.myRole === 'admin' || this.myRole === 'superadmin') ? '' : 'none';
+      this.settingsBtnEl.style.display = (await this.canOpenSettings()) ? '' : 'none';
       this.syncNavActive();
       await this.renderPage();
     } catch (e: unknown) {
@@ -538,17 +553,27 @@ export class LimsView extends ItemView {
     }
   }
 
-  /** «Настройки»: лаборатории (создание/правка — только superadmin) + назначение
-   * администраторов лабораторий (lab_members role=lab_admin — admin+, только для
-   * внутренних лаб, у внешних lab_members не бывает по определению). */
+  /** «Настройки»: лаборатории (создание — только superadmin; правка — admin+ или
+   * lab_admin именно этой лабы, 2026-09-04) + назначение администраторов
+   * лабораторий (lab_members role=lab_admin — admin+, только для внутренних лаб,
+   * у внешних lab_members не бывает по определению). */
   private async renderSettings(): Promise<void> {
-    if (this.myRole !== 'admin' && this.myRole !== 'superadmin') {
+    this.bodyEl.createDiv({ cls: 'tn-lims-meta', text: 'Загрузка…' });
+    // Admin+ либо lab_admin хотя бы одной лабы (2026-09-04, делегированные
+    // полномочия) — см. canOpenSettings.
+    if (!(await this.canOpenSettings())) {
+      this.bodyEl.empty();
       this.bodyEl.createDiv({ cls: 'tn-lims-meta tn-lims-p24' }).setText('Раздел доступен администраторам.');
       return;
     }
-    this.bodyEl.createDiv({ cls: 'tn-lims-meta', text: 'Загрузка…' });
     try {
-      const members = await this.plugin.syncService.listLabMembers();
+      // handleListLabMembers без ?lab_id требует глобальную роль admin+ (см.
+      // lab-service lims_refs.go) — lab_admin без app-роли собираем ростер по
+      // каждой лабе отдельно (fetchLabRoster сам резолвит внешнюю через
+      // parent_lab_id и гасит 403 для лаб, где текущий пользователь не состоит).
+      const members = this.canAdmin
+        ? await this.plugin.syncService.listLabMembers()
+        : (await Promise.all(this.labs.map(lab => this.fetchLabRoster(lab.id)))).flat();
       this.bodyEl.empty();
       this.bodyEl.createEl('h3', { text: 'Лаборатории' });
       for (const lab of this.labs) {
@@ -562,14 +587,99 @@ export class LimsView extends ItemView {
           this.renderLabForm(null, this.bodyEl);
         });
       }
+      // Общие (lab_id=0) настройки — только app-admin+ (2026-09-04: как в
+      // handleSetEquipmentNotifySettings — общий/дефолтный конфиг не принадлежит
+      // никакой конкретной лабе, lab_admin ЛЮБОЙ лабы его менять не может). Настройки
+      // конкретной лабы — внутри её карточки, см. renderSettingsLabRow.
+      if (this.canAdmin) {
+        this.bodyEl.createEl('h3', { text: 'Уведомления о сроке поверки — общие настройки' });
+        this.bodyEl.createDiv({ cls: 'tn-lims-meta tn-lims-mb8' }).setText(
+          '(по умолчанию — для оборудования и лабораторий без своих настроек)',
+        );
+        const notifyDiv = this.bodyEl.createDiv({ cls: 'tn-lims-meta', text: 'Загрузка…' });
+        await this.renderEquipmentNotifySettings(notifyDiv, 0);
+      }
     } catch (e: unknown) {
       this.bodyEl.empty();
       this.bodyEl.createDiv({ cls: 'tn-lims-error' }).setText(`Ошибка: ${errorMessage(e)}`);
     }
   }
 
-  /** Карточка одной лаборатории в «Настройках»: правка (superadmin) + список/
-   * назначение администраторов (admin+, только для внутренних лаб). */
+  /** Оповещения о приближении «Действует до» акта поверки оборудования (2026-09-03,
+   * перенесено 2026-09-04 из Obsidian PluginSettingTab в фасадную «Настройки», затем
+   * в тот же день сделано per-lab — см. AGENTS.md и lab-service equipment_notify.go):
+   * labId=0 — общий/дефолтный ряд (вызывается из renderSettings, гейт canAdmin);
+   * labId>0 — настройки конкретной лабы (вызывается из renderSettingsLabRow, гейт
+   * canAdmin || lab_admin именно этой лабы). Для labId>0, если своих настроек ещё
+   * нет (configured=false), сервер отдаёт общий ряд как предзаполнение — показываем
+   * это явно и даём кнопку вернуться к общим после того, как свои уже заданы. */
+  private async renderEquipmentNotifySettings(container: HTMLElement, labId: number): Promise<void> {
+    try {
+      const settings = await this.plugin.syncService.getEquipmentNotifySettings(labId);
+      let enabled = settings.enabled;
+      let days = settings.days.join(',');
+      let recipients = settings.recipients;
+      container.empty();
+
+      if (labId > 0) {
+        container.createDiv({ cls: 'tn-lims-meta tn-lims-mb8' }).setText(
+          settings.configured ? 'Свои настройки для этой лаборатории.' : 'Используются общие настройки (по умолчанию).',
+        );
+      }
+
+      const enabledRow = container.createDiv({ cls: 'tn-lims-flex' });
+      const enabledCheckbox = enabledRow.createEl('input', { attr: { type: 'checkbox' } });
+      enabledCheckbox.checked = enabled;
+      enabledCheckbox.addEventListener('change', () => { enabled = enabledCheckbox.checked; });
+      enabledRow.createSpan({ text: 'Включить оповещения — письмо получателям, когда до «Действует до» акта поверки остаётся заданное число дней' });
+
+      const daysInput = container.createEl('input', {
+        attr: { type: 'text', placeholder: 'За сколько дней предупреждать, через запятую, например 30,14,7' },
+        cls: 'tn-lims-input',
+      });
+      daysInput.value = days;
+      daysInput.addEventListener('input', () => { days = daysInput.value.trim(); });
+
+      const recipientsInput = container.createEl('input', {
+        attr: { type: 'text', placeholder: 'Получатели — email через запятую' },
+        cls: 'tn-lims-input',
+      });
+      recipientsInput.value = recipients;
+      recipientsInput.addEventListener('input', () => { recipients = recipientsInput.value.trim(); });
+
+      const btnRow = container.createDiv({ cls: 'tn-lims-flex' });
+      const saveBtn = btnRow.createEl('button', { text: '💾 Сохранить', cls: 'tn-btn tn-btn-primary' });
+      saveBtn.addEventListener('click', async () => {
+        const parsedDays = days.split(',').map(d => Number(d.trim())).filter(d => Number.isFinite(d) && d > 0);
+        try {
+          await this.plugin.syncService.setEquipmentNotifySettings(labId, { enabled, days: parsedDays, recipients });
+          new Notice('Настройки сохранены');
+          await this.renderEquipmentNotifySettings(container, labId);
+        } catch (e: unknown) {
+          new Notice(`Ошибка: ${errorMessage(e)}`);
+        }
+      });
+      if (labId > 0 && settings.configured) {
+        const resetBtn = btnRow.createEl('button', { text: '↺ Использовать общие', cls: 'tn-btn tn-btn-ghost' });
+        resetBtn.addEventListener('click', async () => {
+          try {
+            await this.plugin.syncService.setEquipmentNotifySettings(labId, { enabled, days: [], recipients: '' }, true);
+            new Notice('Возвращено к общим настройкам');
+            await this.renderEquipmentNotifySettings(container, labId);
+          } catch (e: unknown) {
+            new Notice(`Ошибка: ${errorMessage(e)}`);
+          }
+        });
+      }
+    } catch (e: unknown) {
+      container.empty();
+      container.setText(`Не удалось загрузить настройки оповещений: ${errorMessage(e)}`);
+    }
+  }
+
+  /** Карточка одной лаборатории в «Настройках»: правка (admin+ ИЛИ lab_admin
+   * именно этой лабы, 2026-09-04) + список/назначение администраторов (admin+,
+   * только для внутренних лаб). */
   private renderSettingsLabRow(lab: Lab, members: LabMember[]): void {
     const card = this.bodyEl.createDiv({ cls: 'tn-lims-method' });
     const head = card.createDiv({ cls: 'tn-lims-flex' });
@@ -579,12 +689,30 @@ export class LimsView extends ItemView {
       title += parent ? ` (внешняя → ${parent.name || parent.code})` : ' (внешняя, без родителя!)';
     }
     head.createEl('h4', { text: title });
-    if (this.myRole === 'superadmin') {
+    // Правка полей лабы (2026-09-04, делегированные полномочия): app-admin+ ИЛИ
+    // lab_admin ИМЕННО этой лабы (backend handleUpdateLab — requireLabAdminOf(id),
+    // не requireAnyLabAdmin — в отличие от «Настроек»/оповещений lab_admin другой
+    // лабы сюда не допускается). `members` уже отфильтрован по этой лабе
+    // (renderSettings, filter(m => m.lab_id === lab.id)), поэтому myRoleIn(members)
+    // корректно резолвит роль именно в ней.
+    if (this.canAdmin || this.myRoleIn(members) === 'lab_admin') {
       const editBtn = head.createEl('button', { text: '✎ Изменить', cls: 'tn-btn tn-btn-ghost' });
       editBtn.addEventListener('click', () => {
         const existing = card.querySelector('.tn-lims-lab-form');
         if (existing) { existing.remove(); return; }
         this.renderLabForm(lab, card);
+      });
+
+      // Уведомления о сроке поверки для этой лабы (2026-09-04) — тот же гейт, что
+      // «✎ Изменить» выше: admin+ либо lab_admin ИМЕННО этой лабы (не любой лабы —
+      // в отличие от общих настроек в renderSettings, это конкретно её override, см.
+      // requireLabAdminOf в handleSetEquipmentNotifySettings).
+      const notifyBtn = head.createEl('button', { text: '🔔 Уведомления о поверке', cls: 'tn-btn tn-btn-ghost' });
+      notifyBtn.addEventListener('click', () => {
+        const existing = card.querySelector('.tn-lims-equipment-notify');
+        if (existing) { existing.remove(); return; }
+        const notifyDiv = card.createDiv({ cls: 'tn-lims-meta tn-lims-equipment-notify', text: 'Загрузка…' });
+        void this.renderEquipmentNotifySettings(notifyDiv, lab.id);
       });
     }
 
@@ -779,19 +907,24 @@ export class LimsView extends ItemView {
     await this.renderRequests(r => r.object_id === objectId);
   }
 
-  /** Список заявок (возврат из карточки). Опциональный фильтр — для «Очереди»/«Результатов». */
+  /** Список заявок (возврат из карточки). Опциональный фильтр — для «Очереди»/«Результатов»/
+   * объектно-скоупированного вида; комбинируется по И с панелью фильтров ниже
+   * (см. matchesRequestFilters) — панель не заменяет caller-предикат, а сужает его. */
   private async renderRequests(filter?: (r: LimsRequest) => boolean): Promise<void> {
     this.currentRequestsFilter = filter;
     this.bodyEl.empty();
-    this.bodyEl.createDiv({ cls: 'tn-lims-meta', text: 'Загрузка…' });
+    this.renderRequestsFilterBar(this.bodyEl);
+    const listEl = this.bodyEl.createDiv();
+    listEl.createDiv({ cls: 'tn-lims-meta', text: 'Загрузка…' });
     try {
       let requests = await this.plugin.syncService.listRequests();
       if (filter) requests = requests.filter(filter);
+      requests = requests.filter(r => this.matchesRequestFilters(r));
       // Новые сверху: сперва по году номера, затем по самому номеру (2026-08-21).
       requests = [...requests].sort((a, b) => (b.number_year - a.number_year) || (b.number_seq - a.number_seq));
-      this.bodyEl.empty();
+      listEl.empty();
       for (const r of requests) {
-        const card = this.bodyEl.createDiv({ cls: 'tn-lims-req-card' });
+        const card = listEl.createDiv({ cls: 'tn-lims-req-card' });
         card.addEventListener('click', () => this.renderRequestDetail(r));
         const head = card.createDiv({ cls: 'tn-lims-req-card-head' });
         // Списки заявок ("Все заявки"/"Очередь лаборатории", 2026-08-24, по
@@ -807,12 +940,146 @@ export class LimsView extends ItemView {
         meta.createSpan({ text: `🧪 ${this.methodName(r.method_id)}` });
       }
       if (requests.length === 0) {
-        this.bodyEl.createDiv({ cls: 'tn-lims-meta tn-lims-p24' }).setText('Нет заявок.');
+        listEl.createDiv({ cls: 'tn-lims-meta tn-lims-p24' }).setText('Нет заявок.');
       }
     } catch (e: unknown) {
-      this.bodyEl.empty();
-      this.bodyEl.createDiv({ cls: 'tn-lims-error' }).setText(`Ошибка: ${errorMessage(e)}`);
+      listEl.empty();
+      listEl.createDiv({ cls: 'tn-lims-error' }).setText(`Ошибка: ${errorMessage(e)}`);
     }
+  }
+
+  /** Панель фильтров списка заявок (2026-09-04, по образцу sbe-requests
+   * requests-view.ts, реализовано независимо — общего UI-кода между плагинами
+   * нет): дата/метод/название объекта/идентификатор/партия/заказчик — каждое
+   * поле активно, только если не пусто, все активные комбинируются по И (см.
+   * matchesRequestFilters). Меняет поля класса и перерисовывает весь список
+   * (renderRequests) с тем же caller-фильтром (currentRequestsFilter). */
+  private renderRequestsFilterBar(container: HTMLElement): void {
+    const scheduleFilterRerender = (): void => {
+      if (this.filterTimeout) window.clearTimeout(this.filterTimeout);
+      // 1200мс (х3 от исходных 400) — по просьбе пользователя, не успевал
+      // набрать текст в полях фильтра до перерисовки.
+      this.filterTimeout = window.setTimeout(() => { void this.renderRequests(this.currentRequestsFilter); }, 1200);
+    };
+
+    const filterBar = container.createDiv({ cls: 'tn-lims-filterbar tn-lims-mb8' });
+
+    const dateGroup = filterBar.createDiv({ cls: 'tn-lims-filter-group' });
+    dateGroup.createEl('label', { text: 'Дата', cls: 'tn-lims-filter-lbl' });
+    const dateRow = dateGroup.createDiv({ cls: 'tn-lims-filter-daterow' });
+    const dateFromInput = dateRow.createEl('input', { attr: { type: 'date' }, cls: 'tn-lims-input' });
+    dateFromInput.value = this.filterDateFrom;
+    dateRow.createSpan({ cls: 'tn-lims-filter-date-sep', text: '—' });
+    const dateToInput = dateRow.createEl('input', { attr: { type: 'date' }, cls: 'tn-lims-input' });
+    dateToInput.value = this.filterDateTo;
+    dateFromInput.addEventListener('change', () => {
+      this.filterDateFrom = dateFromInput.value;
+      void this.renderRequests(this.currentRequestsFilter);
+    });
+    dateToInput.addEventListener('change', () => {
+      this.filterDateTo = dateToInput.value;
+      void this.renderRequests(this.currentRequestsFilter);
+    });
+
+    const methodGroup = filterBar.createDiv({ cls: 'tn-lims-filter-group' });
+    methodGroup.createEl('label', { text: 'Метод', cls: 'tn-lims-filter-lbl' });
+    const methodSelect = methodGroup.createEl('select', { cls: 'tn-lims-select' });
+    methodSelect.createEl('option', { value: '', text: '— Все —' });
+    for (const m of this.plugin.methods) {
+      methodSelect.createEl('option', { value: String(m.id), text: `${m.code}${m.name ? ' — ' + m.name : ''}` });
+    }
+    methodSelect.value = this.filterMethodId !== null ? String(this.filterMethodId) : '';
+    methodSelect.addEventListener('change', () => {
+      this.filterMethodId = methodSelect.value ? Number(methodSelect.value) : null;
+      void this.renderRequests(this.currentRequestsFilter);
+    });
+
+    const objNameGroup = filterBar.createDiv({ cls: 'tn-lims-filter-group' });
+    objNameGroup.createEl('label', { text: 'Название объекта', cls: 'tn-lims-filter-lbl' });
+    const objNameInput = objNameGroup.createEl('input', { attr: { type: 'text', placeholder: 'Название объекта' }, cls: 'tn-lims-input' });
+    objNameInput.value = this.filterObjectName;
+    objNameInput.addEventListener('input', () => {
+      this.filterObjectName = objNameInput.value;
+      scheduleFilterRerender();
+    });
+
+    const idGroup = filterBar.createDiv({ cls: 'tn-lims-filter-group' });
+    idGroup.createEl('label', { text: 'Идентификатор', cls: 'tn-lims-filter-lbl' });
+    const idInput = idGroup.createEl('input', {
+      attr: { type: 'text', placeholder: '№ заказчику / лаборатории / внешний / ID' }, cls: 'tn-lims-input',
+    });
+    idInput.value = this.filterIdentifier;
+    idInput.addEventListener('input', () => {
+      this.filterIdentifier = idInput.value;
+      scheduleFilterRerender();
+    });
+
+    const batchGroup = filterBar.createDiv({ cls: 'tn-lims-filter-group' });
+    batchGroup.createEl('label', { text: 'Партия', cls: 'tn-lims-filter-lbl' });
+    const batchInput = batchGroup.createEl('input', { attr: { type: 'text', placeholder: 'Номер партии' }, cls: 'tn-lims-input' });
+    batchInput.value = this.filterBatch;
+    batchInput.addEventListener('input', () => {
+      this.filterBatch = batchInput.value;
+      scheduleFilterRerender();
+    });
+
+    const ownerGroup = filterBar.createDiv({ cls: 'tn-lims-filter-group' });
+    ownerGroup.createEl('label', { text: 'Заказчик', cls: 'tn-lims-filter-lbl' });
+    const ownerInput = ownerGroup.createEl('input', { attr: { type: 'text', placeholder: 'Email заказчика' }, cls: 'tn-lims-input' });
+    ownerInput.value = this.filterOwnerEmail;
+    ownerInput.addEventListener('input', () => {
+      this.filterOwnerEmail = ownerInput.value;
+      scheduleFilterRerender();
+    });
+
+    const resetBtn = filterBar.createEl('button', { text: '✖ Сбросить фильтры', cls: 'tn-btn tn-btn-ghost tn-lims-filter-reset' });
+    resetBtn.addEventListener('click', () => {
+      this.filterDateFrom = '';
+      this.filterDateTo = '';
+      this.filterMethodId = null;
+      this.filterObjectName = '';
+      this.filterIdentifier = '';
+      this.filterBatch = '';
+      this.filterOwnerEmail = '';
+      void this.renderRequests(this.currentRequestsFilter);
+    });
+  }
+
+  /** Проверка одной заявки против всех активных полей панели фильтров (все —
+   * по И, пустое поле не ограничивает). Партия — через object_id →
+   * characteristics.batch_number (см. приведение типа в renderRequestDetail,
+   * ~1149, тот же паттерн: characteristics типизирован как Record<string,
+   * unknown> в LabObject, здесь читаем то же поле). */
+  private matchesRequestFilters(r: LimsRequest): boolean {
+    if (this.filterDateFrom) {
+      const fromMs = new Date(`${this.filterDateFrom}T00:00:00`).getTime();
+      if (new Date(r.created_at).getTime() < fromMs) return false;
+    }
+    if (this.filterDateTo) {
+      const toMs = new Date(`${this.filterDateTo}T23:59:59.999`).getTime();
+      if (new Date(r.created_at).getTime() > toMs) return false;
+    }
+    if (this.filterMethodId !== null && r.method_id !== this.filterMethodId) return false;
+    const objNameQ = this.filterObjectName.trim().toLowerCase();
+    if (objNameQ && !this.objectName(r.object_id).toLowerCase().includes(objNameQ)) return false;
+    const idQ = this.filterIdentifier.trim().toLowerCase();
+    if (idQ) {
+      const hit = r.customer_number.toLowerCase().includes(idQ) ||
+        r.lab_number.toLowerCase().includes(idQ) ||
+        r.external_id.toLowerCase().includes(idQ) ||
+        String(r.id).includes(idQ);
+      if (!hit) return false;
+    }
+    const batchQ = this.filterBatch.trim().toLowerCase();
+    if (batchQ) {
+      const obj = this.objects.find(o => o.id === r.object_id);
+      const chars = obj?.characteristics as { batch_number?: unknown } | undefined;
+      const batch = chars?.batch_number;
+      if (batch === undefined || !String(batch).toLowerCase().includes(batchQ)) return false;
+    }
+    const ownerQ = this.filterOwnerEmail.trim().toLowerCase();
+    if (ownerQ && !r.owner_email.toLowerCase().includes(ownerQ)) return false;
+    return true;
   }
 
   // ---- Kanban-доска «Очередь лаборатории» (2026-08-24) ----
@@ -823,8 +1090,12 @@ export class LimsView extends ItemView {
   // 'lab_admin')); руководитель (canAdmin ИЛИ lab_admin именно этой лабы,
   // 2026-08-24 — делегированные полномочия) двигает карточки свободно, испытатель
   // (lab_operator) — только свои уже назначенные (между своими ячейками 2⇄3,
-  // дальше в 4), либо забирает СЕБЕ неназначенную заявку прямо из колонки 1.
-  // Авторизация реально проверяется на сервере (kanban.go, canApplyKanbanMove) —
+  // дальше в 4), либо забирает СЕБЕ неназначенную заявку прямо из колонки 1 — в
+  // свою ячейку колонки 2 ИЛИ 3 (2026-09-03 — раньше сервер разрешал самозабор
+  // только в колонку 2, хотя подписи "В работу"/"В работе" легко перепутать при
+  // перетаскивании; расширено, чтобы перетаскивание сразу в 3-ю не отклонялось
+  // как "нет прав"). Авторизация реально проверяется на сервере (kanban.go,
+  // canApplyKanbanMove) —
   // клиентские предикаты ниже только скрывают то, что заведомо будет отклонено,
   // не единственная защита.
 
@@ -860,6 +1131,15 @@ export class LimsView extends ItemView {
       if (this.myRoleIn(roster) === 'lab_admin') ids.add(lab.id);
     }));
     return ids;
+  }
+
+  /** true — глобальный admin+, либо lab_admin ХОТЯ БЫ ОДНОЙ (любой) лабы (2026-09-04,
+   * делегированные полномочия: раздел «Настройки» — лаборатории, назначение
+   * администраторов, уведомления о поверке — доступен не только app-роли
+   * admin/superadmin, но и lab_admin, у которого нет никакой app-роли вовсе;
+   * см. lab-service requireAnyLabAdmin/requireLabAdminOf). */
+  private async canOpenSettings(): Promise<boolean> {
+    return this.canAdmin || (await this.myAdminLabIds()).size > 0;
   }
 
   private async renderQueueBoard(): Promise<void> {
@@ -4086,6 +4366,13 @@ export class LimsView extends ItemView {
       attr: { type: 'text', placeholder: 'Нормативный срок эксплуатации, напр. 10 лет' }, cls: 'tn-lims-input',
     });
     lifeInp.value = eq.service_life;
+    // Лаборатория (2026-09-04) — явная привязка (Equipment.lab_id), НЕ выводится из
+    // привязанных методов; основа для per-lab оповещений о сроке поверки.
+    row3.createSpan({ text: 'Лаборатория:', cls: 'tn-lims-meta' });
+    const labSelect = row3.createEl('select', { cls: 'tn-lims-select' });
+    labSelect.createEl('option', { value: '0', text: '— Не привязано —' });
+    for (const lab of this.labs) labSelect.createEl('option', { value: String(lab.id), text: lab.name || lab.code });
+    labSelect.value = eq.lab_id ? String(eq.lab_id) : '0';
     // Основное/Вспомогательное (2026-09-03) — единая роль на всё оборудование
     // (заменяет прежний per-method выбор, см. AGENTS.md). От неё зависит, виден ли
     // ниже раздел «Привязанные методы» и блок калибровки (renderEquipmentCardDetails).
@@ -4099,6 +4386,7 @@ export class LimsView extends ItemView {
       try {
         const newType: 'main' | 'auxiliary' = typeCheckbox.checked ? 'main' : 'auxiliary';
         const typeChanged = newType !== eq.type;
+        const newLabId = Number(labSelect.value);
         await this.plugin.syncService.updateEquipment(eq.id, {
           code: codeInp.value.trim(),
           name: nameInp.value.trim(),
@@ -4108,6 +4396,7 @@ export class LimsView extends ItemView {
           commissioned_at: commInp.value,
           service_life: lifeInp.value.trim(),
           type: newType,
+          lab_id: newLabId,
         });
         new Notice('Оборудование обновлено');
         if (typeChanged) {
@@ -4124,6 +4413,7 @@ export class LimsView extends ItemView {
           eq.status = statusInp.value.trim();
           eq.commissioned_at = commInp.value;
           eq.service_life = lifeInp.value.trim();
+          eq.lab_id = newLabId > 0 ? newLabId : null;
         }
       } catch (e: unknown) {
         new Notice(`Ошибка: ${errorMessage(e)}`);
@@ -4701,14 +4991,20 @@ export class LimsView extends ItemView {
     const name = row.createEl('input', { attr: { type: 'text', placeholder: 'Название' }, cls: 'tn-lims-input' });
     const location = row.createEl('input', { attr: { type: 'text', placeholder: 'Расположение' }, cls: 'tn-lims-input' });
     const responsible = row.createEl('input', { attr: { type: 'text', placeholder: 'Ответственный' }, cls: 'tn-lims-input' });
+    // Лаборатория (2026-09-04) — явная привязка, см. Equipment.lab_id.
+    const labSelect = row.createEl('select', { cls: 'tn-lims-select' });
+    labSelect.createEl('option', { value: '0', text: '— Не привязано —' });
+    for (const lab of this.labs) labSelect.createEl('option', { value: String(lab.id), text: lab.name || lab.code });
     const addBtn = row.createEl('button', { text: '➕ Добавить', cls: 'tn-btn tn-btn-primary' });
     addBtn.addEventListener('click', async () => {
       if (!code.value.trim() || !name.value.trim()) { new Notice('Укажите код и название'); return; }
       try {
+        const labId = Number(labSelect.value);
         await this.plugin.syncService.createEquipment({
           code: code.value.trim(), name: name.value.trim(),
           location: location.value.trim() || undefined,
           responsible: responsible.value.trim() || undefined,
+          lab_id: labId > 0 ? labId : undefined,
         });
         new Notice('Оборудование добавлено');
         await this.renderEquipment();
