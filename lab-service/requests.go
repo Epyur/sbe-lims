@@ -942,9 +942,25 @@ func (s *Server) handleSetTargetIndicator(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// jsonb_set с многоуровневым путём (ARRAY['target_indicators', methodID])
+	// НЕ создаёт промежуточный ключ 'target_indicators', если его нет вовсе —
+	// create_missing=true достраивает только ПОСЛЕДНИЙ уровень пути, а не
+	// вложенные контейнеры (задокументированное поведение Postgres). У
+	// объектов без явно заданного target_indicators (обнаружено на импорте
+	// исторических заявок — 486 из 502 объектов проектов PVC MEMBRANE/
+	// PVC SAMPLES не имели этого ключа вовсе) прежний запрос молча не менял
+	// documento — эндпоинт отвечал {"ok":true}, а запись не сохранялась.
+	// Фикс — jsonb_set ОДНИМ уровнем прямо по characteristics (этот верхний
+	// объект гарантированно существует — берём coalesce на случай NULL),
+	// подставляя туда уже готовый (домёрженный) объект target_indicators.
 	if _, err := s.pool.Exec(ctx, `
 UPDATE objects SET
-	characteristics = jsonb_set(coalesce(characteristics, '{}'::jsonb), ARRAY['target_indicators', $1], to_jsonb($2::text), true),
+	characteristics = jsonb_set(
+		coalesce(characteristics, '{}'::jsonb),
+		'{target_indicators}',
+		coalesce(characteristics->'target_indicators', '{}'::jsonb) || jsonb_build_object($1::text, $2::text),
+		true
+	),
 	updated_at = now()
 WHERE id = $3`, strconv.FormatInt(methodID, 10), req.Indicator, objectID); err != nil {
 		log.Printf("set target indicator: %v", err)
