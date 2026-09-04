@@ -413,7 +413,10 @@ export interface RichNode {
  * футером (см. AGENTS.md). Видимость — ровно 3 фиксированных вида вывода
  * (не расширяемый список шаблонов, по решению пользователя), на уровне
  * ВСЕГО блока (не на уровне отдельных узлов внутри) — если для другого вида
- * нужен другой текст, это отдельный блок с другими галочками. */
+ * нужен другой текст, это отдельный блок с другими галочками. 2026-09-04:
+ * добавлен 4-й вид, "Справка" (show_in_help) — содержимое всплывающей
+ * подсказки над "Не соответствует" в веб-портале; раньше подсказка ошибочно
+ * переиспользовала show_in_excerpt ("выписка", другое назначение). */
 export interface DocumentBlock {
   id: string;
   title: string;
@@ -422,11 +425,12 @@ export interface DocumentBlock {
   show_in_ui: boolean;
   show_in_excerpt: boolean;
   show_in_protocol: boolean;
+  show_in_help: boolean;
 }
 
-/** methods.presentation — блоки форматированного текста. Ровно 3 вида
+/** methods.presentation — блоки форматированного текста. Фиксированные виды
  * вывода читают один и тот же список блоков, отличаясь только фильтром
- * show_in_ui/show_in_excerpt/show_in_protocol на блоке. */
+ * show_in_ui/show_in_excerpt/show_in_protocol/show_in_help на блоке. */
 export interface MethodPresentation {
   blocks: DocumentBlock[];
 }
