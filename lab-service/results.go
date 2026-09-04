@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
@@ -1551,6 +1552,21 @@ RETURNING id`,
 	// формулы уровня "aggregated" — пересчитать по всем сериям заявки+метода
 	if err := s.applyAggregatedFormulas(ctx, requestID, methodID); err != nil {
 		log.Printf("aggregated formulas: %v", err)
+	}
+
+	// Зеркалирование фото серии в Фотобанк (2026-09-01, см. photobank_client.go +
+	// docs/superpowers/specs/2026-09-01-sbe-lims-photobank-mirror-design.md):
+	// best-effort в фоновой горутине, не блокирует сохранение результата. Легаси-импорт
+	// (who="legacy-import") исключён по спеке — зеркалируются только фото, загруженные
+	// ПОСЛЕ включения функции, а не перенесённые исторические.
+	if who != "legacy-import" {
+		if changed := changedPhotoFields(beforeValues, values); len(changed) > 0 {
+			labName, customerNumber := s.requestLabAndNumber(ctx, requestID)
+			for field, sourceURL := range changed {
+				title := fmt.Sprintf("Заявка %s, серия %d, %s", customerNumber, seriesNum, photoFieldKind(field))
+				go mirrorPhotoToPhotobank(context.WithoutCancel(ctx), s, labName, title, sourceURL)
+			}
+		}
 	}
 
 	return id, seriesNum, nil
