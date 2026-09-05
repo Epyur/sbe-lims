@@ -32,3 +32,19 @@ func TestResultSaveKindUpdated(t *testing.T) {
 		t.Fatalf("got %q, want result_updated", got)
 	}
 }
+
+func TestShouldAutoTransitionToProcessing(t *testing.T) {
+	for _, tc := range []struct {
+		status string
+		want   bool
+	}{
+		{"new", true},
+		{"received", true},
+		{"processing", false},
+		{"completed", false},
+	} {
+		if got := shouldAutoTransitionToProcessing(tc.status); got != tc.want {
+			t.Errorf("shouldAutoTransitionToProcessing(%q) = %v, want %v", tc.status, got, tc.want)
+		}
+	}
+}

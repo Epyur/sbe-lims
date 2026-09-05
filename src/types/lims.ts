@@ -153,7 +153,14 @@ export interface LabGroup {
  * DSL-формулой interpolate(x, {id}_xs, {id}_ys) метода (lab-service dsl.go/
  * calibration_curve.go) и автоматически графируется без отдельной настройки
  * (GET /equipment/{id}/calibrations/{calibration_id}/curve-chart/{attr_id}). */
-export type AttributeDataType = 'text' | 'int' | 'float' | 'date' | 'time' | 'photo' | 'boolean' | 'timeseries' | 'curve' | 'select' | 'event_log';
+/** "instrument_hash" (2026-09-05) — ТОЛЬКО для input_parameters метода
+ * (не calibration_attributes): одноразовый hash с экрана/QR внешнего прибора
+ * (см. instrument-buffer, lab-service results.go claimInstrumentBuffer). Не
+ * настоящее хранимое значение показателя — маркер конфигурации "этому методу
+ * нужно поле ввода hash в форме испытателя", исключается из пикеров
+ * плейсхолдеров протокола/графиков (см. block-editor.ts, lims-view.ts) тем же
+ * способом, что "timeseries". Не более одного такого атрибута на форму. */
+export type AttributeDataType = 'text' | 'int' | 'float' | 'date' | 'time' | 'photo' | 'boolean' | 'timeseries' | 'curve' | 'select' | 'event_log' | 'instrument_hash';
 /** Знак сравнения — пороговое правило классификации (условие на строку, 2026-08-22). */
 export type ComparisonOperator = '==' | '!=' | '<' | '<=' | '>' | '>=';
 /** Способ заполнения атрибута. "classification" (2026-08-22) — значение пишет

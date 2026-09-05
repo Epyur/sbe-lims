@@ -1371,6 +1371,17 @@ func (s *Server) handleCreateResult(w http.ResponseWriter, r *http.Request) {
 		s.linkInstrumentBufferResult(r.Context(), req.InstrumentHash, id)
 	}
 
+	// Автопереход в processing при первом сохранении результатов (2026-09-05) —
+	// заявка могла годами висеть в new/received, пока испытатель уже вводит
+	// данные; см. shouldAutoTransitionToProcessing/setRequestStatus в requests.go.
+	// Best-effort: результаты уже сохранены, ошибка бухгалтерии статуса не должна
+	// превращать успешный ответ в ошибку.
+	if existing, ferr := s.loadRequest(r.Context(), requestID); ferr == nil && shouldAutoTransitionToProcessing(existing.Status) {
+		if serr := s.setRequestStatus(r.Context(), requestID, "processing", existing, currentEmail(r)); serr != nil {
+			log.Printf("auto status transition: %v", serr)
+		}
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{"id": id, "series_num": seriesNum, "values": req.Values})
 }
 

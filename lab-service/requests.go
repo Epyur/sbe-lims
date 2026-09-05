@@ -824,7 +824,22 @@ func (s *Server) handleSetRequestStatus(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden: not owner or lab staff"})
 		return
 	}
-	_, err = s.pool.Exec(r.Context(), `
+	if err := s.setRequestStatus(r.Context(), id, req.Status, existing, email); err != nil {
+		log.Printf("set status: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// setRequestStatus меняет статус заявки и запускает связанные побочные эффекты
+// (письма заказчику, журнал аудита) — вынесено из handleSetRequestStatus
+// (2026-09-05), чтобы тот же путь мог переиспользовать и автопереход в
+// processing при первом сохранении результатов испытателем (см.
+// handleCreateResult в results.go). existing — состояние ДО смены статуса
+// (для сравнения old != new и для AssignedTo в письме).
+func (s *Server) setRequestStatus(ctx context.Context, id int64, newStatus string, existing *Request, actingEmail string) error {
+	_, err := s.pool.Exec(ctx, `
 UPDATE requests SET
 	status = $2,
 	assigned_to = CASE WHEN $2 = 'new' THEN '' ELSE assigned_to END,
@@ -834,28 +849,37 @@ UPDATE requests SET
 		ELSE completed_at
 	END,
 	updated_at = now()
-WHERE id = $1`, id, req.Status)
+WHERE id = $1`, id, newStatus)
 	if err != nil {
-		log.Printf("set status: %v", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
-		return
+		return err
 	}
 	// WP2 (2026-08-28): автоотправка писем при РЕАЛЬНОМ переходе в completed (не при
 	// повторном сохранении уже completed-заявки) — та же проверка, что и в SQL CASE выше.
 	// Best-effort — не блокирует ответ, ошибки только в лог/журнал (см. outbound_email.go).
-	if req.Status == "completed" && existing.Status != "completed" {
-		go s.triggerCompletionEmails(context.WithoutCancel(r.Context()), id)
+	if newStatus == "completed" && existing.Status != "completed" {
+		go s.triggerCompletionEmails(context.WithoutCancel(ctx), id)
 	}
 	// WP2 (2026-08-29): та же автоотправка, только при РЕАЛЬНОМ переходе в processing —
-	// см. triggerProcessingEmail. assigned_to этот эндпоинт не меняет (только чистит на
+	// см. triggerProcessingEmail. assigned_to этот путь не меняет (только чистит на
 	// "new") — существующее значение уже актуально к моменту вызова.
-	if req.Status == "processing" && existing.Status != "processing" {
-		go s.triggerProcessingEmail(context.WithoutCancel(r.Context()), id, existing.AssignedTo)
+	if newStatus == "processing" && existing.Status != "processing" {
+		go s.triggerProcessingEmail(context.WithoutCancel(ctx), id, existing.AssignedTo)
 	}
 	// WP8 (2026-08-29): журнал изменений — та же best-effort дисциплина, что и письма
 	// выше (см. audit_log.go). logStatusChange сама не пишет строку при old==new.
-	s.logStatusChange(r.Context(), id, currentEmail(r), existing.Status, req.Status)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	s.logStatusChange(ctx, id, actingEmail, existing.Status, newStatus)
+	return nil
+}
+
+// shouldAutoTransitionToProcessing (2026-09-05) — заявка ещё не в работе:
+// new/received можно автоматически перевести в processing при первом
+// сохранении результатов; processing/completed не трогаем (идемпотентно,
+// completed никогда не переоткрывается автоматически). Чистая функция без
+// обращения к БД — юнит-тестируется напрямую, по образцу shouldLogStatusChange
+// в audit_log.go (см. audit_log_test.go: в проекте нет мок-инфраструктуры для
+// БД, только живой E2E для DB-путей).
+func shouldAutoTransitionToProcessing(currentStatus string) bool {
+	return currentStatus == "new" || currentStatus == "received"
 }
 
 // handleSetTargetIndicator — узкий эндпоинт (2026-09-04, по прямому запросу
