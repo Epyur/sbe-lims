@@ -313,8 +313,11 @@ class PlaceholderPickerModal extends Modal {
     // "timeseries" — не скалярное значение (весь ряд датчика целиком), плейсхолдер
     // вставил бы дамп JSON вместо текста/картинки — такой атрибут показывается только
     // через график (см. ChartConfig.kind="timeseries" в конфигураторе), не здесь
-    // (2026-08-24, по жалобе "все данные внесены в одну ячейку").
-    const aggregated = this.attrs.filter(a => a.level === 'aggregated' && a.data_type !== 'timeseries');
+    // (2026-08-24, по жалобе "все данные внесены в одну ячейку"). "instrument_hash"
+    // (2026-09-05) — по той же причине: не хранимое значение показателя, а
+    // одноразовый маркер конфигурации формы (см. AttributeDataType в types/lims.ts),
+    // никогда не имеет значения для отображения в протоколе.
+    const aggregated = this.attrs.filter(a => a.level === 'aggregated' && a.data_type !== 'timeseries' && a.data_type !== 'instrument_hash');
     if (aggregated.length > 0) {
       this.contentEl.createDiv({ cls: 'tn-lims-meta tn-lims-mt8' }).setText('Агрегированные результаты:');
       for (const a of aggregated) {
@@ -322,7 +325,7 @@ class PlaceholderPickerModal extends Modal {
       }
     }
 
-    const experiment = this.attrs.filter(a => a.level === 'experiment' && a.data_type !== 'timeseries');
+    const experiment = this.attrs.filter(a => a.level === 'experiment' && a.data_type !== 'timeseries' && a.data_type !== 'instrument_hash');
     if (experiment.length > 0) {
       this.contentEl.createDiv({ cls: 'tn-lims-meta tn-lims-mt8' }).setText(
         'Атрибуты эксперимента (нужно выбрать одно значение серии; 📷 — фотография, вставляется как изображение):',
@@ -450,9 +453,10 @@ function renderTableNodeEditor(container: HTMLElement, node: RichNode, attrs: Me
   if (!node.columns!.some((c: TableColumn) => c.kind === 'photo_after')) {
     select.createEl('option', { attr: { value: '__photo_after__' }, text: '📷 Фото после испытания' });
   }
-  // "timeseries" исключён (2026-08-24, см. PlaceholderPickerModal выше) — ячейка
-  // таблицы показала бы дамп всего JSON-ряда, а не осмысленное значение.
-  for (const a of attrs.filter(a => a.level === 'experiment' && a.data_type !== 'timeseries')) {
+  // "timeseries"/"instrument_hash" исключены (2026-08-24/2026-09-05, см.
+  // PlaceholderPickerModal выше) — ни то, ни другое не осмысленное значение
+  // ячейки таблицы (весь JSON-ряд датчика / одноразовый маркер конфигурации).
+  for (const a of attrs.filter(a => a.level === 'experiment' && a.data_type !== 'timeseries' && a.data_type !== 'instrument_hash')) {
     if (node.columns!.some((c: TableColumn) => c.attribute_id === a.id)) continue;
     select.createEl('option', { attr: { value: a.id }, text: attrDisplayName(a, a.id) });
   }

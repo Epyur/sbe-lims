@@ -2507,7 +2507,15 @@ export class LimsView extends ItemView {
     addOperatorFieldBtn.addEventListener('click', (ev) => {
       const menu = new Menu();
       let any = false;
-      for (const a of attrs.filter(a => a.id && !operatorFormFields.some(f => f.attribute_id === a.id))) {
+      // Не более одного "Хэш прибора" на форму (2026-09-05) — одна форма
+      // испытателя соответствует одному прибору; уже добавленный такой
+      // атрибут просто не предлагается повторно (та же дисциплина, что и
+      // общий запрет дублировать любой атрибут чуть ниже).
+      const hasInstrumentHash = operatorFormFields.some(
+        f => attrs.find(a => a.id === f.attribute_id)?.data_type === 'instrument_hash',
+      );
+      for (const a of attrs.filter(a => a.id && !operatorFormFields.some(f => f.attribute_id === a.id)
+        && (a.data_type !== 'instrument_hash' || !hasInstrumentHash))) {
         any = true;
         menu.addItem(item => item.setTitle(a.name || a.id).onClick(() => {
           operatorFormFields.push({ attribute_id: a.id, required: false });
@@ -3270,7 +3278,7 @@ export class LimsView extends ItemView {
     const xSelect = row2.createEl('select', { cls: 'tn-lims-select' });
     xSelect.createEl('option', { attr: { value: '' }, text: '— номер серии —' });
     for (const a of attrs) {
-      if (!a.id || a.data_type === 'timeseries') continue;
+      if (!a.id || a.data_type === 'timeseries' || a.data_type === 'instrument_hash') continue;
       xSelect.createEl('option', { attr: { value: a.id }, text: a.name || a.id });
     }
     xSelect.value = chart.x_column || '';
@@ -3285,7 +3293,7 @@ export class LimsView extends ItemView {
         const srcSelect = sRow.createEl('select', { cls: 'tn-lims-select' });
         srcSelect.createEl('option', { attr: { value: '' }, text: '— источник —' });
         for (const a of attrs) {
-          if (!a.id || a.data_type === 'timeseries') continue; // не скаляр — сюда не годится
+          if (!a.id || a.data_type === 'timeseries' || a.data_type === 'instrument_hash') continue; // не скаляр — сюда не годится
           srcSelect.createEl('option', { attr: { value: a.id }, text: a.name || a.id });
         }
         srcSelect.value = sc.source_param;
@@ -3425,6 +3433,7 @@ export class LimsView extends ItemView {
         ['date', 'Дата'], ['time', 'Время'], ['boolean', 'Да/Нет'], ['select', 'Выбор из списка'],
         ['photo', 'Фотография'], ['event_log', 'Лог наблюдений (событие+время)'],
         ['timeseries', 'Временной ряд (для графика)'],
+        ['instrument_hash', 'Хэш прибора (одноразовый, из QR внешнего прибора)'],
       ];
       for (const [val, label] of typeOptions) typeSelect.createEl('option', { attr: { value: val }, text: label });
       typeSelect.value = attr.data_type;
