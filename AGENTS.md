@@ -262,6 +262,15 @@ lab_operator/lab_admin/владелец. Не трогали: эндпоинт �
 
 ## История работ
 
+### 2026-09-05 — main синхронизирован — версия 1.0.5 (снят суффикс b)
+
+Перенос плагин-части v1.0.5b в `main` выполнен (см. коммит `v1.0.4 → v1.0.5:
+перенос из backend` в `main`); суффикс `b` снят на обеих ветках. Также
+залито на селфхост (`epyur.fvds.ru/plugins/sbe-lims/*` + хеши в
+`registry_file_overrides`) — см. `project_selfhost-plugin-upload-path`
+(память агента) за верный хост-путь (`/opt/mailers/www/plugins/`, НЕ
+`/srv/www` — тот существует только внутри контейнеров).
+
 ### 2026-09-05 — v1.0.5b (автопереход заявки в «В работе» при первом вводе результатов; `instrument_hash` — настраиваемый системный атрибут вместо хардкода)
 
 Спека — `docs/superpowers/specs/2026-09-05-sbe-lims-status-autotransition-instrument-hash-design.md`.
