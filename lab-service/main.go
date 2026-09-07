@@ -137,6 +137,7 @@ func main() {
 
 	// Заявки
 	mux.HandleFunc("GET /api/lab/requests", s.requirePerm("viewer")(s.handleListRequests))
+	mux.HandleFunc("GET /api/lab/requests/search", s.requirePerm("viewer")(s.handleSearchRequests))
 	mux.HandleFunc("POST /api/lab/requests", s.requirePerm("editor")(s.handleCreateRequest))
 	mux.HandleFunc("GET /api/lab/requests/{id}", s.requirePerm("viewer")(s.handleGetRequest))
 	mux.HandleFunc("PATCH /api/lab/requests/{id}", s.requirePerm("editor")(s.handleUpdateRequest))
