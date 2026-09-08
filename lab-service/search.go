@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // ---- Свободный поиск заявок по любому атрибуту (2026-09-07) ----
@@ -39,11 +40,32 @@ type searchRequestResult struct {
 	CustomerNumber string         `json:"customer_number"`
 	LabNumber      string         `json:"lab_number"`
 	Status         string         `json:"status"`
+	Result         string         `json:"result"`
 	Compliance     string         `json:"compliance"`
 	ProjectID      int64          `json:"project_id"`
+	InventorID     int64          `json:"inventor_id"`
+	MethodID       int64          `json:"method_id"`
 	CreatedAt      string         `json:"created_at"`
 	CompletedAt    string         `json:"completed_at"`
 	MatchedIn      []matchedField `json:"matched_in"`
+}
+
+// scoredRequest — заявка, совпавшая с поисковым запросом, вместе с полями, где
+// нашлось совпадение (для matched_in в выдаче без group_by).
+type scoredRequest struct {
+	req       Request
+	matchedIn []matchedField
+}
+
+// searchGroupPoint — одна точка агрегированной статистики по совпавшим заявкам
+// (group_by вместе с q) — {label: "...", count: N} плюс period-специфичные поля,
+// когда group_by временной (day/week/month).
+type searchGroupPoint struct {
+	Label     string `json:"label"`
+	Count     int    `json:"count"`
+	Period    string `json:"period,omitempty"`
+	Arrived   int    `json:"arrived,omitempty"`
+	Completed int    `json:"completed,omitempty"`
 }
 
 // stopWords — короткие предлоги/союзы, отбрасываются при разборе запроса: сами по
@@ -258,7 +280,11 @@ func snippetFor(text string) string {
 }
 
 // handleSearchRequests — GET /api/lab/requests/search?q=&limit=&lab=&status=&
-// compliance=&date_from=&date_to= (viewer+, та же видимость, что у обычного списка).
+// compliance=&date_from=&date_to=&group_by= (viewer+, та же видимость, что у
+// обычного списка). group_by (day/week/month/project/inventor/method) считает
+// агрегированную статистику ПО ВСЕМ совпавшим заявкам (не только по показанным
+// limit) — так «распределение по методам среди найденных по запросу» не требует
+// вытягивать все сырые заявки, чтобы посчитать вручную.
 func (s *Server) handleSearchRequests(w http.ResponseWriter, r *http.Request) {
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
 	if q == "" {
@@ -277,6 +303,12 @@ func (s *Server) handleSearchRequests(w http.ResponseWriter, r *http.Request) {
 	if limit > 50 {
 		limit = 50
 	}
+	groupBy := strings.TrimSpace(r.URL.Query().Get("group_by"))
+	statusFilter := strings.TrimSpace(r.URL.Query().Get("status"))
+	complianceFilter := strings.TrimSpace(r.URL.Query().Get("compliance"))
+	dateFrom := strings.TrimSpace(r.URL.Query().Get("date_from"))
+	dateTo := strings.TrimSpace(r.URL.Query().Get("date_to"))
+	labQuery := strings.TrimSpace(r.URL.Query().Get("lab"))
 
 	ctx := r.Context()
 	email := currentEmail(r)
@@ -286,8 +318,9 @@ func (s *Server) handleSearchRequests(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if labQuery := strings.TrimSpace(r.URL.Query().Get("lab")); labQuery != "" {
-		matched, err := s.matchingLabIDs(ctx, labQuery)
+	labResolvedName := ""
+	if labQuery != "" {
+		matched, names, err := s.matchingLabIDs(ctx, labQuery)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
 			return
@@ -296,6 +329,7 @@ func (s *Server) handleSearchRequests(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": fmt.Sprintf("lab %q not found", labQuery)})
 			return
 		}
+		labResolvedName = strings.Join(names, ", ")
 		filtered := requests[:0:0]
 		for _, req := range requests {
 			if matched[req.LabID] {
@@ -306,37 +340,54 @@ func (s *Server) handleSearchRequests(w http.ResponseWriter, r *http.Request) {
 	}
 	requests = filterRequestsForSearch(requests, r.URL.Query())
 	totalVisible := len(requests)
+	filtersApplied := map[string]any{
+		"lab": labResolvedName, "status": statusFilter, "compliance": complianceFilter,
+		"date_from": dateFrom, "date_to": dateTo,
+	}
 	if totalVisible == 0 {
-		writeJSON(w, http.StatusOK, map[string]any{"requests": []searchRequestResult{}, "total_matched": 0, "total_visible": 0})
+		writeJSON(w, http.StatusOK, map[string]any{
+			"requests": []searchRequestResult{}, "total_matched": 0, "total_visible": 0, "filters_applied": filtersApplied,
+		})
 		return
 	}
 
-	projectByID, inventorByID, objectByID, measurementsByRequest, aggregatedByRequest, err := s.loadSearchLookups(ctx, requests)
+	projectByID, inventorByID, methodByID, objectByID, measurementsByRequest, aggregatedByRequest, err := s.loadSearchLookups(ctx, requests)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
 		return
 	}
 
-	type scored struct {
-		req       Request
-		matchedIn []matchedField
-	}
-	scoredList := make([]scored, 0, len(requests))
+	scoredList := make([]scoredRequest, 0, len(requests))
 	for _, req := range requests {
 		fields := buildSearchFields(req, projectByID, inventorByID, objectByID, measurementsByRequest, aggregatedByRequest)
 		ok, matchedIn := matchSearchWords(fields, words)
 		if ok {
-			scoredList = append(scoredList, scored{req: req, matchedIn: matchedIn})
+			scoredList = append(scoredList, scoredRequest{req: req, matchedIn: matchedIn})
 		}
 	}
+	totalMatched := len(scoredList)
+
+	if groupBy == "day" || groupBy == "week" || groupBy == "month" {
+		series := groupByPeriod(scoredList, groupBy, dateFrom, dateTo)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"series": series, "total_matched": totalMatched, "total_visible": totalVisible, "filters_applied": filtersApplied,
+		})
+		return
+	}
+	if groupBy == "project" || groupBy == "inventor" || groupBy == "method" {
+		series := groupByDimension(scoredList, groupBy, projectByID, inventorByID, methodByID)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"series": series, "total_matched": totalMatched, "total_visible": totalVisible, "filters_applied": filtersApplied,
+		})
+		return
+	}
+
 	sort.SliceStable(scoredList, func(i, j int) bool {
 		if len(scoredList[i].matchedIn) != len(scoredList[j].matchedIn) {
 			return len(scoredList[i].matchedIn) > len(scoredList[j].matchedIn)
 		}
 		return scoredList[i].req.UpdatedAt > scoredList[j].req.UpdatedAt
 	})
-
-	totalMatched := len(scoredList)
 	if len(scoredList) > limit {
 		scoredList = scoredList[:limit]
 	}
@@ -344,36 +395,146 @@ func (s *Server) handleSearchRequests(w http.ResponseWriter, r *http.Request) {
 	for _, sc := range scoredList {
 		out = append(out, searchRequestResult{
 			ID: sc.req.ID, Title: sc.req.Title, CustomerNumber: sc.req.CustomerNumber,
-			LabNumber: sc.req.LabNumber, Status: sc.req.Status, Compliance: sc.req.Compliance,
-			ProjectID: sc.req.ProjectID, CreatedAt: sc.req.CreatedAt, CompletedAt: sc.req.CompletedAt,
-			MatchedIn: sc.matchedIn,
+			LabNumber: sc.req.LabNumber, Status: sc.req.Status, Result: sc.req.Result, Compliance: sc.req.Compliance,
+			ProjectID: sc.req.ProjectID, InventorID: sc.req.InventorID, MethodID: sc.req.MethodID,
+			CreatedAt: sc.req.CreatedAt, CompletedAt: sc.req.CompletedAt, MatchedIn: sc.matchedIn,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"requests": out, "total_matched": totalMatched, "total_visible": totalVisible,
+		"requests": out, "total_matched": totalMatched, "total_visible": totalVisible, "filters_applied": filtersApplied,
 	})
 }
 
+// groupByPeriod — распределение совпавших заявок по дате регистрации/завершения
+// (та же bucket-логика, что группировка без query в клиентских тулах, только
+// здесь — над результатом поиска, а не над всей БД).
+func groupByPeriod(scoredList []scoredRequest, granularity, dateFrom, dateTo string) []searchGroupPoint {
+	type bucket struct{ arrived, completed int }
+	buckets := map[string]*bucket{}
+	bump := func(dateStr, field string) {
+		if !dateInRange(dateStr, dateFrom, dateTo) {
+			return
+		}
+		key := periodBucketKey(dateStr, granularity)
+		if key == "" {
+			return
+		}
+		b, ok := buckets[key]
+		if !ok {
+			b = &bucket{}
+			buckets[key] = b
+		}
+		if field == "arrived" {
+			b.arrived++
+		} else {
+			b.completed++
+		}
+	}
+	for _, sc := range scoredList {
+		bump(sc.req.CreatedAt, "arrived")
+		bump(sc.req.CompletedAt, "completed")
+	}
+	keys := make([]string, 0, len(buckets))
+	for k := range buckets {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := make([]searchGroupPoint, 0, len(keys))
+	for _, k := range keys {
+		b := buckets[k]
+		out = append(out, searchGroupPoint{Period: k, Arrived: b.arrived, Completed: b.completed, Count: b.arrived + b.completed})
+	}
+	return out
+}
+
+// periodBucketKey — начало периода (день/неделя-с-понедельника/месяц) для даты.
+func periodBucketKey(dateStr, granularity string) string {
+	if len(dateStr) < 10 {
+		return ""
+	}
+	d := dateStr[:10]
+	if granularity == "day" {
+		return d
+	}
+	if granularity == "month" {
+		return d[:7]
+	}
+	t, err := time.Parse("2006-01-02", d)
+	if err != nil {
+		return ""
+	}
+	isoDow := int(t.Weekday())
+	if isoDow == 0 {
+		isoDow = 7
+	}
+	return t.AddDate(0, 0, -(isoDow - 1)).Format("2006-01-02")
+}
+
+// groupByDimension — распределение совпавших заявок по проекту/испытателю/методу.
+func groupByDimension(scoredList []scoredRequest, dimension string, projectByID map[int64]Project, inventorByID map[int64]Inventor, methodByID map[int64]string) []searchGroupPoint {
+	counts := map[int64]int{}
+	for _, sc := range scoredList {
+		var id int64
+		switch dimension {
+		case "project":
+			id = sc.req.ProjectID
+		case "inventor":
+			id = sc.req.InventorID
+		case "method":
+			id = sc.req.MethodID
+		}
+		counts[id]++
+	}
+	labelFor := func(id int64) string {
+		if id <= 0 {
+			return "(не указано)"
+		}
+		switch dimension {
+		case "project":
+			if p, ok := projectByID[id]; ok && p.Name != "" {
+				return p.Name
+			}
+		case "inventor":
+			if inv, ok := inventorByID[id]; ok && inv.Name != "" {
+				return inv.Name
+			}
+		case "method":
+			if name, ok := methodByID[id]; ok && name != "" {
+				return name
+			}
+		}
+		return fmt.Sprintf("#%d", id)
+	}
+	out := make([]searchGroupPoint, 0, len(counts))
+	for id, count := range counts {
+		out = append(out, searchGroupPoint{Label: labelFor(id), Count: count})
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Count > out[j].Count })
+	return out
+}
+
 // matchingLabIDs — id лабораторий, чьё имя или код содержит query (регистронезависимо).
-func (s *Server) matchingLabIDs(ctx context.Context, query string) (map[int64]bool, error) {
+func (s *Server) matchingLabIDs(ctx context.Context, query string) (map[int64]bool, []string, error) {
 	q := strings.ToLower(query)
 	rows, err := s.pool.Query(ctx, `SELECT id, code, name FROM labs`)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer rows.Close()
 	out := map[int64]bool{}
+	names := make([]string, 0, 2)
 	for rows.Next() {
 		var id int64
 		var code, name string
 		if err := rows.Scan(&id, &code, &name); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if strings.Contains(strings.ToLower(name), q) || strings.Contains(strings.ToLower(code), q) {
 			out[id] = true
+			names = append(names, name)
 		}
 	}
-	return out, rows.Err()
+	return out, names, rows.Err()
 }
 
 // filterRequestsForSearch применяет те же фильтры lab/status/compliance/date_from/
@@ -419,9 +580,14 @@ func dateInRange(dateStr, from, to string) bool {
 // loadSearchLookups батчем догружает справочники, нужные buildSearchFields — по
 // одному запросу на таблицу (не по одной заявке на запрос).
 func (s *Server) loadSearchLookups(ctx context.Context, requests []Request) (
-	map[int64]Project, map[int64]Inventor, map[int64]Object,
+	map[int64]Project, map[int64]Inventor, map[int64]string, map[int64]Object,
 	map[int64][]MeasurementResult, map[int64][]AggregatedResult, error,
 ) {
+	fail := func(err error) (map[int64]Project, map[int64]Inventor, map[int64]string, map[int64]Object,
+		map[int64][]MeasurementResult, map[int64][]AggregatedResult, error) {
+		return nil, nil, nil, nil, nil, nil, err
+	}
+
 	ids := make([]int64, 0, len(requests))
 	objectIDs := make(map[int64]bool, len(requests))
 	for _, req := range requests {
@@ -434,39 +600,58 @@ func (s *Server) loadSearchLookups(ctx context.Context, requests []Request) (
 	projectByID := map[int64]Project{}
 	prows, err := s.pool.Query(ctx, `SELECT id, name FROM projects`)
 	if err != nil {
-		return nil, nil, nil, nil, nil, err
+		return fail(err)
 	}
 	for prows.Next() {
 		var id int64
 		var name string
 		if err := prows.Scan(&id, &name); err != nil {
 			prows.Close()
-			return nil, nil, nil, nil, nil, err
+			return fail(err)
 		}
 		projectByID[id] = Project{ID: id, Name: name}
 	}
 	prows.Close()
 	if err := prows.Err(); err != nil {
-		return nil, nil, nil, nil, nil, err
+		return fail(err)
 	}
 
 	inventorByID := map[int64]Inventor{}
 	irows, err := s.pool.Query(ctx, `SELECT id, name FROM inventors`)
 	if err != nil {
-		return nil, nil, nil, nil, nil, err
+		return fail(err)
 	}
 	for irows.Next() {
 		var id int64
 		var name string
 		if err := irows.Scan(&id, &name); err != nil {
 			irows.Close()
-			return nil, nil, nil, nil, nil, err
+			return fail(err)
 		}
 		inventorByID[id] = Inventor{ID: id, Name: name}
 	}
 	irows.Close()
 	if err := irows.Err(); err != nil {
-		return nil, nil, nil, nil, nil, err
+		return fail(err)
+	}
+
+	methodByID := map[int64]string{}
+	metrows, err := s.pool.Query(ctx, `SELECT id, name FROM methods`)
+	if err != nil {
+		return fail(err)
+	}
+	for metrows.Next() {
+		var id int64
+		var name string
+		if err := metrows.Scan(&id, &name); err != nil {
+			metrows.Close()
+			return fail(err)
+		}
+		methodByID[id] = name
+	}
+	metrows.Close()
+	if err := metrows.Err(); err != nil {
+		return fail(err)
 	}
 
 	objectByID := map[int64]Object{}
@@ -477,7 +662,7 @@ func (s *Server) loadSearchLookups(ctx context.Context, requests []Request) (
 		}
 		orows, err := s.pool.Query(ctx, `SELECT id, name, characteristics FROM objects WHERE id = ANY($1)`, oIDs)
 		if err != nil {
-			return nil, nil, nil, nil, nil, err
+			return fail(err)
 		}
 		for orows.Next() {
 			var id int64
@@ -485,7 +670,7 @@ func (s *Server) loadSearchLookups(ctx context.Context, requests []Request) (
 			var charsRaw []byte
 			if err := orows.Scan(&id, &name, &charsRaw); err != nil {
 				orows.Close()
-				return nil, nil, nil, nil, nil, err
+				return fail(err)
 			}
 			chars := map[string]any{}
 			if len(charsRaw) > 0 {
@@ -495,21 +680,21 @@ func (s *Server) loadSearchLookups(ctx context.Context, requests []Request) (
 		}
 		orows.Close()
 		if err := orows.Err(); err != nil {
-			return nil, nil, nil, nil, nil, err
+			return fail(err)
 		}
 	}
 
 	measurementsByRequest := map[int64][]MeasurementResult{}
 	mrows, err := s.pool.Query(ctx, `SELECT request_id, values FROM measurement_results WHERE request_id = ANY($1)`, ids)
 	if err != nil {
-		return nil, nil, nil, nil, nil, err
+		return fail(err)
 	}
 	for mrows.Next() {
 		var requestID int64
 		var valuesRaw []byte
 		if err := mrows.Scan(&requestID, &valuesRaw); err != nil {
 			mrows.Close()
-			return nil, nil, nil, nil, nil, err
+			return fail(err)
 		}
 		values := map[string]any{}
 		if len(valuesRaw) > 0 {
@@ -519,20 +704,20 @@ func (s *Server) loadSearchLookups(ctx context.Context, requests []Request) (
 	}
 	mrows.Close()
 	if err := mrows.Err(); err != nil {
-		return nil, nil, nil, nil, nil, err
+		return fail(err)
 	}
 
 	aggregatedByRequest := map[int64][]AggregatedResult{}
 	arows, err := s.pool.Query(ctx, `SELECT request_id, result_data FROM aggregated_results WHERE request_id = ANY($1)`, ids)
 	if err != nil {
-		return nil, nil, nil, nil, nil, err
+		return fail(err)
 	}
 	for arows.Next() {
 		var requestID int64
 		var dataRaw []byte
 		if err := arows.Scan(&requestID, &dataRaw); err != nil {
 			arows.Close()
-			return nil, nil, nil, nil, nil, err
+			return fail(err)
 		}
 		data := map[string]any{}
 		if len(dataRaw) > 0 {
@@ -542,8 +727,8 @@ func (s *Server) loadSearchLookups(ctx context.Context, requests []Request) (
 	}
 	arows.Close()
 	if err := arows.Err(); err != nil {
-		return nil, nil, nil, nil, nil, err
+		return fail(err)
 	}
 
-	return projectByID, inventorByID, objectByID, measurementsByRequest, aggregatedByRequest, nil
+	return projectByID, inventorByID, methodByID, objectByID, measurementsByRequest, aggregatedByRequest, nil
 }

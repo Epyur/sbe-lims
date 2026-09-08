@@ -1292,6 +1292,23 @@ docker compose exec lab wget -qO- http://localhost:3000/api/lab/health   # вн�
 
 ## История
 
+- **2026-09-08 — `group_by` над `/api/lab/requests/search` (day/week/month/project/inventor/method), сочетается с `query`.**
+  Живой инцидент: агент на запрос «статистику по заказчикам» вытащил все
+  сырые заявки для ручной сверки со списком проектов → таймаут 504 у
+  провайдера LLM (тот же класс проблемы, что уже чинили для дат/YouGile).
+  Дизайн — раздел 3 в `docs/superpowers/specs/2026-09-07-lims-attribute-
+  search-design.md` (расширение того же документа/эндпоинта, оформлено
+  отдельным разделом задним числом при закрытии разрыва документации).
+  - `group_by=day/week/month` — `groupByPeriod`, распределение совпавших
+    заявок по дате регистрации/завершения. `group_by=project/inventor/
+    method` — `groupByDimension`, распределение по заказчику/испытателю/
+    методу с именами из справочников, отсортировано по убыванию.
+  - `query`+`group_by` сочетаются одним вызовом — группировка считается
+    НАД ВСЕМИ совпавшими заявками, не только показанной страницей.
+  - `search_test.go` дополнен тестами на `groupByPeriod`/`groupByDimension`.
+  - `go build`/`go vet`/`go test ./...` — чисто. Версия плагина не
+    поднимается — изменения только в `lab-service/` (ветка `backend`).
+
 - **2026-09-07 — новый эндпоинт `GET /api/lab/requests/search`: свободный поиск заявок
   по ЛЮБОМУ атрибуту, не только по колонкам `requests`.**
   Дизайн: `docs/superpowers/specs/2026-09-07-lims-attribute-search-design.md`
