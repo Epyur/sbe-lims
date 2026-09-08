@@ -1269,6 +1269,13 @@ export class LimsView extends ItemView {
     card.createDiv({ text: `№ ${requestNumberLabel(req)}` });
     card.createDiv({ cls: 'tn-lims-meta', text: req.title || '(без названия)' });
     card.createDiv({ cls: 'tn-lims-meta', text: this.methodName(req.method_id) });
+    // Дата завершения — явно на карточке колонки «Завершённые» (2026-09-08,
+    // прямой запрос пользователя): withinCompletedWindow фильтрует именно по
+    // completed_at (не updated_at), но само значение раньше нигде не
+    // показывалось — не с чем было сверить глазами, откуда карточка ещё видна.
+    if (req.status === 'completed' && req.completed_at) {
+      card.createDiv({ cls: 'tn-lims-meta', text: `Завершена: ${this.formatDate(req.completed_at)}` });
+    }
     card.addEventListener('click', () => void this.renderRequestDetail(req));
   }
 
