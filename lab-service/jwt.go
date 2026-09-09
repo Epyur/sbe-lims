@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/jackc/pgx/v5"
 )
 
 var jwtSecret []byte
@@ -125,20 +124,6 @@ func normalizeViewAsRole(raw string) string {
 	}
 }
 
-func (s *Server) roleFor(ctx context.Context, appID, email string) (string, error) {
-	var role string
-	err := s.pool.QueryRow(ctx,
-		`SELECT role FROM lab_permissions WHERE app = $1 AND email = $2`,
-		appID, email).Scan(&role)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return "", nil
-		}
-		return "", err
-	}
-	return role, nil
-}
-
 // rawRole — реальная роль пользователя (персональная либо общий уровень
 // доступа) БЕЗ клэмпа по каналу и БЕЗ учёта «просмотра от лица роли».
 // Использовать для проверок прав — effectiveRole; rawRole — только там, где
@@ -146,23 +131,13 @@ func (s *Server) roleFor(ctx context.Context, appID, email string) (string, erro
 // суперадмину переключатель ролей, даже когда он сам сейчас «смотрит как
 // viewer»).
 func (s *Server) rawRole(ctx context.Context, appID, email string) (string, error) {
-	role, err := s.roleFor(ctx, appID, email)
-	if err != nil {
-		return "", err
-	}
-	if role != "" {
-		return role, nil
-	}
-	var level string
-	err = s.pool.QueryRow(ctx,
-		`SELECT level FROM lab_common_access WHERE app = $1`, appID).Scan(&level)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return "", nil
-		}
-		return "", err
-	}
-	return level, nil
+	// С 2026-09-09 источник правды — auth-service (см. authperms.go и дизайн
+	// docs/superpowers/specs/2026-09-09-central-permissions-design.md). Локальные
+	// lab_permissions/lab_common_access больше не читаются (оставлены как путь
+	// отката). Исторический дефолт lab-service, когда общий доступ не настроен, —
+	// доступа нет.
+	_ = appID
+	return roleFromSnapshot(s.permissionsSnapshot(ctx), email, ""), nil
 }
 
 // effectiveRole — роль для ВСЕХ проверок прав и фильтрации видимости: реальная

@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 )
 
@@ -40,33 +41,20 @@ func (s *Server) handleMyPermission(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"email": email, "role": role, "real_role": rawRole, "hasAccess": true})
 }
 
-// handleListPermissions возвращает все права (для admin).
+// handleListPermissions возвращает все глобальные роли (для admin).
+// С 2026-09-09 источник правды — auth-service: читаем карту прав приложения,
+// локальная таблица lab_permissions больше не используется (см. authperms.go).
 func (s *Server) handleListPermissions(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.pool.Query(r.Context(), `
-SELECT email, role FROM lab_permissions WHERE app = $1 ORDER BY email`, appIDFromEnv())
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
-		return
-	}
-	defer rows.Close()
-
+	snap := s.permissionsSnapshot(r.Context())
 	type perm struct {
 		Email string `json:"email"`
 		Role  string `json:"role"`
 	}
-	perms := make([]perm, 0, 16)
-	for rows.Next() {
-		var p perm
-		if err := rows.Scan(&p.Email, &p.Role); err != nil {
-			log.Printf("permissions scan: %v", err)
-			continue
-		}
-		perms = append(perms, p)
+	perms := make([]perm, 0, len(snap.Roles))
+	for email, role := range snap.Roles {
+		perms = append(perms, perm{Email: email, Role: role})
 	}
-	if err := rows.Err(); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
-		return
-	}
+	sort.Slice(perms, func(i, j int) bool { return perms[i].Email < perms[j].Email })
 	writeJSON(w, http.StatusOK, map[string]any{"permissions": perms})
 }
 
@@ -116,36 +104,28 @@ func (s *Server) handleSetPermission(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	var err error
-	if req.Role == "" {
-		_, err = s.pool.Exec(r.Context(), `
-DELETE FROM lab_permissions WHERE app = $1 AND email = $2`, appIDFromEnv(), req.Email)
-	} else {
-		_, err = s.pool.Exec(r.Context(), `
-INSERT INTO lab_permissions (app, email, role) VALUES ($1, $2, $3)
-ON CONFLICT (app, email) DO UPDATE SET role = EXCLUDED.role`,
-			appIDFromEnv(), req.Email, req.Role)
-	}
-	if err != nil {
-		log.Printf("set permission: %v", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
+	// Запись уходит в auth-service — единственный источник правды с 2026-09-09;
+	// право «админ приложения» проверяет он же, по центральной таблице.
+	if err := setPermissionUpstream(r.Context(), currentEmail(r), req.Email, req.Role); err != nil {
+		log.Printf("set permission upstream: %v", err)
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": "не удалось сохранить права: " + err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-// handleGetCommonAccess возвращает уровень общего доступа.
+// handleGetCommonAccess возвращает общий уровень доступа.
+// Пустой уровень отдаётся как есть — это «общий доступ закрыт», а не
+// «настройка не задана» (на подмене пустого значения на viewer погорел
+// Фотобанк, см. его AGENTS.md за 2026-09-09).
 func (s *Server) handleGetCommonAccess(w http.ResponseWriter, r *http.Request) {
-	var level string
-	err := s.pool.QueryRow(r.Context(),
-		`SELECT level FROM lab_common_access WHERE app = $1`, appIDFromEnv()).Scan(&level)
-	if err != nil {
-		level = ""
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"level": level})
+	snap := s.permissionsSnapshot(r.Context())
+	writeJSON(w, http.StatusOK, map[string]any{"level": snap.CommonAccess})
 }
 
-// handleSetCommonAccess устанавливает уровень общего доступа ({level}).
+// handleSetCommonAccess устанавливает общий уровень доступа ({level}).
+// Запись уходит в auth-service — единственный источник правды; право «админ
+// приложения» проверяет он же.
 func (s *Server) handleSetCommonAccess(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Level string `json:"level"`
@@ -154,16 +134,9 @@ func (s *Server) handleSetCommonAccess(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json"})
 		return
 	}
-	req.Level = strings.TrimSpace(req.Level)
-	if req.Level != "" && req.Level != "viewer" && req.Level != "editor" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "level must be viewer, editor or empty"})
-		return
-	}
-	if _, err := s.pool.Exec(r.Context(), `
-INSERT INTO lab_common_access (app, level) VALUES ($1, $2)
-ON CONFLICT (app) DO UPDATE SET level = EXCLUDED.level`, appIDFromEnv(), req.Level); err != nil {
-		log.Printf("set common access: %v", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
+	if err := setCommonAccessUpstream(r.Context(), currentEmail(r), strings.TrimSpace(req.Level)); err != nil {
+		log.Printf("set common access upstream: %v", err)
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": "не удалось сохранить общий доступ: " + err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
