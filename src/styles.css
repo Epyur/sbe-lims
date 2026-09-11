@@ -668,3 +668,18 @@
   border-radius: var(--tn-radius-sm, 8px);
   background: #fff;
 }
+
+/* Группа полей формы испытателя (2026-09-11) — блок с заголовком в
+   предпросмотре конфигуратора; мобильная форма рисует такой же блок своими
+   классами tn-lm-group*. */
+.tn-lims-form-group {
+  border: 1px solid var(--tn-border, var(--background-modifier-border));
+  border-radius: var(--tn-radius-sm, 8px);
+  padding: 8px;
+  margin: 8px 0;
+}
+
+.tn-lims-form-group-title {
+  font-weight: 600;
+  margin-bottom: 4px;
+}

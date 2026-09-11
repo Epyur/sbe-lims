@@ -187,6 +187,10 @@ type OperatorFormField struct {
 	Default     json.RawMessage `json:"default,omitempty"`
 	Visibility  json.RawMessage `json:"visibility,omitempty"`
 	Suggestions json.RawMessage `json:"suggestions,omitempty"`
+	// GroupID (2026-09-11) — принадлежность поля группе формы (см.
+	// MethodOperatorForm.Groups). Сервер группы не интерпретирует, поле описано
+	// здесь ровно затем, чтобы round-trip его не терял.
+	GroupID string `json:"group_id,omitempty"`
 }
 
 // MethodOperatorForm — methods.operator_form: схема формы для испытателя.
@@ -198,6 +202,13 @@ type MethodOperatorForm struct {
 	// GET-эндпоинты не терял его молча (раньше структура была только {Fields},
 	// любые другие ключи JSONB отбрасывались при повторной сериализации).
 	Timer json.RawMessage `json:"timer,omitempty"`
+	// Groups (2026-09-11) — группы полей формы: заголовок, обязательность,
+	// поведение во 2-й и последующих сериях (свернуть и унаследовать значения
+	// предыдущей серии), условие показа. Та же дисциплина, что у Timer: сервер
+	// НЕ интерпретирует структуру (наследование делает мобильный клиент при
+	// вводе, см. дизайн 2026-09-11), json.RawMessage — чтобы round-trip не терял
+	// настройку молча.
+	Groups json.RawMessage `json:"groups,omitempty"`
 }
 
 // ---- Вспомогательные ----

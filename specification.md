@@ -179,11 +179,26 @@ MethodPresentation{ blocks: DocumentBlock[] }
 // первой (сохраняет старое implicit-поведение). См. lab-service/AGENTS.md,
 // parseMethodPresentation.
 
-// Форма для испытателя (operator_form, 2026-08-22) — только конструктор схемы: какие
-// атрибуты лаборант вводит при эксперименте. Реальный фронт ввода (мобильный/веб)
-// не разрабатывается — здесь только описание формы для будущего использования.
-OperatorFormField{ attribute_id: string, label?: string, required: boolean, help_text?: string }
-MethodOperatorForm{ fields: OperatorFormField[] }
+// Форма для испытателя (operator_form, 2026-08-22; реальный ввод — мобильный плагин
+// sbe-lims-mobile с 2026-08-27) — здесь конструктор схемы: какие атрибуты лаборант
+// вводит при эксперименте, в каком порядке, с условиями показа и блоками (2026-09-11).
+OperatorFormField{ attribute_id: string, label?: string, required: boolean, help_text?: string,
+                   default?: { kind: 'literal', value: string } | { kind: 'today' },
+                   visibility?: OperatorFormVisibility, suggestions?: string[],
+                   group_id?: string }   // 2026-09-11 — блок, внутри которого показывается поле
+OperatorFormVisibility{ logic: 'and'|'or',
+                        conditions: [{ field: string, operator: ComparisonOperator, value: string }] }
+// Группа полей (2026-09-11) — общие на все серии данные вводятся один раз:
+// next_series='collapsed_inherit' сворачивает блок во 2-й и последующих сериях и
+// подставляет значения ПРЕДЫДУЩЕЙ серии; required — предупреждение при отправке
+// (не запрет); visibility — та же условная видимость, что у поля (скрытая по условию
+// группа не отправляется вовсе, в отличие от свёрнутой).
+OperatorFormGroup{ id: string, title: string, required?: boolean,
+                   next_series?: 'expanded'|'collapsed_inherit', visibility?: OperatorFormVisibility }
+MethodOperatorForm{ fields: OperatorFormField[], groups?: OperatorFormGroup[], timer?: TimerConfig }
+// Сервер схему НЕ интерпретирует — хранит как есть (lab-service results.go). Сворачивание
+// и подстановку значений предыдущей серии делает мобильный клиент при вводе, поэтому в БД
+// у каждой серии остаётся полный набор значений, а вывод документов не меняется.
 
 // График (chart_configs) — рендерится сервером в PNG (charts.go), без внешних зависимостей.
 ChartConfig{ id: string, title?: string, chart_type: 'line'|'scatter'|'bar',

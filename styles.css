@@ -456,6 +456,41 @@
 .tn-plugin-desc { color: var(--tn-muted); font-size: 13px; line-height: 1.4; }
 .tn-plugin-meta { font-size: 12px; color: var(--tn-muted); }
 
+/* Блок «нет доступа → запросить» (2026-09-09, src/ui/access-denied.ts).
+   Общий для всех плагинов: раньше человек упирался в надпись «Недостаточно
+   прав» и не знал, к кому идти. */
+.tn-access-denied {
+  max-width: 520px;
+  margin: 48px auto;
+  padding: 20px 24px;
+  border: 1px solid var(--tn-border);
+  border-radius: var(--tn-radius);
+  background: var(--tn-card);
+  text-align: center;
+}
+
+.tn-access-denied-title {
+  font-size: 16px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.tn-access-denied-text {
+  font-size: 13px;
+  color: var(--tn-muted);
+  line-height: 1.5;
+}
+
+.tn-access-denied-actions {
+  margin: 16px 0 4px;
+}
+
+.tn-access-denied-note {
+  font-size: 12px;
+  color: var(--tn-muted);
+  min-height: 16px;
+}
+
 /* Классы вьюхи ЛИМС (tn-lims-*) на семантических токенах дизайн-системы SBE. */
 
 .tn-lims-container {
@@ -1125,4 +1160,19 @@
 .tn-lims-qr-block canvas {
   border-radius: var(--tn-radius-sm, 8px);
   background: #fff;
+}
+
+/* Группа полей формы испытателя (2026-09-11) — блок с заголовком в
+   предпросмотре конфигуратора; мобильная форма рисует такой же блок своими
+   классами tn-lm-group*. */
+.tn-lims-form-group {
+  border: 1px solid var(--tn-border, var(--background-modifier-border));
+  border-radius: var(--tn-radius-sm, 8px);
+  padding: 8px;
+  margin: 8px 0;
+}
+
+.tn-lims-form-group-title {
+  font-weight: 600;
+  margin-bottom: 4px;
 }

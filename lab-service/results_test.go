@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+)
 
 // ---- Хелперы построения операндов/clauses/веток/subjects единой модели
 // (2026-08-22v3 — левая часть сравнения НЕЯВНАЯ: "текущий оцениваемый атрибут",
@@ -472,5 +476,42 @@ func TestThreeLevelDependencyChainNeedsSecondClassificationPass(t *testing.T) {
 	applyRuleToSubjects(ctx, complianceRule, nil, false)
 	if got := result["target_group_compliance"]; got != "Не соответствует" {
 		t.Errorf("target_group_compliance: got %v, want 'Не соответствует' (Г4 хуже цели Г2)", got)
+	}
+}
+
+// parseMethodOperatorForm не должен терять клиентские ключи схемы формы
+// (2026-09-11). Сервер их не интерпретирует, но обязан вернуть ровно то, что
+// положил конфигуратор: структура, описывающая лишь часть ключей, молча
+// выбрасывает остальные при первом же пересохранении метода — этот дефект уже
+// дважды доходил до прода (сначала timer, потом default/visibility). Тест
+// закрывает весь известный набор разом, включая группы полей.
+func TestParseMethodOperatorFormKeepsClientSchema(t *testing.T) {
+	raw := []byte(`{
+"fields":[{"attribute_id":"thickness","required":true,"group_id":"g1",
+"default":{"kind":"literal","value":"10"},
+"visibility":{"logic":"and","conditions":[{"field":"mounting","operator":"==","value":"клей"}]},
+"suggestions":["10 мм"]}],
+"groups":[{"id":"g1","title":"Условия монтажа","required":true,"next_series":"collapsed_inherit"}],
+"timer":{"buttons":[{"label":"Вспышка","action":{"kind":"log","attributeId":"obs"}}]}}`)
+
+	form := parseMethodOperatorForm(raw)
+	if len(form.Fields) != 1 {
+		t.Fatalf("полей: got %d, want 1", len(form.Fields))
+	}
+	if form.Fields[0].GroupID != "g1" {
+		t.Fatalf("group_id поля потерян при разборе: %+v", form.Fields[0])
+	}
+
+	out, err := json.Marshal(form)
+	if err != nil {
+		t.Fatalf("сериализация: %v", err)
+	}
+	for _, key := range []string{`"groups"`, `"group_id"`, `"timer"`, `"visibility"`, `"default"`, `"suggestions"`} {
+		if !strings.Contains(string(out), key) {
+			t.Errorf("ключ %s пропал при round-trip: %s", key, out)
+		}
+	}
+	if !strings.Contains(string(out), `"collapsed_inherit"`) {
+		t.Errorf("настройка группы дошла пустой: %s", out)
 	}
 }
