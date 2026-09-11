@@ -4,7 +4,7 @@ Go-сервис «Заявки на испытания» для SBE-плагин
 БД `lab` (postgres `lab-db`), авторизация — JWT HS256 (общий `JWT_SECRET` с auth-service)
 + роли из `lab_permissions`. Универсальный для лабораторий (потребители: sbe-requests,
 sbe-lims, sbe-ekn). Файлы заявок — в S3 (бакет `sbe-doc`) через rclone CLI.
-Деплой: `/opt/mailers/lab-service/`.
+Деплой: каталог `lab-service/` в каталоге стека на сервере.
 
 ## Назначение (текущее)
 
@@ -328,7 +328,7 @@ COALESCE($6, description), ...` (не перетирает, если поле н
   `health` → `{"status":"ok"}`, лог подтверждает `email ingest: disabled`
   (`LAB_MAIL_ENABLED` не выставлен) — сервис работает как раньше, воркер не стартовал.
   **Следующий шаг** (по отдельному подтверждению): выставить `LAB_MAIL_*` в
-  `/opt/mailers/.env` с реальными учётными данными `lpitn@yandex.ru` и
+  серверный `.env` с реальными учётными данными `lpitn@yandex.ru` и
   `LAB_MAIL_ENABLED=true`, пересоздать контейнер, пройти E2E из спеки. Также перед этим
   шагом нужно поправить конфиг метода `GG-M1` (см. предупреждение выше о
   `comb_length`/`Comb_lenth_1..4`).
@@ -966,7 +966,7 @@ S3/rclone. Исправлено: (1) переставили RUN-шаг ДО COPY
 
 **Массовый повторный разбор — ВЫПОЛНЕН (2026-08-29, по прямому запросу
 пользователя «сделай бэкап БД и делай пакетами»).** Перед началом — свежий
-ручной `pg_dump` БД `lab` (`/opt/mailers/backups/lab_manual_..._pre_batch_
+ручной `pg_dump` БД `lab` (серверный каталог бэкапов, `lab_manual_..._pre_batch_
 reprocess.sql.gz`, 47 МБ — старый ежедневный `backup.sh` бэкапит другую БД,
 см. WP7 выше). Два разных метода по папкам:
 
@@ -1020,8 +1020,8 @@ reprocess.sql.gz`, 47 МБ — старый ежедневный `backup.sh` б�
 не баг). Протокол одной из свежесозданных заявок (1424) собрался корректно
 (3474 байта HTML) — подтверждает, что цепочка «письмо → заявка → протокол»
 работает без ручного вмешательства на реальных данных. **Перед всем этим
-вручную снят бэкап БД `lab`** (`pg_dump` → `/opt/mailers/backups/
-lab_manual_*.sql.gz`) — существующий `backup.sh`/cron бэкапит СОВСЕМ ДРУГУЮ
+вручную снят бэкап БД `lab`** (`pg_dump` → серверный каталог бэкапов,
+`lab_manual_*.sql.gz`) — существующий `backup.sh`/cron бэкапит СОВСЕМ ДРУГУЮ
 базу (`mailers`, не `lab`) — на проде для `lab` до этого момента вообще не
 было автоматического бэкапа, стоит иметь в виду отдельно от этой задачи.
 
@@ -2644,7 +2644,7 @@ docker compose exec lab wget -qO- http://localhost:3000/api/lab/health   # вн�
   видимых проектов добавляется рекурсивно (дерево не рвётся). Применён в
   `handleListProjects` и `handlePull`. Правки на операциях не менялись (create editor,
   update владелец/admin).
-  Залито на VDS `/opt/mailers/lab-service/` (main.go, projects.go, sync.go, md5 = локальным),
+  Залито на сервер в `lab-service/` (main.go, projects.go, sync.go, md5 = локальным),
   контейнер `lab` пересобран и пересоздан. **E2E пройден**: viewer (член группы 1) видит
   проект группы 1 + публичные, не видит группу 2; stray без роли — только публичные;
   admin — все; цепочка предков (видимый подпроект группы 1 тянет скрытого родителя группы 2);
@@ -2723,7 +2723,7 @@ docker compose exec lab wget -qO- http://localhost:3000/api/lab/health   # вн�
   `Lab.type`, `Method.determinable_indicators` (list/create). sync.go: pull/push с новыми
   полями + автопроект в `pushCreate`. Фикс: после создания автопроекта в tx `loadProjectInfo`
   через пул не видел незакоммиченный проект (500) → `pi.code = ekn` напрямую.
-  Залит на VDS `/opt/mailers/lab-service/`, контейнер `lab` пересобран. **E2E пройден**:
+  Залит на сервер в `lab-service/`, контейнер `lab` пересобран. **E2E пройден**:
   внешняя лаба (type=external), метод с показателями, объект с ЕКН (batch_number/ekn_snapshot),
   автопроект 068863 (is_ekn=true) + переиспользование при повторной заявке, приоритет/цель/
   external_lab_id/ekn в заявке, экспериментальный образец без ЕКН, pull с новыми полями.
@@ -2734,7 +2734,7 @@ docker compose exec lab wget -qO- http://localhost:3000/api/lab/health   # вн�
   номер не присваивался. Фикс: `PushRequest` += `client_id`; `pushCreate` возвращает
   полную созданную заявку (`*Request`); `handlePush` отвечает
   `{"inserted", "updated", "created": [{client_id, request}]}` (пустой массив при отсутствии
-  созданий). Залит на VDS `/opt/mailers/lab-service/sync.go` (md5 `184744af8c4220d4c287129b1ea8e16f`),
+  созданий). Залит на сервер в `lab-service/sync.go` (md5 `184744af8c4220d4c287129b1ea8e16f`),
   контейнер `lab` пересобран и пересоздан (recreate OK, контейнер Running).
 
 - **2026-08-18 — создание (Этап 1 плана 2026-08-17-sbe-requests-lab-service-plan.md).**
@@ -2750,7 +2750,7 @@ docker compose exec lab wget -qO- http://localhost:3000/api/lab/health   # вн�
   NNN теперь простое значение счётчика (1, 2, 3, ...); `projectInfo` сведён к `code`
   (`loadProjectInfo` не читает `is_ekn`). Спека §9, AGENTS.md и план обновлены.
 - **2026-08-18 — деплой + E2E на сервере (Этап 1 завершён).**
-  Залиты все файлы в `/opt/mailers/lab-service/`, compose (`lab-db`+`lab`, LAB_* в auth-service,
+  Залиты все файлы в `lab-service/` на сервере, compose (`lab-db`+`lab`, LAB_* в auth-service,
   `lab_pgdata`, caddy `/api/lab/*` перед `/api/documents/*`) и Caddyfile; `.env` дополнен LAB_*.
   Пересобран `auth-service` (seed приложения `lab` — старый seed.go без LAB был причиной 403
   `/apps/register`). E2E-чек-лист: health 200, 401 без JWT, permissions/me (admin),
