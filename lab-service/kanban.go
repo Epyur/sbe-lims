@@ -49,24 +49,30 @@ func normalizeKanbanTarget(oldStatus, oldAssignedTo string, patch kanbanMoveRequ
 
 // canApplyKanbanMove — без БД (роли резолвит вызывающая сторона), юнит-тестируется
 // напрямую:
+//
 //  1. Руководитель лабы — глобальная роль admin/superadmin, ЛИБО lab_admin
 //     ИМЕННО этой лабы (2026-08-24, делегированные полномочия: lab_admin теперь
 //     полноценный руководитель своей лабы в канбане, не синоним lab_operator) —
 //     разрешено всё.
+//
 //  2. Испытатель (lab_operator ИМЕННО этой лабы):
-//     a. Самозабор: неназначенную заявку из "новых" (oldStatus=="new",
-//        oldAssignedTo=="") может забрать СЕБЕ (newAssignedTo==actorEmail) сразу
-//        в "received" ИЛИ в "processing" (2026-09-03 — раньше только в
-//        "received"; на доске колонки 2/3 подписаны похоже, "В работу"/
-//        "В работе", и перетаскивание сразу в 3-ю колонку ошибочно отклонялось
-//        как "нет прав", хотя по сути тот же самозабор) — и только себе, не
-//        кому-то другому.
-//     b. Иначе не может менять assigned_to вовсе (переназначение — только
-//        руководитель).
-//     c. Может менять status, только если заявка уже назначена ему
-//        (oldAssignedTo==actorEmail), старый статус — received/processing,
-//        новый — received/processing/completed (не может переоткрыть
-//        завершённую).
+//
+//     (а) Самозабор: неназначенную заявку из "новых" (oldStatus=="new",
+//     oldAssignedTo=="") может забрать СЕБЕ (newAssignedTo==actorEmail) сразу
+//     в "received" ИЛИ в "processing" (2026-09-03 — раньше только в
+//     "received"; на доске колонки 2/3 подписаны похоже, "В работу"/
+//     "В работе", и перетаскивание сразу в 3-ю колонку ошибочно отклонялось
+//     как "нет прав", хотя по сути тот же самозабор) — и только себе, не
+//     кому-то другому.
+//
+//     (б) Иначе не может менять assigned_to вовсе (переназначение — только
+//     руководитель).
+//
+//     (в) Может менять status, только если заявка уже назначена ему
+//     (oldAssignedTo==actorEmail), старый статус — received/processing,
+//     новый — received/processing/completed (не может переоткрыть
+//     завершённую).
+//
 //  3. Остальные — запрещено.
 func canApplyKanbanMove(actorEmail, actorGlobalRole, actorLabRole, oldStatus, newStatus, oldAssignedTo, newAssignedTo string) (bool, string) {
 	if roleRank(actorGlobalRole) >= roleRank("admin") || actorLabRole == "lab_admin" {

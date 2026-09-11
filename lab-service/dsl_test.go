@@ -33,23 +33,23 @@ func TestDSLMultiArgAggregate(t *testing.T) {
 // "Да" (т.е. "Нет", если хоть одна серия "Нет").
 func TestDSLAnyAllAggregate(t *testing.T) {
 	env := &FormulaEnv{SeriesParams: map[string][]any{
-		"mixed":   {"Да", "Нет", "Нет"},
-		"allYes":  {"Да", "Да", "Да"},
-		"allNo":   {"Нет", "Нет"},
-		"oneNo":   {"Да", "Да", "Нет"},
+		"mixed":  {"Да", "Нет", "Нет"},
+		"allYes": {"Да", "Да", "Да"},
+		"allNo":  {"Нет", "Нет"},
+		"oneNo":  {"Да", "Да", "Нет"},
 	}}
 	cases := []struct {
 		expr string
 		want string
 	}{
-		{"any(mixed)", "Да"},   // хоть одна "Да" -> "Да"
-		{"all(mixed)", "Нет"},  // не все "Да" -> "Нет"
+		{"any(mixed)", "Да"},  // хоть одна "Да" -> "Да"
+		{"all(mixed)", "Нет"}, // не все "Да" -> "Нет"
 		{"any(allYes)", "Да"},
-		{"all(allYes)", "Да"},  // все "Да" -> "Да"
-		{"any(allNo)", "Нет"},  // ни одной "Да" -> "Нет"
+		{"all(allYes)", "Да"}, // все "Да" -> "Да"
+		{"any(allNo)", "Нет"}, // ни одной "Да" -> "Нет"
 		{"all(allNo)", "Нет"},
 		{"any(oneNo)", "Да"},
-		{"all(oneNo)", "Нет"},  // одна "Нет" достаточно, чтобы all стал "Нет"
+		{"all(oneNo)", "Нет"}, // одна "Нет" достаточно, чтобы all стал "Нет"
 	}
 	for _, c := range cases {
 		res, err := runFormula(c.expr, env)
