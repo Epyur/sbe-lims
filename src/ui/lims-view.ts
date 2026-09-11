@@ -28,6 +28,8 @@ import type {
   MethodOperatorForm,
   Operand,
   OperatorFormField,
+  OperatorFormGroup,
+  OperatorFormVisibility,
   PresentationKind,
   TimeseriesSeriesConfig,
 } from '../types/lims';
@@ -237,6 +239,20 @@ const PAGE_META: Record<NavKey, { title: string; sub: string }> = {
   'lab-members': { title: 'Сотрудники', sub: 'Состав и права лаборатории' },
   settings: { title: 'Настройки', sub: 'Лаборатории и их администраторы' },
 };
+
+/** Держит поля одной группы формы испытателя подряд (2026-09-11): порядок
+ * списка полей и есть порядок рендера, а блок группы рисуется на месте её
+ * первого поля — разорванная группа выглядела бы двумя блоками с одним
+ * заголовком. Поле переставляется сразу за последним полем своей группы; у
+ * поля, которому группу сняли, позиция не меняется. */
+function moveFieldToItsGroup(fields: OperatorFormField[], idx: number): void {
+  const field = fields[idx];
+  if (!field.group_id) return;
+  const lastIdx = fields.reduce((acc, f, i) => (i !== idx && f.group_id === field.group_id ? i : acc), -1);
+  if (lastIdx < 0) return;
+  fields.splice(idx, 1);
+  fields.splice(lastIdx > idx ? lastIdx : lastIdx + 1, 0, field);
+}
 
 export class LimsView extends ItemView {
   plugin: SbeLimsPlugin;
@@ -2497,17 +2513,33 @@ export class LimsView extends ItemView {
     let timerConfig: MethodOperatorForm['timer'] = cfg.operator_form.timer && Array.isArray(cfg.operator_form.timer.buttons)
       ? { buttons: cfg.operator_form.timer.buttons.map(b => ({ label: b.label, action: { ...b.action } })) }
       : undefined;
+    // Группы полей (2026-09-11) — такая же локальная копия, как поля: правки
+    // уходят в метод только при сохранении (buildPatch). Записи без id или
+    // названия отбрасываем сразу — ссылаться на них всё равно нечем.
+    const operatorFormGroups: OperatorFormGroup[] = (cfg.operator_form.groups || [])
+      .filter(g => g.id && g.title)
+      .map(g => ({
+        ...g,
+        visibility: g.visibility
+          ? { logic: g.visibility.logic, conditions: g.visibility.conditions.map(c => ({ ...c })) }
+          : undefined,
+      }));
     const operatorFormBody = this.renderCollapsibleSection(form, 'Форма для испытателя (данные эксперимента)');
     operatorFormBody.createDiv({ cls: 'tn-lims-meta' }).setText(
       'Какие поля испытатель заполняет при эксперименте (мобильный ввод — ЛИМС Мобайл): ' +
       'атрибуты метода и/или системные (даты, температура/давление/влажность воздуха).',
     );
+    const operatorFormGroupsEl = operatorFormBody.createDiv();
     const operatorFormListEl = operatorFormBody.createDiv();
     const operatorFormPreviewEl = operatorFormBody.createDiv();
     redrawOperatorForm = () => {
+      operatorFormGroupsEl.empty();
+      this.renderOperatorFormGroups(operatorFormGroupsEl, operatorFormGroups, operatorFormFields, () => redrawOperatorForm());
       operatorFormListEl.empty();
-      this.renderOperatorFormRows(operatorFormListEl, operatorFormFields, attrs, () => redrawOperatorForm());
-      this.renderOperatorFormPreview(operatorFormPreviewEl, operatorFormFields, attrs);
+      this.renderOperatorFormRows(
+        operatorFormListEl, operatorFormFields, attrs, operatorFormGroups, () => redrawOperatorForm(),
+      );
+      this.renderOperatorFormPreview(operatorFormPreviewEl, operatorFormFields, attrs, operatorFormGroups);
     };
     redrawOperatorForm();
     const addOperatorFieldBtn = operatorFormBody.createEl('button', { text: '➕ Поле формы', cls: 'tn-btn tn-btn-ghost' });
@@ -2695,6 +2727,15 @@ export class LimsView extends ItemView {
       // хотя UI (см. добавление через OPERATOR_FORM_SYSTEM_FIELDS выше) явно
       // позволяет добавлять и системные поля — они молча вырезались при save.
       const allowedFieldIds = new Set([...attrIds, ...OPERATOR_FORM_SYSTEM_FIELDS.map(s => s.id)]);
+      // Группы (2026-09-11): в схему уходят только названные — безымянная
+      // группа не на что не ссылается и мешает выбору в списке. У поля,
+      // ссылающегося на отсутствующую группу, ссылка снимается: иначе оно
+      // пропало бы из формы испытателя (рендерилось бы в блок, которого нет).
+      const keptGroups = operatorFormGroups.filter(g => g.id && g.title);
+      const keptGroupIds = new Set(keptGroups.map(g => g.id));
+      const keptFields = operatorFormFields
+        .filter(f => allowedFieldIds.has(f.attribute_id))
+        .map(f => (f.group_id && !keptGroupIds.has(f.group_id) ? { ...f, group_id: undefined } : f));
       return {
         lab_ids: getLabIDs(),
         description: description.value.trim(),
@@ -2702,7 +2743,7 @@ export class LimsView extends ItemView {
         classification: rules,
         chart_configs: charts,
         presentation: { blocks },
-        operator_form: { fields: operatorFormFields.filter(f => allowedFieldIds.has(f.attribute_id)), timer: timerConfig },
+        operator_form: { fields: keptFields, groups: keptGroups, timer: timerConfig },
         calibration_attributes: calibrationAttrs,
         calibration_operator_form: {
           fields: calibrationOperatorFormFields.filter(f => calibrationAttrs.some(a => a.id === f.attribute_id)),
@@ -2817,10 +2858,93 @@ export class LimsView extends ItemView {
 
   /** Строки формы для испытателя (блок 3в) — тот же паттерн drag-and-drop, что
    * представление: выбор атрибута, подпись, «обязательное», подсказка. */
+  /** Редактор групп полей формы испытателя (2026-09-11, по итогам боевого
+   * применения ЛИМС Мобайл на заявке 451/2026 — часть полей общая на все серии
+   * эксперимента, и переписывать их в каждой серии заново незачем). Дизайн:
+   * docs/superpowers/specs/2026-09-11-sbe-lims-operator-form-groups-design.md.
+   * Состав группы задаётся не здесь, а выбором группы в строке самого поля
+   * (см. renderOperatorFormRows) — один источник правды о принадлежности,
+   * иначе список полей и список групп разъезжались бы. */
+  private renderOperatorFormGroups(
+    container: HTMLElement, groups: OperatorFormGroup[], fields: OperatorFormField[], onChange: () => void,
+  ): void {
+    container.createDiv({ cls: 'tn-lims-meta' }).setText(
+      'Группы полей — блок с общим заголовком. Группу можно пометить обязательной и настроить, ' +
+      'чтобы во 2-й и последующих сериях она была свёрнута, а значения подставлялись из предыдущей серии:',
+    );
+    groups.forEach((g, idx) => {
+      const row = container.createDiv({ cls: 'tn-lims-method' });
+      const rowFlex = row.createDiv({ cls: 'tn-lims-flex' });
+      const titleInput = rowFlex.createEl('input', {
+        attr: { type: 'text', placeholder: 'название группы, напр. Условия монтажа' },
+        cls: 'tn-lims-input',
+      });
+      titleInput.value = g.title;
+      titleInput.addEventListener('change', () => { g.title = titleInput.value.trim(); onChange(); });
+
+      const reqLabel = rowFlex.createEl('label', { cls: 'tn-lims-flex' });
+      const reqCb = reqLabel.createEl('input', { attr: { type: 'checkbox' } });
+      reqCb.checked = g.required === true;
+      reqLabel.createSpan({ text: 'обязательная' });
+      reqCb.addEventListener('change', () => { g.required = reqCb.checked ? true : undefined; onChange(); });
+
+      const nextSelect = rowFlex.createEl('select', { cls: 'tn-lims-select' });
+      nextSelect.createEl('option', { attr: { value: 'expanded' }, text: 'во 2-й и далее: показывать как обычно' });
+      nextSelect.createEl('option', {
+        attr: { value: 'collapsed_inherit' }, text: 'во 2-й и далее: свернуть, значения из предыдущей серии',
+      });
+      nextSelect.value = g.next_series || 'expanded';
+      nextSelect.addEventListener('change', () => {
+        g.next_series = nextSelect.value === 'collapsed_inherit' ? 'collapsed_inherit' : undefined;
+        onChange();
+      });
+
+      const delBtn = rowFlex.createEl('button', { text: '✖', cls: 'tn-btn tn-btn-ghost' });
+      delBtn.setAttribute('title', 'Удалить группу — поля останутся в форме, просто без группы');
+      delBtn.addEventListener('click', () => {
+        for (const f of fields) {
+          if (f.group_id === g.id) f.group_id = undefined;
+        }
+        groups.splice(idx, 1);
+        onChange();
+      });
+
+      // Условие показа группы — та же панель, что у поля; в условии доступны
+      // поля ВНЕ этой группы: условие по собственному полю зацикливало бы показ
+      // (поле видно, только если группа видна).
+      const visBtn = row.createEl('button', {
+        text: g.visibility ? '👁 условие показа ✓' : '👁 условие показа',
+        cls: 'tn-btn tn-btn-ghost',
+      });
+      visBtn.addEventListener('click', () => this.toggleVisibilityPanel(
+        row, g, fields.filter(f => f.group_id !== g.id), onChange,
+      ));
+
+      const members = fields.filter(f => f.group_id === g.id).length;
+      row.createDiv({ cls: 'tn-lims-meta' }).setText(
+        members > 0
+          ? `Полей в группе: ${members}`
+          : 'Полей в группе нет — выберите эту группу в строке нужного поля ниже',
+      );
+    });
+    const addBtn = container.createEl('button', { text: '➕ Группа', cls: 'tn-btn tn-btn-ghost' });
+    addBtn.addEventListener('click', () => {
+      let id = `g${Date.now().toString(36)}`;
+      let suffix = 1;
+      while (groups.some(g => g.id === id)) {
+        id = `g${Date.now().toString(36)}_${suffix}`;
+        suffix += 1;
+      }
+      groups.push({ id, title: '' });
+      onChange();
+    });
+  }
+
   private renderOperatorFormRows(
     container: HTMLElement,
     fields: OperatorFormField[],
     attrs: MethodAttribute[],
+    groups: OperatorFormGroup[],
     onChange: () => void,
   ): void {
     let dragFromIdx: number | null = null;
@@ -2865,6 +2989,22 @@ export class LimsView extends ItemView {
       reqCb.checked = f.required;
       reqLabel.createSpan({ text: 'обязательное' });
       reqCb.addEventListener('change', () => { f.required = reqCb.checked; onChange(); });
+
+      // Группа поля (2026-09-11) — выбор переставляет поле к остальным полям
+      // своей группы: порядок списка и есть порядок рендера, а группа рисуется
+      // на месте своего первого поля, поэтому «разорванная» группа выглядела бы
+      // двумя блоками с одним заголовком.
+      if (groups.length > 0) {
+        const groupSelect = rowFlex.createEl('select', { cls: 'tn-lims-select' });
+        groupSelect.createEl('option', { attr: { value: '' }, text: '— без группы —' });
+        for (const g of groups) groupSelect.createEl('option', { attr: { value: g.id }, text: g.title || g.id });
+        groupSelect.value = f.group_id || '';
+        groupSelect.addEventListener('change', () => {
+          f.group_id = groupSelect.value || undefined;
+          moveFieldToItsGroup(fields, idx);
+          onChange();
+        });
+      }
 
       const delBtn = rowFlex.createEl('button', { text: '✖', cls: 'tn-btn tn-btn-ghost' });
       delBtn.addEventListener('click', () => { fields.splice(idx, 1); onChange(); });
@@ -2912,7 +3052,9 @@ export class LimsView extends ItemView {
         text: f.visibility ? '👁 условие показа ✓' : '👁 условие показа',
         cls: 'tn-btn tn-btn-ghost',
       });
-      visBtn.addEventListener('click', () => this.toggleVisibilityPanel(row, f, fields, onChange));
+      visBtn.addEventListener('click', () => this.toggleVisibilityPanel(
+        row, f, fields.filter(other => other !== f), onChange,
+      ));
 
       // Рекомендуемые значения (2026-08-29, живая жалоба) — только для обычного
       // текстового поля: у select/boolean уже есть жёсткий список вариантов,
@@ -2976,13 +3118,17 @@ export class LimsView extends ItemView {
     doneBtn.addEventListener('click', () => { panel.remove(); onChange(); });
   }
 
-  /** Панель условной видимости поля формы (2026-08-28, WP3c) — тот же
-   * toggle-по-кнопке паттерн, что toggleSynonymsPanel. Список полей для
-   * условия — ВСЕ ОСТАЛЬНЫЕ поля этой же формы (по attribute_id, без
-   * самого себя) — условие ссылается на то, что испытатель уже мог заполнить
-   * в этой же форме, не на произвольный атрибут метода. */
+  /** Панель условной видимости (2026-08-28, WP3c; с 2026-09-11 обслуживает и
+   * поле, и ГРУППУ полей — носитель передаётся как объект с полем visibility)
+   * — тот же toggle-по-кнопке паттерн, что toggleSynonymsPanel.
+   * `conditionFields` — поля, по которым можно строить условие: для поля это
+   * все остальные поля формы, для группы — поля вне неё (условие по
+   * собственному полю группы зацикливало бы показ). Условие всегда ссылается
+   * на то, что испытатель уже мог заполнить в этой же форме, не на
+   * произвольный атрибут метода. */
   private toggleVisibilityPanel(
-    row: HTMLElement, f: OperatorFormField, allFields: OperatorFormField[], onChange: () => void,
+    row: HTMLElement, target: { visibility?: OperatorFormVisibility }, conditionFields: OperatorFormField[],
+    onChange: () => void,
   ): void {
     const existing = row.querySelector('.tn-lims-visibility');
     if (existing) { existing.remove(); return; }
@@ -2992,21 +3138,20 @@ export class LimsView extends ItemView {
     const logicSelect = panel.createEl('select', { cls: 'tn-lims-select' });
     logicSelect.createEl('option', { attr: { value: 'and' }, text: 'выполняются ВСЕ условия (И)' });
     logicSelect.createEl('option', { attr: { value: 'or' }, text: 'выполняется ХОТЯ БЫ ОДНО (ИЛИ)' });
-    logicSelect.value = f.visibility?.logic || 'and';
+    logicSelect.value = target.visibility?.logic || 'and';
     logicSelect.addEventListener('change', () => {
-      if (!f.visibility) f.visibility = { logic: 'and', conditions: [] };
-      f.visibility.logic = logicSelect.value as 'and' | 'or';
+      if (!target.visibility) target.visibility = { logic: 'and', conditions: [] };
+      target.visibility.logic = logicSelect.value as 'and' | 'or';
     });
 
     const condListEl = panel.createDiv();
-    const otherFields = allFields.filter(other => other !== f);
     const redrawConditions = (): void => {
       condListEl.empty();
-      const conditions = f.visibility?.conditions || [];
+      const conditions = target.visibility?.conditions || [];
       conditions.forEach((cond, i) => {
         const condRow = condListEl.createDiv({ cls: 'tn-lims-flex' });
         const fieldSelect = condRow.createEl('select', { cls: 'tn-lims-select' });
-        for (const other of otherFields) {
+        for (const other of conditionFields) {
           fieldSelect.createEl('option', { attr: { value: other.attribute_id }, text: other.label || other.attribute_id });
         }
         fieldSelect.value = cond.field;
@@ -3020,8 +3165,10 @@ export class LimsView extends ItemView {
         valInput.addEventListener('change', () => { cond.value = valInput.value; });
         const rmBtn = condRow.createEl('button', { text: '✖', cls: 'tn-btn tn-btn-ghost' });
         rmBtn.addEventListener('click', () => {
-          f.visibility!.conditions.splice(i, 1);
-          if (f.visibility!.conditions.length === 0) f.visibility = undefined;
+          const vis = target.visibility;
+          if (!vis) return;
+          vis.conditions.splice(i, 1);
+          if (vis.conditions.length === 0) target.visibility = undefined;
           redrawConditions();
         });
       });
@@ -3029,9 +3176,9 @@ export class LimsView extends ItemView {
     redrawConditions();
     const addCondBtn = panel.createEl('button', { text: '➕ Условие', cls: 'tn-btn tn-btn-ghost' });
     addCondBtn.addEventListener('click', () => {
-      if (otherFields.length === 0) return;
-      if (!f.visibility) f.visibility = { logic: logicSelect.value as 'and' | 'or', conditions: [] };
-      f.visibility.conditions.push({ field: otherFields[0].attribute_id, operator: '==', value: '' });
+      if (conditionFields.length === 0) return;
+      if (!target.visibility) target.visibility = { logic: logicSelect.value as 'and' | 'or', conditions: [] };
+      target.visibility.conditions.push({ field: conditionFields[0].attribute_id, operator: '==', value: '' });
       redrawConditions();
     });
     const doneBtn = panel.createEl('button', { text: 'Готово', cls: 'tn-btn tn-btn-primary' });
@@ -3045,7 +3192,9 @@ export class LimsView extends ItemView {
    * показаны отдельной справочной строкой. Остальные системные (даты/условия
    * среды) — обычные добавляемые поля формы наравне с атрибутами метода
    * (2026-08-27, раньше считались "подставляются сами" без права выбора). */
-  private renderOperatorFormPreview(container: HTMLElement, fields: OperatorFormField[], attrs: MethodAttribute[]): void {
+  private renderOperatorFormPreview(
+    container: HTMLElement, fields: OperatorFormField[], attrs: MethodAttribute[], groups: OperatorFormGroup[],
+  ): void {
     container.empty();
     const referenceOnly = SYSTEM_PLACEHOLDERS.filter(s => !s.data_type);
     container.createDiv({ cls: 'tn-lims-meta' }).setText(
@@ -3055,10 +3204,35 @@ export class LimsView extends ItemView {
     sysRow.createSpan({ text: referenceOnly.map(s => s.label).join(', ') + '.' });
     if (fields.length === 0) return;
     container.createDiv({ cls: 'tn-lims-meta' }).setText('Предпросмотр — как увидит испытатель:');
+    // Блок группы (2026-09-11) создаётся на ПЕРВОМ её поле и переиспользуется
+    // дальше — ровно так же, как это делает мобильная форма, поэтому
+    // предпросмотр показывает тот же порядок, что увидит испытатель.
+    const groupById = new Map(groups.map(g => [g.id, g] as const));
+    const groupHosts = new Map<string, HTMLElement>();
+    const hostFor = (field: OperatorFormField): HTMLElement => {
+      const group = field.group_id ? groupById.get(field.group_id) : undefined;
+      if (!group) return container;
+      const already = groupHosts.get(group.id);
+      if (already) return already;
+      const box = container.createDiv({ cls: 'tn-lims-form-group' });
+      box.createDiv({ cls: 'tn-lims-form-group-title' })
+        .setText(group.title + (group.required ? ' *' : ''));
+      if (group.next_series === 'collapsed_inherit') {
+        box.createDiv({ cls: 'tn-lims-meta' }).setText(
+          `Во 2-й и последующих сериях свёрнута за кнопкой «Показать ${group.title}», ` +
+          'значения подставляются из предыдущей серии.',
+        );
+      }
+      if (group.visibility) {
+        box.createDiv({ cls: 'tn-lims-meta' }).setText('Показывается только при выполнении условия.');
+      }
+      groupHosts.set(group.id, box);
+      return box;
+    };
     for (const f of fields) {
       const attr = attrs.find(a => a.id === f.attribute_id);
       const sys = OPERATOR_FORM_SYSTEM_FIELDS.find(s => s.id === f.attribute_id);
-      const row = container.createDiv({ cls: 'tn-lims-flex' });
+      const row = hostFor(f).createDiv({ cls: 'tn-lims-flex' });
       row.createSpan({ text: (f.label || attr?.name || sys?.label || f.attribute_id) + (f.required ? ' *' : '') });
       const input = row.createEl('input', { attr: { type: 'text', disabled: true }, cls: 'tn-lims-input' });
       const dataType = attr?.data_type || sys?.data_type;
