@@ -240,6 +240,24 @@ const PAGE_META: Record<NavKey, { title: string; sub: string }> = {
   settings: { title: 'Настройки', sub: 'Лаборатории и их администраторы' },
 };
 
+/** Типы атрибутов, которых НЕ должно быть среди полей формы испытателя
+ * (2026-09-12, по разбору живого случая с логом наблюдений). Такое поле
+ * заполняется не руками: «Лог наблюдений» пишут кнопки таймера, значение —
+ * массив записей {событие, секунды}. Отдельной ветки рендера у этого типа нет
+ * ни в мобильной форме, ни в десктопной правке серии, поэтому поле
+ * отрисовывалось обычным текстовым вводом: испытатель видел «[object Object]»,
+ * а любое касание поля заменяло массив строкой — накопленные наблюдения
+ * терялись при сохранении, и в протоколе оставалась пустая ячейка. Тот же
+ * принцип уже действует для колонок динамических таблиц и пикера
+ * плейсхолдеров, где эти типы тоже не предлагаются.
+ *
+ * Атрибут, уже стоящий в форме у существующего метода, из списка НЕ исчезает
+ * (см. renderOperatorFormRows) — иначе выпадающий список молча показывал бы
+ * чужое значение и менял его при первой же правке соседнего поля. */
+function isNonFormAttributeType(dataType: AttributeDataType): boolean {
+  return dataType === 'event_log';
+}
+
 /** Держит поля одной группы формы испытателя подряд (2026-09-11): порядок
  * списка полей и есть порядок рендера, а блок группы рисуется на месте её
  * первого поля — разорванная группа выглядела бы двумя блоками с одним
@@ -2554,6 +2572,7 @@ export class LimsView extends ItemView {
         f => attrs.find(a => a.id === f.attribute_id)?.data_type === 'instrument_hash',
       );
       for (const a of attrs.filter(a => a.id && !operatorFormFields.some(f => f.attribute_id === a.id)
+        && !isNonFormAttributeType(a.data_type)
         && (a.data_type !== 'instrument_hash' || !hasInstrumentHash))) {
         any = true;
         menu.addItem(item => item.setTitle(a.name || a.id).onClick(() => {
@@ -2968,6 +2987,11 @@ export class LimsView extends ItemView {
       const attrGroup = attrSelect.createEl('optgroup', { attr: { label: 'Атрибуты метода' } });
       for (const a of attrs) {
         if (!a.id) continue;
+        // Типы, не предназначенные для ручного ввода (см. isNonFormAttributeType),
+        // в списке не предлагаются — кроме случая, когда именно этот атрибут уже
+        // стоит в поле у существующего метода: иначе список показал бы чужое
+        // значение и подменил бы его при первой же правке строки.
+        if (isNonFormAttributeType(a.data_type) && a.id !== f.attribute_id) continue;
         attrGroup.createEl('option', { attr: { value: a.id }, text: a.name || a.id });
       }
       const systemGroup = attrSelect.createEl('optgroup', { attr: { label: 'Системные' } });
