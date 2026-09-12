@@ -196,6 +196,11 @@ OperatorFormVisibility{ logic: 'and'|'or',
 OperatorFormGroup{ id: string, title: string, required?: boolean,
                    next_series?: 'expanded'|'collapsed_inherit', visibility?: OperatorFormVisibility }
 MethodOperatorForm{ fields: OperatorFormField[], groups?: OperatorFormGroup[], timer?: TimerConfig }
+// Что НЕ предлагается в поля формы (2026-09-12, isNonFormAttributeType в lims-view.ts):
+// атрибуты типа event_log («Лог наблюдений») — их заполняют кнопки таймера, значение
+// массив {label, seconds}; ручного рендера у типа нет, и текстовый ввод затирал бы
+// накопленные записи. Уже настроенное в методе поле такого типа из своей строки не
+// исчезает (иначе select подменил бы атрибут при первой правке).
 // Сервер схему НЕ интерпретирует — хранит как есть (lab-service results.go). Сворачивание
 // и подстановку значений предыдущей серии делает мобильный клиент при вводе, поэтому в БД
 // у каждой серии остаётся полный набор значений, а вывод документов не меняется.
