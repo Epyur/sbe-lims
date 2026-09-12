@@ -882,6 +882,31 @@ func shouldAutoTransitionToProcessing(currentStatus string) bool {
 	return currentStatus == "new" || currentStatus == "received"
 }
 
+// shouldAutoAssignToOperator (2026-09-12, живая жалоба: заявка сама переходила
+// «В работе» при первом вводе результатов, но исполнитель оставался пустым —
+// карточка падала в ячейку «Не назначено», откуда испытатель забрать её не может
+// (канбан разрешает двигать только СВОЮ карточку), и назначать приходилось
+// руководителю вручную). Исполнителем становится тот, кто реально ввёл
+// результаты, но только если исполнителя ещё нет — переназначение остаётся
+// ручным делом руководителя — и только если вводящий действительно сотрудник
+// этой лаборатории (та же проверка цели, что в canApplyKanbanMove). Чистая
+// функция без обращения к БД, как и shouldAutoTransitionToProcessing выше.
+func shouldAutoAssignToOperator(currentAssignedTo, actorLabRole string) bool {
+	if currentAssignedTo != "" {
+		return false
+	}
+	return actorLabRole == "lab_operator" || actorLabRole == "lab_admin"
+}
+
+// assignRequestTo проставляет исполнителя заявки. Условие «исполнитель пуст» в
+// самом UPDATE — защита от гонки: если исполнителя успели назначить между
+// проверкой и этим запросом, чужое назначение не затирается.
+func (s *Server) assignRequestTo(ctx context.Context, id int64, email string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE requests SET assigned_to = $2, updated_at = now() WHERE id = $1 AND assigned_to = ''`, id, email)
+	return err
+}
+
 // handleSetTargetIndicator — узкий эндпоинт (2026-09-04, по прямому запросу
 // пользователя): заказчик (владелец заявки) сам исправляет ОТСУТСТВУЮЩИЙ
 // целевой показатель объекта для метода этой заявки (objects.characteristics.

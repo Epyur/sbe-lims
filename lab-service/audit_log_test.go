@@ -48,3 +48,27 @@ func TestShouldAutoTransitionToProcessing(t *testing.T) {
 		}
 	}
 }
+
+// 2026-09-12 — исполнитель по факту ввода результатов: ставим только когда его
+// ещё нет и вводящий — сотрудник этой лаборатории. Уже назначенного не трогаем
+// (переназначение — ручное дело руководителя), постороннего не назначаем.
+func TestShouldAutoAssignToOperator(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		assignedTo string
+		labRole    string
+		want       bool
+	}{
+		{"свободна, вводит испытатель лабы", "", "lab_operator", true},
+		{"свободна, вводит админ лабы", "", "lab_admin", true},
+		{"свободна, вводит аудитор", "", "lab_auditor", false},
+		{"свободна, вводящий не в лабе", "", "", false},
+		{"уже назначена другому", "other@tn.ru", "lab_operator", false},
+		{"уже назначена ему же", "self@tn.ru", "lab_operator", false},
+	} {
+		if got := shouldAutoAssignToOperator(tc.assignedTo, tc.labRole); got != tc.want {
+			t.Errorf("%s: shouldAutoAssignToOperator(%q, %q) = %v, want %v",
+				tc.name, tc.assignedTo, tc.labRole, got, tc.want)
+		}
+	}
+}

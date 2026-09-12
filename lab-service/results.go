@@ -1382,14 +1382,32 @@ func (s *Server) handleCreateResult(w http.ResponseWriter, r *http.Request) {
 		s.linkInstrumentBufferResult(r.Context(), req.InstrumentHash, id)
 	}
 
-	// Автопереход в processing при первом сохранении результатов (2026-09-05) —
-	// заявка могла годами висеть в new/received, пока испытатель уже вводит
-	// данные; см. shouldAutoTransitionToProcessing/setRequestStatus в requests.go.
-	// Best-effort: результаты уже сохранены, ошибка бухгалтерии статуса не должна
-	// превращать успешный ответ в ошибку.
-	if existing, ferr := s.loadRequest(r.Context(), requestID); ferr == nil && shouldAutoTransitionToProcessing(existing.Status) {
-		if serr := s.setRequestStatus(r.Context(), requestID, "processing", existing, currentEmail(r)); serr != nil {
-			log.Printf("auto status transition: %v", serr)
+	// Исполнитель и статус по факту сохранения результатов (2026-09-05 — статус,
+	// 2026-09-12 — исполнитель). Заявка могла годами висеть в new/received, пока
+	// испытатель уже вводит данные; см. shouldAutoTransitionToProcessing/
+	// shouldAutoAssignToOperator/setRequestStatus в requests.go. Best-effort:
+	// результаты уже сохранены, ошибка бухгалтерии статуса не должна превращать
+	// успешный ответ в ошибку.
+	if existing, ferr := s.loadRequest(r.Context(), requestID); ferr == nil {
+		actor := currentEmail(r)
+		// Исполнитель ставится ДО смены статуса: письмо в LPITrack о взятии в
+		// работу берёт испытателя из этого же значения (см. triggerProcessingEmail)
+		// — иначе оно уходило с текстом «испытателем не назначен» и, из-за дедупа
+		// по sent_emails, уже не повторялось после ручного назначения.
+		if labID, lerr := s.requestLabID(r.Context(), requestID); lerr == nil {
+			role, rerr := s.labMemberRole(r.Context(), actor, labID)
+			if rerr == nil && shouldAutoAssignToOperator(existing.AssignedTo, role) {
+				if aerr := s.assignRequestTo(r.Context(), requestID, actor); aerr != nil {
+					log.Printf("auto assign: %v", aerr)
+				} else {
+					existing.AssignedTo = actor
+				}
+			}
+		}
+		if shouldAutoTransitionToProcessing(existing.Status) {
+			if serr := s.setRequestStatus(r.Context(), requestID, "processing", existing, actor); serr != nil {
+				log.Printf("auto status transition: %v", serr)
+			}
 		}
 	}
 
