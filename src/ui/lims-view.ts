@@ -1,4 +1,4 @@
-import { FileSystemAdapter, ItemView, Menu, Modal, Notice, TFile, WorkspaceLeaf } from 'obsidian';
+import { FileSystemAdapter, ItemView, Menu, Modal, Notice, WorkspaceLeaf } from 'obsidian';
 import type { App } from 'obsidian';
 import type SbeLimsPlugin from '../main';
 import type {
@@ -35,9 +35,12 @@ import type {
 } from '../types/lims';
 import { OPERATOR_FORM_SYSTEM_FIELDS, renderBlockEditor, SYSTEM_PLACEHOLDERS } from './block-editor';
 import { toggleSubSupPalette } from './subsup';
-import { LIMS_HELP_MD, LIMS_HELP_PATH } from './help';
+import { renderHelpButton } from '../../../sbe-core/src/ui/help-modal';
+import { LIMS_HELP } from './help';
 import { errorMessage } from '../../../sbe-core/src/utils/errors';
 import { downloadBase64File } from '../../../sbe-core/src/utils/download';
+import { sortRequestsByPriority, sortRequestsForList } from '../../../sbe-core/src/utils/request-sort';
+import type { RequestListMode } from '../../../sbe-core/src/utils/request-sort';
 import { sanitizeAttributesWithRename } from '../services/llm-assist.service';
 import type { ExistingAttributeSummary } from '../services/llm-assist.service';
 import { extractStandardText } from '../services/rtf-to-text';
@@ -305,6 +308,11 @@ export class LimsView extends ItemView {
   private myRole = '';
   private myEmail = '';
   private currentRequestsFilter?: (r: LimsRequest) => boolean;
+  /** Порядок списка, заданный страницей, а не панелью фильтров: «Результаты и
+   * протоколы» — перечень уже завершённых заявок, и показывать его надо в
+   * порядке завершения (2026-09-17). Панель фильтров, если в ней выбран статус,
+   * этот порядок перебивает. */
+  private currentRequestsMode: RequestListMode = 'all';
   // ---- Панель фильтров списка заявок (2026-09-04, по образцу sbe-requests
   // requests-view.ts) — отдельные поля по категориям (дата/метод/название
   // объекта/идентификатор/партия/заказчик), комбинируются по И МЕЖДУ СОБОЙ и с
@@ -418,13 +426,17 @@ export class LimsView extends ItemView {
       void this.renderPage();
     });
 
-    // Справка (WP9, 2026-08-29) — тот же паттерн, что REQUESTS_HELP_MD/openHelp в
-    // sbe-requests: заметка в вольте, создаётся при первом клике, дальше открывается как
-    // обычная заметка Obsidian (можно читать/искать/поправить прямо в вольте).
-    const helpBtnEl = sidebar.createDiv({ cls: 'tn-lims-collapse' });
-    helpBtnEl.createSpan({ text: '❓' });
-    helpBtnEl.createSpan({ cls: 'tn-lims-collapse-lbl', text: 'Справка' });
-    helpBtnEl.addEventListener('click', () => { void this.openHelp(); });
+    // «Справка» — последним пунктом сайдбара, общее окно sbe-core (2026-09-17,
+    // как в Фотобанке, Письмах и Документах). Раньше (WP9, 2026-08-29) кнопка
+    // создавала заметку в вольте — та отставала от версии плагина и у каждого
+    // была своя.
+    renderHelpButton({
+      container: sidebar,
+      app: this.app,
+      cls: 'tn-lims-collapse',
+      labelCls: 'tn-lims-collapse-lbl',
+      help: LIMS_HELP,
+    });
 
     const content = main.createDiv({ cls: 'tn-lims-content' });
     this.pageTitleEl = content.createEl('h1', { cls: 'tn-lims-page-title' });
@@ -474,24 +486,6 @@ export class LimsView extends ItemView {
     // группы открытыми, чтобы подменю было видно (фасад).
   }
 
-  /** Открывает справку плагина. Если заметки нет в вольте — создаёт её (тот же паттерн,
-   * что openHelp в sbe-requests, см. help.ts). */
-  private async openHelp(): Promise<void> {
-    try {
-      const adapter = this.app.vault.adapter;
-      if (!(await adapter.exists(LIMS_HELP_PATH))) {
-        await adapter.write(LIMS_HELP_PATH, LIMS_HELP_MD);
-      }
-      const file = this.app.vault.getAbstractFileByPath(LIMS_HELP_PATH);
-      if (file instanceof TFile) {
-        await this.app.workspace.getLeaf(false).openFile(file);
-      } else {
-        new Notice('Не удалось найти файл справки');
-      }
-    } catch (e: unknown) {
-      new Notice(`Не удалось открыть справку: ${errorMessage(e)}`);
-    }
-  }
 
   private toggleCollapse(): void {
     this.collapsed = !this.collapsed;
@@ -905,7 +899,7 @@ export class LimsView extends ItemView {
         await this.renderQueueBoard();
         return;
       case 'results':
-        await this.renderRequests(r => r.status === 'completed');
+        await this.renderRequests(r => r.status === 'completed', 'completed');
         return;
       case 'methods':
         await this.renderMethods();
@@ -947,8 +941,9 @@ export class LimsView extends ItemView {
   /** Список заявок (возврат из карточки). Опциональный фильтр — для «Очереди»/«Результатов»/
    * объектно-скоупированного вида; комбинируется по И с панелью фильтров ниже
    * (см. matchesRequestFilters) — панель не заменяет caller-предикат, а сужает его. */
-  private async renderRequests(filter?: (r: LimsRequest) => boolean): Promise<void> {
+  private async renderRequests(filter?: (r: LimsRequest) => boolean, mode: RequestListMode = 'all'): Promise<void> {
     this.currentRequestsFilter = filter;
+    this.currentRequestsMode = mode;
     this.bodyEl.empty();
     this.renderRequestsFilterBar(this.bodyEl);
     const listEl = this.bodyEl.createDiv();
@@ -957,8 +952,15 @@ export class LimsView extends ItemView {
       let requests = await this.plugin.syncService.listRequests();
       if (filter) requests = requests.filter(filter);
       requests = requests.filter(r => this.matchesRequestFilters(r));
-      // Новые сверху: сперва по году номера, затем по самому номеру (2026-08-21).
-      requests = [...requests].sort((a, b) => (b.number_year - a.number_year) || (b.number_seq - a.number_seq));
+      // Порядок — общее правило всех приложений (2026-09-17, см.
+      // sbe-core/src/utils/request-sort.ts): без фильтра — по дате поступления,
+      // «Активные» — сперва «В работе», затем «Образцы получены», затем
+      // остальные, «Завершённые» — по дате закрытия. Раньше список шёл по
+      // номеру (year + seq, 2026-08-21), который зависит от года и лаборатории
+      // и с реальным порядком поступления совпадает не всегда. Статус в панели
+      // фильтров сильнее режима страницы: человек выбрал его руками.
+      requests = sortRequestsForList(
+        requests, this.filterStatus === 'all' ? this.currentRequestsMode : this.filterStatus);
       listEl.empty();
       for (const r of requests) {
         const card = listEl.createDiv({ cls: 'tn-lims-req-card' });
@@ -996,7 +998,7 @@ export class LimsView extends ItemView {
       if (this.filterTimeout) window.clearTimeout(this.filterTimeout);
       // 1200мс (х3 от исходных 400) — по просьбе пользователя, не успевал
       // набрать текст в полях фильтра до перерисовки.
-      this.filterTimeout = window.setTimeout(() => { void this.renderRequests(this.currentRequestsFilter); }, 1200);
+      this.filterTimeout = window.setTimeout(() => { void this.renderRequests(this.currentRequestsFilter, this.currentRequestsMode); }, 1200);
     };
 
     const filterBar = container.createDiv({ cls: 'tn-lims-filterbar tn-lims-mb8' });
@@ -1011,11 +1013,11 @@ export class LimsView extends ItemView {
     dateToInput.value = this.filterDateTo;
     dateFromInput.addEventListener('change', () => {
       this.filterDateFrom = dateFromInput.value;
-      void this.renderRequests(this.currentRequestsFilter);
+      void this.renderRequests(this.currentRequestsFilter, this.currentRequestsMode);
     });
     dateToInput.addEventListener('change', () => {
       this.filterDateTo = dateToInput.value;
-      void this.renderRequests(this.currentRequestsFilter);
+      void this.renderRequests(this.currentRequestsFilter, this.currentRequestsMode);
     });
 
     const methodGroup = filterBar.createDiv({ cls: 'tn-lims-filter-group' });
@@ -1028,7 +1030,7 @@ export class LimsView extends ItemView {
     methodSelect.value = this.filterMethodId !== null ? String(this.filterMethodId) : '';
     methodSelect.addEventListener('change', () => {
       this.filterMethodId = methodSelect.value ? Number(methodSelect.value) : null;
-      void this.renderRequests(this.currentRequestsFilter);
+      void this.renderRequests(this.currentRequestsFilter, this.currentRequestsMode);
     });
 
     const statusGroup = filterBar.createDiv({ cls: 'tn-lims-filter-group' });
@@ -1040,7 +1042,7 @@ export class LimsView extends ItemView {
     statusSelect.value = this.filterStatus;
     statusSelect.addEventListener('change', () => {
       this.filterStatus = statusSelect.value as 'all' | 'active' | 'completed';
-      void this.renderRequests(this.currentRequestsFilter);
+      void this.renderRequests(this.currentRequestsFilter, this.currentRequestsMode);
     });
 
     const objNameGroup = filterBar.createDiv({ cls: 'tn-lims-filter-group' });
@@ -1091,7 +1093,7 @@ export class LimsView extends ItemView {
       this.filterIdentifier = '';
       this.filterBatch = '';
       this.filterOwnerEmail = '';
-      void this.renderRequests(this.currentRequestsFilter);
+      void this.renderRequests(this.currentRequestsFilter, this.currentRequestsMode);
     });
   }
 
@@ -1213,7 +1215,12 @@ export class LimsView extends ItemView {
       this.bodyEl.empty();
 
       const board = this.bodyEl.createDiv({ cls: 'tn-lims-kanban' });
-      this.renderFlatKanbanColumn(board, 'Новые заявки', requests.filter(r => r.status === 'new'), 'new',
+      // «Новые заявки» — сперва блокирующие, затем критичные, затем обычные;
+      // внутри важности недавно поступившие сверху (2026-09-17, прямой запрос
+      // пользователя). Остальные колонки порядок не меняют: там карточки
+      // разложены по испытателям, и важность внутри ячейки уже видна цветом.
+      const newQueue = sortRequestsByPriority(requests.filter(r => r.status === 'new'));
+      this.renderFlatKanbanColumn(board, 'Новые заявки', newQueue, 'new',
         () => isLabHead || myLabRole !== '', // можно тащить: руководитель, либо любой испытатель (самозабор — цель проверяет ячейка колонки 2)
         () => isLabHead,                     // дропнуть ОБРАТНО в "новые" (снять назначение) — только руководитель
         () => '');
@@ -1300,15 +1307,26 @@ export class LimsView extends ItemView {
       card.addEventListener('dragstart', (ev) => { this.draggedCard = req; ev.stopPropagation(); });
       card.addEventListener('dragend', () => { this.draggedCard = null; });
     }
-    card.createDiv({ text: `№ ${requestNumberLabel(req)}` });
-    card.createDiv({ cls: 'tn-lims-meta', text: req.title || '(без названия)' });
-    card.createDiv({ cls: 'tn-lims-meta', text: this.methodName(req.method_id) });
+    // Верхняя полоса карточки — номер заявки, окрашенный по важности
+    // (2026-09-17, прямой запрос пользователя): блокирующая — красная,
+    // критичная — оранжевая, обычная — без заливки. Цвет на всей доске, а не
+    // только в «Новых»: заявка не перестаёт быть блокирующей, когда её взяли в
+    // работу. Сама важность словом остаётся в карточке заявки — на доске места
+    // под текст нет, а цвет читается с расстояния.
+    const numEl = card.createDiv({ cls: 'tn-lims-kanban-card-num', text: `№ ${requestNumberLabel(req)}` });
+    if (req.priority === 'blocker' || req.priority === 'critical') {
+      numEl.addClass(`tn-lims-kanban-card-num--${req.priority}`);
+      numEl.setAttr('title', `Приоритет: ${this.priorityLabel(req.priority)}`);
+    }
+    const body = card.createDiv({ cls: 'tn-lims-kanban-card-body' });
+    body.createDiv({ cls: 'tn-lims-meta', text: req.title || '(без названия)' });
+    body.createDiv({ cls: 'tn-lims-meta', text: this.methodName(req.method_id) });
     // Дата завершения — явно на карточке колонки «Завершённые» (2026-09-08,
     // прямой запрос пользователя): withinCompletedWindow фильтрует именно по
     // completed_at (не updated_at), но само значение раньше нигде не
     // показывалось — не с чем было сверить глазами, откуда карточка ещё видна.
     if (req.status === 'completed' && req.completed_at) {
-      card.createDiv({ cls: 'tn-lims-meta', text: `Завершена: ${this.formatDate(req.completed_at)}` });
+      body.createDiv({ cls: 'tn-lims-meta', text: `Завершена: ${this.formatDate(req.completed_at)}` });
     }
     card.addEventListener('click', () => void this.renderRequestDetail(req));
   }
@@ -1397,7 +1415,7 @@ export class LimsView extends ItemView {
     this.bodyEl.empty();
 
     const back = this.bodyEl.createEl('button', { text: '← Назад', cls: 'tn-btn tn-btn-ghost' });
-    back.addEventListener('click', () => void this.renderRequests(this.currentRequestsFilter));
+    back.addEventListener('click', () => void this.renderRequests(this.currentRequestsFilter, this.currentRequestsMode));
 
     const extIdSuffix = req.external_id ? ` (${req.external_id})` : '';
     this.bodyEl.createEl('h3', { text: `№ ${fullRequestNumber(req)}${extIdSuffix} — ${req.title || 'без названия'}` });

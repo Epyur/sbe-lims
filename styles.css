@@ -491,6 +491,25 @@
   min-height: 16px;
 }
 
+/* --- Справка приложения (общая модалка, sbe-core/src/ui/help-modal.ts) ---- */
+
+.tn-help {
+  max-height: 70vh;
+  overflow-y: auto;
+}
+
+.tn-help-section {
+  margin-bottom: 10px;
+}
+
+/* Абзацы справки читаются подряд, поэтому им нужен воздух и нормальная
+   длина строки — сплошной текст в модалке разбирать тяжело. */
+.tn-help-text {
+  margin: 6px 0;
+  line-height: 1.5;
+  color: var(--tn-text, var(--text-normal));
+}
+
 /* Классы вьюхи ЛИМС (tn-lims-*) на семантических токенах дизайн-системы SBE. */
 
 .tn-lims-container {
@@ -602,14 +621,24 @@
   min-width: 64px;
 }
 
+/* Строки нижней панели сайдбара: «Синхронизация», «Настройки» — это <div>, а
+   «Справка» (2026-09-17) пришла из общего кода sbe-core и является <button>.
+   Сброс собственной отрисовки кнопки — чтобы все три строки выглядели одинаково. */
 .tn-lims-collapse {
   display: flex;
   align-items: center;
   gap: 10px;
+  width: 100%;
   padding: 14px 18px;
   color: var(--muted);
+  font: inherit;
   font-size: 13px;
+  text-align: left;
+  background: none;
+  border: none;
+  border-radius: 0;
   border-bottom: 1px solid var(--border);
+  box-shadow: none;
   cursor: pointer;
 }
 
@@ -940,13 +969,34 @@
   border-color: var(--tn-brand);
   border-style: solid;
 }
+/* Карточка доски: верхняя полоса с номером заливается по важности заявки
+   (2026-09-17), поэтому отступы ушли с самой карточки на её части — иначе
+   полоса не дотягивалась бы до краёв. overflow скругляет её верхние углы. */
 .tn-lims-kanban-card {
   background: var(--tn-card);
   border: 1px solid var(--tn-border);
   border-radius: var(--tn-radius);
-  padding: 8px 10px;
+  overflow: hidden;
   cursor: pointer;
   font-size: 12px;
+}
+.tn-lims-kanban-card-num {
+  padding: 6px 10px;
+  font-weight: 600;
+}
+/* Блокирующая — красная, критичная — оранжевая, обычная — без заливки. Цвета
+   берутся из общих токенов (--tn-err / --tn-warn), белый текст поверх них
+   читается и в тёмной теме. */
+.tn-lims-kanban-card-num--blocker {
+  background: var(--tn-err);
+  color: #fff;
+}
+.tn-lims-kanban-card-num--critical {
+  background: var(--tn-warn);
+  color: #fff;
+}
+.tn-lims-kanban-card-body {
+  padding: 6px 10px 8px;
 }
 .tn-lims-kanban-card[draggable="true"] {
   cursor: grab;
