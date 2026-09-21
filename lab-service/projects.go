@@ -61,8 +61,8 @@ FROM projects ORDER BY id`)
 			log.Printf("loadVisibleProjects scan: %v", err)
 			continue
 		}
-		p.CreatedAt = ca.Format(time.RFC3339)
-		p.UpdatedAt = ua.Format(time.RFC3339)
+		p.CreatedAt = ca.Format(time.RFC3339Nano)
+		p.UpdatedAt = ua.Format(time.RFC3339Nano)
 		all = append(all, p)
 	}
 	if err := rows.Err(); err != nil {
@@ -78,21 +78,30 @@ FROM projects ORDER BY id`)
 	for _, p := range all {
 		byID[p.ID] = p
 	}
-	isVisible := func(p Project) bool {
+	// Ошибка проверки членства возвращается наружу, а НЕ превращается в «проект не
+	// виден» (так было до 2026-09-21): сбой базы отдавал клиенту пустой список
+	// проектов как правду, плагин затирал им свой кэш — и в форме заявки было
+	// нечего выбрать до следующего удачного pull. Пусть лучше синхронизация
+	// честно откажет: прежний кэш тогда останется на месте.
+	isVisible := func(p Project) (bool, error) {
 		if p.GroupID == 0 || p.OwnerEmail == email {
-			return true
+			return true, nil
 		}
 		var member bool
 		if err := s.pool.QueryRow(ctx,
 			`SELECT EXISTS(SELECT 1 FROM group_members WHERE group_id = $1 AND email = $2)`,
 			p.GroupID, email).Scan(&member); err != nil {
-			log.Printf("loadVisibleProjects member check: %v", err)
-			return false
+			return false, err
 		}
-		return member
+		return member, nil
 	}
 	for _, p := range all {
-		if isVisible(p) {
+		ok, err := isVisible(p)
+		if err != nil {
+			log.Printf("loadVisibleProjects member check (project %d): %v", p.ID, err)
+			return nil, err
+		}
+		if ok {
 			visible = append(visible, p)
 		}
 	}

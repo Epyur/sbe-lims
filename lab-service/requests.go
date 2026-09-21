@@ -39,6 +39,56 @@ func buildNumbers(seq int64, year int, projectCode, labCode, methodCode string) 
 	return customer, lab
 }
 
+// rebuildCustomerNumber пересобирает customer_number заявки под её ТЕКУЩИЕ проект,
+// лабораторию и метод. Зовётся после смены project_id — из handleUpdateRequest
+// (правка из веба) и из pushUpdate (правка из плагина). До 2026-09-21 не звался
+// ниоткуда: оба пути правки меняли project_id и оставляли номер с кодом прежнего
+// проекта.
+//
+// Коды метода и лабы читаются НАПРЯМУЮ по id, без проверки связи в method_labs
+// (loadMethodLabRow): пара у заявки зафиксирована при создании, и если связь с тех
+// пор убрали из справочника, номер обязан пересобраться, а не потеряться.
+//
+// lab_number не трогаем — кода проекта в нём нет (см. buildNumbers).
+//
+// updated_at сдвигается обязательно: без этого правка не выигрывает LWW-слияние у
+// клиента и до людей не доезжает вовсе (корневой AGENTS.md, «Выводы»).
+func (s *Server) rebuildCustomerNumber(ctx context.Context, tx pgx.Tx, id int64) error {
+	var seq int64
+	var year int
+	var projectID, methodID, labID int64
+	if err := tx.QueryRow(ctx, `
+SELECT number_seq, number_year, COALESCE(project_id, 0), COALESCE(method_id, 0), COALESCE(lab_id, 0)
+FROM requests WHERE id = $1`, id).Scan(&seq, &year, &projectID, &methodID, &labID); err != nil {
+		return err
+	}
+
+	// Пустой проект — код "0", как в loadProjectInfo: номер у заявки без проекта
+	// всё равно должен собираться.
+	projectCode := "0"
+	if projectID > 0 {
+		if err := tx.QueryRow(ctx, `SELECT code FROM projects WHERE id = $1`, projectID).Scan(&projectCode); err != nil {
+			return err
+		}
+	}
+	var methodCode, labCode string
+	if methodID > 0 {
+		if err := tx.QueryRow(ctx, `SELECT code FROM methods WHERE id = $1`, methodID).Scan(&methodCode); err != nil {
+			return err
+		}
+	}
+	if labID > 0 {
+		if err := tx.QueryRow(ctx, `SELECT code FROM labs WHERE id = $1`, labID).Scan(&labCode); err != nil {
+			return err
+		}
+	}
+
+	customer, _ := buildNumbers(seq, year, projectCode, labCode, methodCode)
+	_, err := tx.Exec(ctx,
+		`UPDATE requests SET customer_number = $2, updated_at = now() WHERE id = $1`, id, customer)
+	return err
+}
+
 // nullableID возвращает NULL для неположительных id (0 = отсутствует) — для FK-колонок.
 func nullableID(id int64) any {
 	if id <= 0 {
@@ -151,7 +201,7 @@ func scanRequestRow(row rowScanner) (Request, time.Time, time.Time, error) {
 		&req.AssignedTo, &completedAt,
 		&ca, &ua)
 	if err == nil && completedAt != nil {
-		req.CompletedAt = completedAt.Format(time.RFC3339)
+		req.CompletedAt = completedAt.Format(time.RFC3339Nano)
 	}
 	return req, ca, ua, err
 }
@@ -293,8 +343,8 @@ func (s *Server) loadRequest(ctx context.Context, id int64) (*Request, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.CreatedAt = ca.Format(time.RFC3339)
-	req.UpdatedAt = ua.Format(time.RFC3339)
+	req.CreatedAt = ca.Format(time.RFC3339Nano)
+	req.UpdatedAt = ua.Format(time.RFC3339Nano)
 	if req.Files, err = s.loadRequestFiles(ctx, id); err != nil {
 		return nil, err
 	}
@@ -385,8 +435,8 @@ func (s *Server) loadVisibleRequests(ctx context.Context, email string) ([]Reque
 			log.Printf("requests scan: %v", err)
 			continue
 		}
-		req.CreatedAt = ca.Format(time.RFC3339)
-		req.UpdatedAt = ua.Format(time.RFC3339)
+		req.CreatedAt = ca.Format(time.RFC3339Nano)
+		req.UpdatedAt = ua.Format(time.RFC3339Nano)
 		if req.Files, err = s.loadRequestFiles(ctx, req.ID); err != nil {
 			return nil, err
 		}
@@ -746,6 +796,10 @@ func (s *Server) handleUpdateRequest(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// До 2026-09-21 в UPDATE ниже уходил req.ProjectID, а effProjectID никуда не
+	// использовался: ЕКН-проект заводился в базе и тут же терялся — заявка
+	// оставалась без проекта.
+	projectChanged := effProjectID != existing.ProjectID
 
 	_, err = tx.Exec(r.Context(), `
 UPDATE requests SET
@@ -759,12 +813,20 @@ UPDATE requests SET
 	ekn = COALESCE($9, ekn),
 	external_id = COALESCE($10, external_id),
 	updated_at = now()
-WHERE id = $1`, id, req.Title, req.Description, req.ObjectID, req.ProjectID, req.GroupID,
+WHERE id = $1`, id, req.Title, req.Description, req.ObjectID, effProjectID, req.GroupID,
 		req.Priority, req.TestPurpose, req.EKN, req.ExternalID)
 	if err != nil {
 		log.Printf("update request: %v", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
 		return
+	}
+
+	if projectChanged {
+		if err := s.rebuildCustomerNumber(r.Context(), tx, id); err != nil {
+			log.Printf("rebuild customer number (update %d): %v", id, err)
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
+			return
+		}
 	}
 
 	if err := tx.Commit(r.Context()); err != nil {

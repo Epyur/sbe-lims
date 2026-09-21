@@ -43,8 +43,8 @@ ORDER BY id`, email)
 			log.Printf("pull groups scan: %v", err)
 			continue
 		}
-		g.CreatedAt = ca.Format(time.RFC3339)
-		g.UpdatedAt = ua.Format(time.RFC3339)
+		g.CreatedAt = ca.Format(time.RFC3339Nano)
+		g.UpdatedAt = ua.Format(time.RFC3339Nano)
 		if g.Members, err = s.loadGroupMembers(r.Context(), g.ID); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
 			return
@@ -72,8 +72,8 @@ FROM labs ORDER BY id`)
 			log.Printf("pull labs scan: %v", err)
 			continue
 		}
-		l.CreatedAt = ca.Format(time.RFC3339)
-		l.UpdatedAt = ua.Format(time.RFC3339)
+		l.CreatedAt = ca.Format(time.RFC3339Nano)
+		l.UpdatedAt = ua.Format(time.RFC3339Nano)
 		labs = append(labs, l)
 	}
 	rows.Close()
@@ -113,8 +113,8 @@ SELECT id, code, name, description, determinable_indicators, formulas, classific
 		m.OperatorForm = parseMethodOperatorForm(opFormRaw)
 		m.CalibrationAttributes = unmarshalJSONBArray(calibAttrsRaw)
 		m.CalibrationOperatorForm = parseMethodOperatorForm(calibFormRaw)
-		m.CreatedAt = ca.Format(time.RFC3339)
-		m.UpdatedAt = ua.Format(time.RFC3339)
+		m.CreatedAt = ca.Format(time.RFC3339Nano)
+		m.UpdatedAt = ua.Format(time.RFC3339Nano)
 		methods = append(methods, m)
 	}
 	rows.Close()
@@ -153,8 +153,8 @@ SELECT id, name, description, characteristics, created_at, updated_at FROM objec
 		if len(charsRaw) > 0 && string(charsRaw) != "{}" {
 			_ = json.Unmarshal(charsRaw, &o.Characteristics)
 		}
-		o.CreatedAt = ca.Format(time.RFC3339)
-		o.UpdatedAt = ua.Format(time.RFC3339)
+		o.CreatedAt = ca.Format(time.RFC3339Nano)
+		o.UpdatedAt = ua.Format(time.RFC3339Nano)
 		objects = append(objects, o)
 	}
 	rows.Close()
@@ -327,7 +327,16 @@ func (s *Server) pushUpdate(ctx context.Context, p PushRequest, email string, no
 	}
 	updatedAt := parseTime(p.UpdatedAt, now)
 
-	tag, err := s.pool.Exec(ctx, `
+	// Транзакция появилась 2026-09-21 ради пересчёта номера: правка project_id и
+	// новый customer_number обязаны лечь вместе, иначе при сбое между ними заявка
+	// осталась бы с номером чужого проекта.
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+
+	tag, err := tx.Exec(ctx, `
 UPDATE requests SET
 	title = $2, description = $3, object_id = $4, project_id = $5, group_id = $6,
 	status = $7, priority = $8, test_purpose = $9, ekn = $10,
@@ -348,6 +357,21 @@ WHERE id = $1 AND updated_at < $12`,
 	if tag.RowsAffected() == 0 {
 		return false, nil
 	}
+
+	// Сменили проект — номер заказчику собран с кодом прежнего, пересобираем
+	// (см. rebuildCustomerNumber в requests.go). updated_at при этом уходит
+	// вперёд клиентской отметки: иначе правка не выиграет слияние и новый номер
+	// до человека не доедет.
+	if p.ProjectID != existing.ProjectID {
+		if err := s.rebuildCustomerNumber(ctx, tx, p.ID); err != nil {
+			return false, err
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return false, err
+	}
+
 	// WP8 (2026-08-29): журнал изменений (см. audit_log.go) — офлайн-правка клиента,
 	// синхронизированная позже, тоже реальная смена статуса пользователем.
 	// logStatusChange сама не пишет строку, если p.Status == existing.Status.
