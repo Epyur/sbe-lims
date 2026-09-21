@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -1454,6 +1455,59 @@ ON CONFLICT (hash) DO NOTHING`,
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
+// carryOverUnownedValues переносит в values те поля сохранённой серии, которых
+// во входящем наборе нет и которыми форма испытателя не распоряжается
+// (2026-09-21). Меняет values на месте, возвращает перенесённые ключи по
+// алфавиту — для журнала.
+//
+// owned == nil означает «состав формы неизвестен»: тогда переносится всё
+// недостающее. Лишнее сохранённое поле чинится повторным вводом, потерянные
+// данные прибора — нет.
+//
+// Разбор, из-за которого это появилось, — в saveResultSeries.
+func carryOverUnownedValues(before, values map[string]any, owned map[string]bool) []string {
+	carried := make([]string, 0, 4)
+	for k, v := range before {
+		if _, sent := values[k]; sent {
+			continue
+		}
+		if owned != nil && owned[k] {
+			continue
+		}
+		values[k] = v
+		carried = append(carried, k)
+	}
+	sort.Strings(carried)
+	return carried
+}
+
+// operatorFormAttributeIDs — идентификаторы полей, которыми распоряжается форма
+// испытателя метода (2026-09-21). Ими и только ими форма вправе затирать
+// сохранённое: отсутствие такого поля во входящем наборе означает «испытатель
+// его очистил». Ключ, которого в форме нет, пришёл из другого источника
+// (буфер прибора, письмо-результат, формулы) — см. saveResultSeries.
+//
+// Учитываются и обычная форма, и форма калибровки: запись идёт в ту же строку
+// values, и делить их незачем.
+func (s *Server) operatorFormAttributeIDs(ctx context.Context, methodID int64) (map[string]bool, error) {
+	cfg, err := s.loadMethodConfig(ctx, methodID)
+	if err != nil {
+		return nil, err
+	}
+	owned := make(map[string]bool, len(cfg.OperatorForm.Fields)+len(cfg.CalibrationOperatorForm.Fields))
+	for _, f := range cfg.OperatorForm.Fields {
+		if f.AttributeID != "" {
+			owned[f.AttributeID] = true
+		}
+	}
+	for _, f := range cfg.CalibrationOperatorForm.Fields {
+		if f.AttributeID != "" {
+			owned[f.AttributeID] = true
+		}
+	}
+	return owned, nil
+}
+
 // claimInstrumentBuffer атомарно помечает запись буфера использованной
 // (consumed_at) и возвращает её values — WHERE consumed_at IS NULL гарантирует,
 // что один и тот же hash нельзя случайно прикрепить к двум разным заявкам:
@@ -1541,6 +1595,42 @@ WHERE request_id = $1 AND method_id = $2 AND series_num = $3 AND is_statistical_
 		beforeValues = map[string]any{}
 		if len(beforeRaw) > 0 {
 			_ = json.Unmarshal(beforeRaw, &beforeValues)
+		}
+	}
+
+	// Поля, которых во входящем наборе нет и которыми форма испытателя не
+	// распоряжается, переносим из сохранённой серии (2026-09-21, по живой
+	// потере данных).
+	//
+	// Разбор: 2026-09-21 испытатель первый раз залил данные прибора через буфер
+	// (instrument_result_buffer, QR-хэш) — сервер подмешал их в серию ПРИ
+	// сохранении, а модель формы у клиента их не получила. Следующее сохранение
+	// из той же формы пришло без них, и запись values целиком их стёрла:
+	// пропали кривая дыма, температуры по термопармам и параметры опроса
+	// (заявка 1578, серия 1). Почтовый путь этим не страдал: там данные уже
+	// лежат в серии, когда приложение её открывает, и уезжают обратно вместе с
+	// формой — 182 сохранения поверх приборных полей из 183 их сохранили.
+	//
+	// Почему именно «не объявленные в форме», а не сплошное слияние: поле,
+	// которое форма показывает, испытатель вправе очистить, и пустое значение
+	// обязано доехать. Всё прочее в строке пришло не из формы (буфер, почта,
+	// формулы) — и отсутствие ключа в её наборе означает «форма про него не
+	// знает», а не «сотрите».
+	//
+	// Перенос идёт ДО applyFormulas: формулы пересчитываются по полному набору,
+	// иначе производные значения остались бы от прежнего входа.
+	if len(beforeValues) > 0 {
+		owned, err := s.operatorFormAttributeIDs(ctx, methodID)
+		if err != nil {
+			// Не знаем состав формы — сохраняем всё недостающее. Лишнее
+			// сохранённое поле чинится повторным вводом, потерянные данные
+			// прибора — нет.
+			log.Printf("saveResultSeries: не удалось прочитать форму метода %d, переносим все недостающие поля: %v", methodID, err)
+			owned = nil
+		}
+		if carried := carryOverUnownedValues(beforeValues, values, owned); len(carried) > 0 {
+			log.Printf("saveResultSeries: заявка %d серия %d — перенесены поля вне формы: %s",
+				requestID, seriesNum, strings.Join(carried, ", "))
 		}
 	}
 
