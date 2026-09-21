@@ -117,6 +117,12 @@ func main() {
 
 	mux.HandleFunc("GET /api/lab/health", s.handleHealth)
 
+	// Страница со списком ручек (2026-09-21, правило корневого AGENTS.md).
+	// Обязательно ВНУТРИ /api/lab/: Caddy проксирует сервису только этот
+	// префикс. Без ключа — страница и схема открыты, данных в них нет.
+	mux.Handle("GET /api/lab/docs/", http.StripPrefix("/api/lab/docs/", http.FileServer(http.FS(swaggerFS))))
+	mux.HandleFunc("GET /api/lab/openapi.yaml", serveOpenAPI)
+
 	// Справочники
 	mux.HandleFunc("GET /api/lab/labs", s.requirePerm("viewer")(s.handleListLabs))
 	mux.HandleFunc("POST /api/lab/labs", s.requirePerm("superadmin")(s.handleCreateLab))

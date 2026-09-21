@@ -1,0 +1,1983 @@
+openapi: 3.0.3
+
+# Схема lab-service. Правится В ТОМ ЖЕ КОММИТЕ, ЧТО И РУЧКА (правило корневого
+# AGENTS.md): отставшая схема вреднее отсутствующей — по ней строят интеграции,
+# которые потом не работают.
+#
+# Секретов, токенов и примеров с реальными данными здесь быть не должно:
+# страница открыта.
+#
+# Где тело ответа описано как свободный object — форма намеренно не
+# зафиксирована: она задаётся конфигурацией метода испытаний и меняется от
+# метода к методу. Выдумывать её точный вид было бы хуже, чем честно сказать,
+# что он переменный.
+
+info:
+  title: lab-service — Заявки на испытания и ЛИМС
+  version: '2026-09-21'
+  description: |
+    Общий сервис лабораторий. Потребители: Obsidian-плагины `sbe-requests`
+    (заявки), `sbe-lims` (лаборатория), `sbe-ekn` (справочник ЕКН) и веб-портал.
+
+    **Авторизация.** Все ручки, кроме `/health`, `/docs/`, `/openapi.yaml` и
+    `/file-redirect`, требуют JWT (HS256) в заголовке `Authorization: Bearer`.
+    Ключ выдаёт ЦУП для приложения `lab`. Роли по возрастанию:
+    `viewer` (1) < `editor` (2) < `admin` (3) < `superadmin`. Если персональная
+    роль не назначена, действует уровень общего доступа приложения.
+
+    **Видимость заявок.** Владелец заявки, участник её группы или admin. Список
+    проектов фильтруется так же. Сервер отдаёт только видимое — фильтровать на
+    клиенте не нужно.
+
+    **Нумерация.** У заявки два номера: заказчику
+    `{код проекта}-{NNN}/{год}-{код лабы}-{код метода}` и лаборатории
+    `{NNN}/{год}-{код метода}`. NNN — сквозной счётчик по году, от проекта не
+    зависит. Номер присваивается при создании. Единственный случай пересчёта —
+    смена `project_id` у заявки: тогда номер заказчику пересобирается под новый
+    проект, номер лаборатории не меняется.
+
+    **Отметки времени** — RFC3339 с долями секунды у заявок и справочников
+    синхронизации. Доли значимы: клиенты сливают данные по правилу «побеждает
+    последняя запись», и усечение до секунды ломает слияние.
+
+servers:
+  - url: https://epyur.fvds.ru
+    description: Боевой сервер
+  - url: http://localhost:3000
+    description: Внутри контейнера (роуты те же, с префиксом /api/lab)
+
+tags:
+  - name: Служебные
+  - name: Справочники
+  - name: Проекты
+  - name: Заявки
+  - name: Группы
+  - name: Синхронизация
+  - name: Файлы
+  - name: Права
+  - name: Результаты
+  - name: Испытатели и оборудование
+  - name: Отчёты
+
+security:
+  - bearerAuth: []
+
+paths:
+
+  # ---- Служебные ----
+
+  /api/lab/health:
+    get:
+      tags: [Служебные]
+      summary: Проверка живости
+      security: []
+      responses:
+        '200':
+          description: Сервис отвечает
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+
+  /api/lab/docs/:
+    get:
+      tags: [Служебные]
+      summary: Эта страница (Swagger UI)
+      security: []
+      responses:
+        '200': { description: HTML-страница }
+
+  /api/lab/openapi.yaml:
+    get:
+      tags: [Служебные]
+      summary: Эта схема
+      security: []
+      responses:
+        '200': { description: Схема OpenAPI в YAML }
+
+  # ---- Справочники ----
+
+  /api/lab/labs:
+    get:
+      tags: [Справочники]
+      summary: Список лабораторий
+      description: Роль viewer.
+      responses:
+        '200':
+          description: Лаборатории
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  labs: { type: array, items: { $ref: '#/components/schemas/Lab' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Справочники]
+      summary: Завести лабораторию
+      description: |
+        Роль superadmin. Внешняя лаборатория (`type: external`) обязана указать
+        `parent_lab_id` — внутреннюю, к которой она привязана.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LabInput' }
+      responses:
+        '200': { $ref: '#/components/responses/CreatedID' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/lab/labs/{id}:
+    patch:
+      tags: [Справочники]
+      summary: Изменить лабораторию
+      description: Роль editor. Частичное обновление — присылать только меняемые поля.
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LabInput' }
+      responses:
+        '200': { $ref: '#/components/responses/OK' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/lab/methods:
+    get:
+      tags: [Справочники]
+      summary: Список методов испытаний
+      description: Роль viewer. Метод может принадлежать нескольким лабораториям — см. `lab_ids`.
+      responses:
+        '200':
+          description: Методы
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  methods: { type: array, items: { $ref: '#/components/schemas/Method' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [Справочники]
+      summary: Завести метод
+      description: Роль editor.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MethodInput' }
+      responses:
+        '200': { $ref: '#/components/responses/CreatedID' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/lab/methods/{id}:
+    patch:
+      tags: [Справочники]
+      summary: Изменить метод и его конфигурацию
+      description: |
+        Роль editor. Здесь же правятся формулы, классификация, графики,
+        параметры ввода, представление и форма испытателя. Поля, которых нет в
+        теле, не трогаются.
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MethodConfigInput' }
+      responses:
+        '200': { $ref: '#/components/responses/OK' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [Справочники]
+      summary: Удалить метод
+      description: Роль editor. Метод, на который ссылаются заявки, удалить нельзя.
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        '200': { $ref: '#/components/responses/OK' }
+        '409':
+          description: Метод используется заявками
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/lab/objects:
+    get:
+      tags: [Справочники]
+      summary: Список объектов исследования
+      description: Роль viewer.
+      responses:
+        '200':
+          description: Объекты
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  objects: { type: array, items: { $ref: '#/components/schemas/Object' } }
+    post:
+      tags: [Справочники]
+      summary: Завести объект исследования
+      description: Роль editor.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ObjectInput' }
+      responses:
+        '200': { $ref: '#/components/responses/CreatedID' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /api/lab/objects/{id}:
+    patch:
+      tags: [Справочники]
+      summary: Изменить объект исследования
+      description: |
+        Роль editor. `characteristics` заменяются ЦЕЛИКОМ, а не сливаются:
+        присылать полный набор, иначе недостающие ключи пропадут.
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ObjectInput' }
+      responses:
+        '200': { $ref: '#/components/responses/OK' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ---- Проекты ----
+
+  /api/lab/projects:
+    get:
+      tags: [Проекты]
+      summary: Список проектов
+      description: |
+        Роль viewer. Отдаются только видимые: публичные, свои, доступные по
+        группе; admin видит все. Предки видимых проектов включены, чтобы дерево
+        не рвалось.
+      responses:
+        '200':
+          description: Проекты
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  projects: { type: array, items: { $ref: '#/components/schemas/Project' } }
+    post:
+      tags: [Проекты]
+      summary: Завести проект
+      description: Роль editor. `code` уникален и служит первой частью номера заказчику.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProjectInput' }
+      responses:
+        '200': { $ref: '#/components/responses/CreatedID' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409':
+          description: Проект с таким кодом уже есть
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/lab/projects/{id}:
+    patch:
+      tags: [Проекты]
+      summary: Изменить проект
+      description: Роль editor или владелец проекта.
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProjectInput' }
+      responses:
+        '200': { $ref: '#/components/responses/OK' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [Проекты]
+      summary: Удалить проект
+      description: |
+        Роль editor или владелец. Проект с заявками или подпроектами не
+        удаляется — сначала перенесите их.
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        '200': { $ref: '#/components/responses/OK' }
+        '409':
+          description: В проекте есть заявки или подпроекты
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  # ---- Заявки ----
+
+  /api/lab/requests:
+    get:
+      tags: [Заявки]
+      summary: Список заявок
+      description: |
+        Роль viewer. Отдаются только видимые. **Query-параметров нет**: отбор по
+        дате, методу, статусу, важности и прочему делают клиенты у себя.
+      responses:
+        '200':
+          description: Заявки
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  requests: { type: array, items: { $ref: '#/components/schemas/Request' } }
+    post:
+      tags: [Заявки]
+      summary: Создать заявку
+      description: |
+        Роль editor. Одна заявка = один метод: на каждую пару «метод —
+        лаборатория» из `methods` создаётся отдельная заявка с общим NNN.
+        Ответ содержит все созданные заявки с присвоенными номерами.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateRequestInput' }
+      responses:
+        '200':
+          description: Созданные заявки
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  requests: { type: array, items: { $ref: '#/components/schemas/Request' } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/lab/requests/search:
+    get:
+      tags: [Заявки]
+      summary: Поиск заявок
+      description: Роль viewer. Ищет по номерам, названию и объекту среди видимых заявок.
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema: { type: string }
+          description: Строка поиска.
+      responses:
+        '200':
+          description: Найденное
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  requests: { type: array, items: { $ref: '#/components/schemas/RequestSearchHit' } }
+
+  /api/lab/requests/{id}:
+    get:
+      tags: [Заявки]
+      summary: Заявка целиком
+      description: Роль viewer + видимость заявки.
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        '200':
+          description: Заявка
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  request: { $ref: '#/components/schemas/Request' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Заявки]
+      summary: Изменить заявку
+      description: |
+        Роль editor; правит владелец заявки либо admin. Присылать только
+        меняемые поля — отсутствующие не трогаются.
+
+        **Смена `project_id` пересобирает `customer_number`** под код нового
+        проекта. `lab_number` не меняется. Метод и лаборатория этой ручкой не
+        меняются вовсе.
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateRequestInput' }
+      responses:
+        '200':
+          description: Заявка после правки (с пересобранным номером, если менялся проект)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  request: { $ref: '#/components/schemas/Request' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/lab/requests/{id}/status:
+    post:
+      tags: [Заявки]
+      summary: Сменить статус заявки
+      description: |
+        Владелец заявки либо сотрудник её лаборатории (`lab_operator`,
+        `lab_admin`) либо admin. Из веб-канала — только admin.
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { $ref: '#/components/schemas/RequestStatus' }
+      responses:
+        '200': { $ref: '#/components/responses/OK' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/lab/requests/{id}/kanban-move:
+    post:
+      tags: [Заявки]
+      summary: Переместить карточку на доске «Очередь лаборатории»
+      description: |
+        Роль editor; из веб-канала — admin. Руководитель лаборатории двигает и
+        назначает свободно; испытатель — только свои назначенные карточки между
+        «В работу», «В работе» и «Завершённые», либо забирает СЕБЕ неназначенную
+        новую заявку. Переоткрыть завершённую испытатель не может.
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status: { $ref: '#/components/schemas/RequestStatus' }
+                assigned_to:
+                  type: string
+                  description: E-mail испытателя. Пусто — снять назначение.
+      responses:
+        '200': { $ref: '#/components/responses/OK' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/lab/requests/{id}/target-indicator:
+    post:
+      tags: [Заявки]
+      summary: Дозаполнить целевой показатель
+      description: |
+        Роль viewer; владелец заявки либо сотрудник лаборатории. Разрешено,
+        только пока показатель не задан. Значение ложится в характеристики
+        объекта исследования, а не в саму заявку.
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [indicator]
+              properties:
+                indicator:
+                  type: string
+                  description: Одно из `determinable_indicators` метода заявки.
+      responses:
+        '200': { $ref: '#/components/responses/OK' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/lab/requests/{id}/send-email:
+    post:
+      tags: [Заявки]
+      summary: Отправить письмо по заявке
+      description: |
+        Роль editor. Письмо заказчику с результатами; при наличии `external_id`
+        уходит дубль в легаси-трекер. Повторы глушатся журналом отправок.
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Параметры отправки; форма зависит от вида письма.
+      responses:
+        '200': { $ref: '#/components/responses/OK' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/lab/requests/{id}/sent-emails:
+    get:
+      tags: [Заявки]
+      summary: Журнал отправленных писем по заявке
+      description: Роль viewer.
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        '200':
+          description: Записи журнала
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  emails:
+                    type: array
+                    items:
+                      type: object
+                      description: Кому, когда, какого вида письмо и чем закончилось.
+
+  /api/lab/requests/{id}/audit-log:
+    get:
+      tags: [Заявки]
+      summary: История изменений заявки
+      description: |
+        Роль viewer. Смены статуса и правки серий результатов, в обратном
+        хронологическом порядке.
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        '200':
+          description: Записи
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  entries: { type: array, items: { $ref: '#/components/schemas/AuditLogEntry' } }
+
+  # ---- Группы ----
+
+  /api/lab/groups:
+    get:
+      tags: [Группы]
+      summary: Список групп
+      description: Роль viewer. Свои группы и те, где пользователь состоит.
+      responses:
+        '200':
+          description: Группы
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  groups: { type: array, items: { $ref: '#/components/schemas/Group' } }
+    post:
+      tags: [Группы]
+      summary: Завести группу
+      description: Роль editor. Создатель становится владельцем.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+      responses:
+        '200': { $ref: '#/components/responses/CreatedID' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /api/lab/groups/{id}:
+    delete:
+      tags: [Группы]
+      summary: Удалить группу
+      description: Владелец группы или admin.
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        '200': { $ref: '#/components/responses/OK' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/lab/groups/{id}/members:
+    post:
+      tags: [Группы]
+      summary: Добавить участника группы
+      description: Владелец группы или admin.
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, role]
+              properties:
+                email: { type: string, format: email }
+                role: { type: string, enum: [viewer, editor] }
+      responses:
+        '200': { $ref: '#/components/responses/OK' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/lab/groups/{id}/members/{email}:
+    delete:
+      tags: [Группы]
+      summary: Убрать участника группы
+      description: Владелец группы или admin.
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+        - { $ref: '#/components/parameters/Email' }
+      responses:
+        '200': { $ref: '#/components/responses/OK' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  # ---- Синхронизация ----
+
+  /api/lab/sync/pull:
+    get:
+      tags: [Синхронизация]
+      summary: Полный слепок для кэша клиента
+      description: |
+        Роль viewer. Заявки — только видимые; справочники — целиком.
+
+        Клиенты заменяют свои справочники этим слепком целиком, а заявки сливают
+        по `updated_at`. Отметки времени приходят с долями секунды — усечение
+        сломало бы слияние.
+      responses:
+        '200':
+          description: Слепок
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PullResponse' }
+
+  /api/lab/sync/push:
+    post:
+      tags: [Синхронизация]
+      summary: Отправить изменения клиента
+      description: |
+        Роль editor. Принимаются ТОЛЬКО заявки — справочники, проекты и группы
+        правятся своими ручками.
+
+        `id: 0` вместе с `client_id` означает создание: сервер вернёт готовую
+        заявку с номерами в `created`. Правка существующей принимается по
+        правилу «побеждает последняя запись»: строка с `updated_at` не новее
+        серверной молча пропускается. Смена `project_id` пересобирает номер
+        заказчику, и тогда серверный `updated_at` уходит вперёд присланного.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                requests: { type: array, items: { $ref: '#/components/schemas/PushRequest' } }
+      responses:
+        '200':
+          description: Итог
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  inserted: { type: integer }
+                  updated: { type: integer }
+                  created:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        client_id: { type: integer, format: int64 }
+                        group_key: { type: string }
+                        request: { $ref: '#/components/schemas/Request' }
+
+  # ---- Файлы ----
+
+  /api/lab/file:
+    get:
+      tags: [Файлы]
+      summary: Скачать файл заявки
+      description: Роль viewer. Файлы лежат в S3, сервис отдаёт их потоком.
+      parameters:
+        - name: key
+          in: query
+          required: true
+          schema: { type: string }
+          description: Ключ файла из `files[].file_key` заявки.
+      responses:
+        '200':
+          description: Содержимое файла
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [Файлы]
+      summary: Загрузить файл к заявке
+      description: Роль editor. Тело — multipart с полем файла и идентификатором заявки.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file: { type: string, format: binary }
+                request_id: { type: integer, format: int64 }
+      responses:
+        '200':
+          description: Загруженный файл
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RequestFile' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/lab/file-redirect:
+    get:
+      tags: [Файлы]
+      summary: Переадресация на файл
+      description: |
+        Без авторизации по ключу в заголовке — доступ проверяется по самой
+        ссылке. Нужна там, где заголовок передать нельзя (переход по ссылке из
+        письма или из QR-этикетки).
+      security: []
+      parameters:
+        - name: key
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        '302': { description: Переадресация на файл }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ---- Права ----
+
+  /api/lab/permissions/me:
+    get:
+      tags: [Права]
+      summary: Моя роль в приложении
+      description: |
+        Роль viewer. Возвращает действующую роль: персональную, а если она не
+        назначена — уровень общего доступа.
+      responses:
+        '200':
+          description: Роль
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  email: { type: string, format: email }
+                  role: { $ref: '#/components/schemas/Role' }
+                  has_access: { type: boolean }
+
+  /api/lab/permissions:
+    get:
+      tags: [Права]
+      summary: Список назначенных ролей
+      description: Роль admin.
+      responses:
+        '200':
+          description: Роли
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  permissions:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        email: { type: string, format: email }
+                        role: { $ref: '#/components/schemas/Role' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Права]
+      summary: Назначить или снять роль
+      description: |
+        Роль admin. Пустая роль снимает назначение — тогда для пользователя
+        снова действует общий доступ. Запись проксируется в auth-service:
+        единый источник правды о ролях — он.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, role]
+              properties:
+                email: { type: string, format: email }
+                role: { $ref: '#/components/schemas/Role' }
+      responses:
+        '200': { $ref: '#/components/responses/OK' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/lab/common-access:
+    get:
+      tags: [Права]
+      summary: Уровень общего доступа
+      description: Роль admin. Что видит тот, кому персональная роль не назначена.
+      responses:
+        '200':
+          description: Уровень
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  level: { $ref: '#/components/schemas/Role' }
+    post:
+      tags: [Права]
+      summary: Задать уровень общего доступа
+      description: Роль admin.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [level]
+              properties:
+                level: { $ref: '#/components/schemas/Role' }
+      responses:
+        '200': { $ref: '#/components/responses/OK' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/lab/admin/backfill-ekn-names:
+    post:
+      tags: [Права]
+      summary: Разовая дозаливка названий из справочника ЕКН
+      description: |
+        Роль admin. Обслуживающая операция: проходит по объектам с номером ЕКН
+        и дописывает недостающие названия. Идемпотентна.
+      responses:
+        '200':
+          description: Сколько записей обновлено
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  updated: { type: integer }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  # ---- Результаты ----
+
+  /api/lab/requests/{id}/results:
+    get:
+      tags: [Результаты]
+      summary: Серии результатов заявки
+      description: |
+        Роль viewer. Значения в серии задаются конфигурацией метода, поэтому
+        форма поля `values` переменная.
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        '200':
+          description: Серии
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results: { type: array, items: { $ref: '#/components/schemas/ResultSeries' } }
+    post:
+      tags: [Результаты]
+      summary: Внести серию результатов
+      description: |
+        Роль editor. Первое сохранение серии переводит заявку в «В работе» и
+        назначает испытателем того, кто вносит.
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ResultSeriesInput' }
+      responses:
+        '200':
+          description: Сохранённая серия
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  result: { $ref: '#/components/schemas/ResultSeries' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/lab/requests/{id}/results/aggregated:
+    get:
+      tags: [Результаты]
+      summary: Сводные значения по сериям
+      description: |
+        Роль viewer. Автостатистика по всем сериям заявки. Набор показателей
+        задаётся методом.
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        '200':
+          description: Сводка
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  aggregated:
+                    type: object
+                    description: Показатель → значение. Состав зависит от метода.
+
+  /api/lab/requests/{id}/results/{series}/calculate:
+    post:
+      tags: [Результаты]
+      summary: Пересчитать серию по формулам метода
+      description: Роль editor.
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+        - { $ref: '#/components/parameters/Series' }
+      responses:
+        '200':
+          description: Серия после расчёта
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  result: { $ref: '#/components/schemas/ResultSeries' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /api/lab/requests/{id}/results/{series}:
+    delete:
+      tags: [Результаты]
+      summary: Удалить серию результатов
+      description: Роль editor.
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+        - { $ref: '#/components/parameters/Series' }
+      responses:
+        '200': { $ref: '#/components/responses/OK' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/lab/instrument-buffer:
+    post:
+      tags: [Результаты]
+      summary: Принять показания прибора в буфер
+      description: |
+        Роль editor. Буфер показаний: прибор шлёт сюда измерения, испытатель
+        потом разбирает их в серию. Форма тела зависит от прибора.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Показания прибора; состав полей зависит от прибора.
+      responses:
+        '200': { $ref: '#/components/responses/OK' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  # ---- Испытатели и оборудование ----
+
+  /api/lab/inventors:
+    get:
+      tags: [Испытатели и оборудование]
+      summary: Список испытателей
+      description: Роль viewer.
+      responses:
+        '200':
+          description: Испытатели
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  inventors: { type: array, items: { $ref: '#/components/schemas/Inventor' } }
+    post:
+      tags: [Испытатели и оборудование]
+      summary: Завести испытателя
+      description: Роль editor.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/InventorInput' }
+      responses:
+        '200': { $ref: '#/components/responses/CreatedID' }
+
+  /api/lab/inventors/{id}:
+    patch:
+      tags: [Испытатели и оборудование]
+      summary: Изменить испытателя
+      description: Роль editor.
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/InventorInput' }
+      responses:
+        '200': { $ref: '#/components/responses/OK' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [Испытатели и оборудование]
+      summary: Удалить испытателя
+      description: Роль editor.
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        '200': { $ref: '#/components/responses/OK' }
+
+  /api/lab/equipment:
+    get:
+      tags: [Испытатели и оборудование]
+      summary: Список оборудования
+      description: Роль viewer.
+      responses:
+        '200':
+          description: Оборудование
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  equipment: { type: array, items: { $ref: '#/components/schemas/Equipment' } }
+    post:
+      tags: [Испытатели и оборудование]
+      summary: Завести оборудование
+      description: Роль editor.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/EquipmentInput' }
+      responses:
+        '200': { $ref: '#/components/responses/CreatedID' }
+
+  /api/lab/equipment/{id}:
+    patch:
+      tags: [Испытатели и оборудование]
+      summary: Изменить оборудование
+      description: Роль editor.
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/EquipmentInput' }
+      responses:
+        '200': { $ref: '#/components/responses/OK' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [Испытатели и оборудование]
+      summary: Удалить оборудование
+      description: Роль editor.
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        '200': { $ref: '#/components/responses/OK' }
+
+  /api/lab/equipment/{id}/scan:
+    post:
+      tags: [Испытатели и оборудование]
+      summary: Отметить оборудование сканированием
+      description: |
+        Роль editor. Отметка со сканера или QR-этикетки — фиксирует, что прибор
+        задействован.
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        '200': { $ref: '#/components/responses/OK' }
+
+  /api/lab/equipment/{id}/calibrations:
+    get:
+      tags: [Испытатели и оборудование]
+      summary: Калибровки прибора
+      description: Роль viewer.
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        '200':
+          description: Калибровки
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  calibrations:
+                    type: array
+                    items:
+                      type: object
+                      description: Дата, срок, значения по атрибутам калибровки.
+    post:
+      tags: [Испытатели и оборудование]
+      summary: Добавить калибровку
+      description: Роль editor. Состав значений задаётся «Параметрами калибровки» метода.
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Значения калибровки; состав зависит от метода.
+      responses:
+        '200': { $ref: '#/components/responses/CreatedID' }
+
+  /api/lab/equipment/{id}/calibrations/{calibration_id}/curve-chart/{attr_id}:
+    get:
+      tags: [Испытатели и оборудование]
+      summary: График калибровочной кривой (PNG)
+      description: Роль viewer. Картинка рисуется на сервере.
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+        - name: calibration_id
+          in: path
+          required: true
+          schema: { type: integer, format: int64 }
+        - name: attr_id
+          in: path
+          required: true
+          schema: { type: string }
+          description: Идентификатор атрибута калибровки.
+      responses:
+        '200':
+          description: Изображение
+          content:
+            image/png:
+              schema: { type: string, format: binary }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/lab/equipment/{id}/methods:
+    get:
+      tags: [Испытатели и оборудование]
+      summary: Методы, к которым привязан прибор
+      description: Роль viewer.
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        '200':
+          description: Привязки
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  links: { type: array, items: { $ref: '#/components/schemas/MethodEquipmentLink' } }
+    post:
+      tags: [Испытатели и оборудование]
+      summary: Привязать прибор к методу
+      description: |
+        Роль editor. `role` различает основной прибор и вспомогательный —
+        основной попадает в протокол.
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [method_id, role]
+              properties:
+                method_id: { type: integer, format: int64 }
+                role: { type: string, enum: [main, auxiliary] }
+      responses:
+        '200': { $ref: '#/components/responses/OK' }
+
+  /api/lab/equipment/{id}/methods/{method_id}:
+    delete:
+      tags: [Испытатели и оборудование]
+      summary: Отвязать прибор от метода
+      description: Роль editor.
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+        - name: method_id
+          in: path
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        '200': { $ref: '#/components/responses/OK' }
+
+  /api/lab/equipment/{id}/documents:
+    get:
+      tags: [Испытатели и оборудование]
+      summary: Документы прибора
+      description: Роль viewer. Свидетельства о поверке и прочие файлы.
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        '200':
+          description: Документы
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  documents: { type: array, items: { $ref: '#/components/schemas/RequestFile' } }
+    post:
+      tags: [Испытатели и оборудование]
+      summary: Загрузить документ прибора
+      description: Роль editor.
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file: { type: string, format: binary }
+      responses:
+        '200':
+          description: Загруженный документ
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RequestFile' }
+
+  /api/lab/equipment/{id}/documents/{file_id}:
+    delete:
+      tags: [Испытатели и оборудование]
+      summary: Удалить документ прибора
+      description: Роль editor.
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+        - name: file_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { $ref: '#/components/responses/OK' }
+
+  /api/lab/equipment/{id}/auxiliaries:
+    post:
+      tags: [Испытатели и оборудование]
+      summary: Добавить вспомогательное оборудование к прибору
+      description: Роль editor. Циклические связи отклоняются.
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [auxiliary_id]
+              properties:
+                auxiliary_id: { type: integer, format: int64 }
+      responses:
+        '200': { $ref: '#/components/responses/OK' }
+        '400':
+          description: Связь замкнула бы цикл
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/lab/equipment/{id}/auxiliaries/{auxiliary_id}:
+    delete:
+      tags: [Испытатели и оборудование]
+      summary: Убрать вспомогательное оборудование
+      description: Роль editor.
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+        - name: auxiliary_id
+          in: path
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        '200': { $ref: '#/components/responses/OK' }
+
+  /api/lab/equipment-links:
+    get:
+      tags: [Испытатели и оборудование]
+      summary: Все связи оборудования разом
+      description: Роль viewer. Чтобы не спрашивать привязки по каждому прибору отдельно.
+      responses:
+        '200':
+          description: Связи
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  links: { type: array, items: { type: object } }
+
+  /api/lab/method-equipment:
+    get:
+      tags: [Испытатели и оборудование]
+      summary: Все связи «метод — оборудование» разом
+      description: Роль viewer.
+      responses:
+        '200':
+          description: Связи
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  links: { type: array, items: { $ref: '#/components/schemas/MethodEquipmentLink' } }
+
+  /api/lab/equipment-notify-settings:
+    get:
+      tags: [Испытатели и оборудование]
+      summary: Настройки оповещений о поверке
+      description: Роль viewer.
+      responses:
+        '200':
+          description: Настройки
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EquipmentNotifySettings' }
+    post:
+      tags: [Испытатели и оборудование]
+      summary: Задать настройки оповещений о поверке
+      description: |
+        Роль editor. По умолчанию оповещения выключены — без явного `enabled`
+        сервис ничего не рассылает.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/EquipmentNotifySettings' }
+      responses:
+        '200': { $ref: '#/components/responses/OK' }
+
+  /api/lab/lab-members:
+    get:
+      tags: [Испытатели и оборудование]
+      summary: Сотрудники лабораторий
+      description: Роль viewer.
+      responses:
+        '200':
+          description: Сотрудники
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  members: { type: array, items: { $ref: '#/components/schemas/LabMember' } }
+    post:
+      tags: [Испытатели и оборудование]
+      summary: Назначить сотрудника лаборатории
+      description: |
+        Роль editor. `lab_admin` — руководитель лаборатории, он двигает карточки
+        на доске свободно; `lab_operator` — испытатель.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [lab_id, email, role]
+              properties:
+                lab_id: { type: integer, format: int64 }
+                email: { type: string, format: email }
+                role: { type: string, enum: [lab_operator, lab_admin] }
+      responses:
+        '200': { $ref: '#/components/responses/OK' }
+
+  /api/lab/lab-members/{lab_id}/{email}:
+    delete:
+      tags: [Испытатели и оборудование]
+      summary: Снять сотрудника с лаборатории
+      description: Роль editor.
+      parameters:
+        - name: lab_id
+          in: path
+          required: true
+          schema: { type: integer, format: int64 }
+        - { $ref: '#/components/parameters/Email' }
+      responses:
+        '200': { $ref: '#/components/responses/OK' }
+
+  # ---- Отчёты ----
+
+  /api/lab/requests/{id}/chart/{cfg_id}:
+    get:
+      tags: [Отчёты]
+      summary: График по результатам заявки (PNG)
+      description: Роль viewer. Картинка рисуется на сервере по конфигурации графика метода.
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+        - name: cfg_id
+          in: path
+          required: true
+          schema: { type: string }
+          description: Идентификатор конфигурации графика из `chart_configs` метода.
+      responses:
+        '200':
+          description: Изображение
+          content:
+            image/png:
+              schema: { type: string, format: binary }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/lab/requests/{id}/protocol:
+    post:
+      tags: [Отчёты]
+      summary: Протокол испытаний
+      description: Роль viewer. Вид и формат задаются query-параметрами.
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+        - name: template
+          in: query
+          schema: { type: string, enum: [protocol, excerpt, ui, help] }
+          description: |
+            `protocol` — полный протокол, `excerpt` — выписка, `ui` — вид для
+            показа в приложении, `help` — перечень доступных подстановок.
+        - name: format
+          in: query
+          schema: { type: string, enum: [html, docx] }
+      responses:
+        '200':
+          description: Протокол
+          content:
+            text/html:
+              schema: { type: string }
+            application/json:
+              schema:
+                type: object
+                description: При `format=docx` — документ в base64.
+                properties:
+                  docx_base64: { type: string }
+
+  /api/lab/requests/{id}/export.xlsx:
+    get:
+      tags: [Отчёты]
+      summary: Выгрузка заявки в Excel
+      description: Роль viewer.
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        '200':
+          description: Книга Excel
+          content:
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+              schema: { type: string, format: binary }
+
+  /api/lab/requests/export-summary.xlsx:
+    post:
+      tags: [Отчёты]
+      summary: Сводная выгрузка по нескольким заявкам
+      description: Роль viewer. Невидимые заявки в выгрузку не попадают.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              properties:
+                ids:
+                  type: array
+                  items: { type: integer, format: int64 }
+      responses:
+        '200':
+          description: Книга Excel
+          content:
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+              schema: { type: string, format: binary }
+
+  /api/lab/dashboard:
+    get:
+      tags: [Отчёты]
+      summary: Сводка для дашборда лаборатории
+      description: |
+        Роль viewer. Счётчики по статусам, срокам и загрузке. Состав полей может
+        пополняться вместе с дашбордом.
+      responses:
+        '200':
+          description: Сводка
+          content:
+            application/json:
+              schema:
+                type: object
+                description: Набор счётчиков дашборда.
+
+components:
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT приложения `lab`, выданный ЦУП.
+
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: { type: integer, format: int64 }
+    Email:
+      name: email
+      in: path
+      required: true
+      schema: { type: string, format: email }
+    Series:
+      name: series
+      in: path
+      required: true
+      schema: { type: integer }
+      description: Номер серии результатов.
+
+  responses:
+    OK:
+      description: Выполнено
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              ok: { type: boolean }
+    CreatedID:
+      description: Создано
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              id: { type: integer, format: int64 }
+    BadRequest:
+      description: Тело или параметры не приняты
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Unauthorized:
+      description: Нет ключа или он недействителен
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Forbidden:
+      description: Роли не хватает либо объект не виден
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: Не найдено
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+  schemas:
+
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+
+    Role:
+      type: string
+      enum: [viewer, editor, admin, superadmin]
+
+    RequestStatus:
+      type: string
+      enum: [new, received, processing, completed]
+      description: |
+        `new` — новая, `received` — образцы получены, `processing` — в работе,
+        `completed` — завершена.
+
+    Priority:
+      type: string
+      enum: [normal, critical, blocker]
+      description: |
+        Важность. В интерфейсах подписана «Обычный», «Критический»,
+        «Блокирующий». Пустое значение у старых заявок равнозначно `normal`.
+
+    Lab:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        code: { type: string, description: Входит в номер заказчику. }
+        name: { type: string }
+        description: { type: string }
+        type: { type: string, enum: [internal, external] }
+        parent_lab_id:
+          type: integer
+          format: int64
+          description: Внутренняя лаборатория, к которой привязана внешняя. 0 — у внутренних.
+        auto_send_email:
+          type: boolean
+          description: Слать ли письмо заказчику при завершении заявки этой лаборатории.
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    LabInput:
+      type: object
+      properties:
+        code: { type: string }
+        name: { type: string }
+        description: { type: string }
+        type: { type: string, enum: [internal, external] }
+        parent_lab_id: { type: integer, format: int64 }
+        auto_send_email: { type: boolean }
+
+    Method:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        code: { type: string, description: Входит в оба номера заявки. }
+        name: { type: string }
+        description: { type: string }
+        lab_ids:
+          type: array
+          items: { type: integer, format: int64 }
+          description: Лаборатории, которым принадлежит метод. Заявка фиксирует одну из них.
+        determinable_indicators:
+          type: array
+          items: { type: string }
+          description: Показатели, которые метод умеет оценивать; из них выбирается целевой.
+        formulas: { type: array, items: { type: object } }
+        classification: { type: array, items: { type: object } }
+        chart_configs: { type: array, items: { type: object } }
+        input_parameters: { type: array, items: { type: object } }
+        presentation:
+          type: object
+          description: Представление показателей в интерфейсе, выписке и протоколе.
+        operator_form:
+          type: object
+          description: Схема формы испытателя.
+        calibration_attributes: { type: array, items: { type: object } }
+        calibration_operator_form: { type: object }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    MethodInput:
+      type: object
+      properties:
+        code: { type: string }
+        name: { type: string }
+        description: { type: string }
+        lab_ids: { type: array, items: { type: integer, format: int64 } }
+
+    MethodConfigInput:
+      type: object
+      description: Частичное обновление метода и его конфигурации.
+      properties:
+        code: { type: string }
+        name: { type: string }
+        description: { type: string }
+        lab_ids: { type: array, items: { type: integer, format: int64 } }
+        determinable_indicators: { type: array, items: { type: string } }
+        formulas: { type: array, items: { type: object } }
+        classification: { type: array, items: { type: object } }
+        chart_configs: { type: array, items: { type: object } }
+        input_parameters: { type: array, items: { type: object } }
+        presentation: { type: object }
+        operator_form: { type: object }
+        calibration_attributes: { type: array, items: { type: object } }
+        calibration_operator_form: { type: object }
+
+    Object:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        name: { type: string }
+        description: { type: string }
+        characteristics:
+          type: object
+          description: |
+            Свободный набор. Употребимые ключи: `ekn`, `batch_number`,
+            `sample_id`, `sample_type`, `thickness_mm`, `ekn_snapshot`,
+            `target_indicators` (идентификатор метода → выбранный показатель).
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    ObjectInput:
+      type: object
+      properties:
+        name: { type: string }
+        description: { type: string }
+        characteristics: { type: object }
+
+    Project:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        parent_id: { type: integer, format: int64, description: 0 — корневой проект. }
+        code: { type: string, description: Уникален; первая часть номера заказчику. }
+        name: { type: string }
+        description: { type: string }
+        is_ekn: { type: boolean, description: Проект заведён автоматически по номеру ЕКН. }
+        group_id: { type: integer, format: int64, description: Группа видимости. 0 — публичный. }
+        owner_email: { type: string, format: email }
+        mail_trigger_ekn:
+          type: string
+          description: Заявка из письма с этим ЕКН попадёт в проект. Пусто — не участвует.
+        mail_trigger_sender:
+          type: string
+          description: То же по адресу отправителя.
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    ProjectInput:
+      type: object
+      properties:
+        parent_id: { type: integer, format: int64 }
+        code: { type: string }
+        name: { type: string }
+        description: { type: string }
+        is_ekn: { type: boolean }
+        group_id: { type: integer, format: int64 }
+        mail_trigger_ekn: { type: string }
+        mail_trigger_sender: { type: string }
+
+    Group:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        name: { type: string }
+        owner_email: { type: string, format: email }
+        members:
+          type: array
+          items:
+            type: object
+            properties:
+              email: { type: string, format: email }
+              role: { type: string, enum: [viewer, editor] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    RequestFile:
+      type: object
+      properties:
+        file_key: { type: string, description: Ключ в хранилище; им скачивается файл. }
+        file_name: { type: string }
+        file_size: { type: integer, format: int64 }
+        file_url: { type: string }
+
+    Request:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        number_seq: { type: integer, format: int64, description: NNN — сквозной счётчик по году. }
+        number_year: { type: integer }
+        title: { type: string }
+        description: { type: string }
+        object_id: { type: integer, format: int64 }
+        project_id: { type: integer, format: int64, description: 0 — вне проекта. }
+        group_id: { type: integer, format: int64, description: Группа видимости. 0 — нет. }
+        owner_email: { type: string, format: email }
+        status: { $ref: '#/components/schemas/RequestStatus' }
+        priority: { $ref: '#/components/schemas/Priority' }
+        test_purpose:
+          type: string
+          enum: [quality_control, rnd, certification, declaration]
+          description: Текущий контроль, НИОКР, сертификация, декларирование.
+        ekn: { type: string }
+        method_id: { type: integer, format: int64 }
+        lab_id:
+          type: integer
+          format: int64
+          description: |
+            Какая именно лаборатория из списка метода выполняет испытание.
+            Определяет и код в номере, и видимость заявки.
+        customer_number:
+          type: string
+          description: '{код проекта}-{NNN}/{год}-{код лабы}-{код метода}'
+        lab_number:
+          type: string
+          description: '{NNN}/{год}-{код метода}. Кода проекта нет, при смене проекта не меняется.'
+        external_id: { type: string, description: Номер в легаси-трекере, если заявка оттуда. }
+        inventor_id: { type: integer, format: int64 }
+        report_date: { type: string }
+        samples_in_date: { type: string }
+        exp_date: { type: string }
+        amb_temp: { type: string }
+        amb_pres: { type: string }
+        amb_moist: { type: string }
+        assigned_to: { type: string, description: E-mail испытателя. Пусто — не назначен. }
+        completed_at: { type: string, description: Момент перехода в «Завершена». }
+        files: { type: array, items: { $ref: '#/components/schemas/RequestFile' } }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        result:
+          type: string
+          description: Достигнутая оценка метода. Производное значение, не колонка.
+        compliance:
+          type: string
+          enum: ['', Соответствует, Не соответствует, Не оценивается]
+          description: Производное значение. Пусто, если результаты ещё не посчитаны.
+
+    RequestSearchHit:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        customer_number: { type: string }
+        lab_number: { type: string }
+        title: { type: string }
+        status: { $ref: '#/components/schemas/RequestStatus' }
+
+    CreateRequestInput:
+      type: object
+      required: [methods]
+      properties:
+        title: { type: string }
+        description: { type: string }
+        object_id: { type: integer, format: int64 }
+        project_id: { type: integer, format: int64 }
+        group_id: { type: integer, format: int64 }
+        priority: { $ref: '#/components/schemas/Priority' }
+        test_purpose: { type: string }
+        ekn:
+          type: string
+          description: |
+            Если проект не указан, а ЕКН задан, проект под этот ЕКН создаётся
+            автоматически.
+        external_id: { type: string }
+        methods:
+          type: array
+          description: Пары «метод — лаборатория». На каждую создаётся своя заявка с общим NNN.
+          items:
+            type: object
+            required: [method_id, lab_id]
+            properties:
+              method_id: { type: integer, format: int64 }
+              lab_id: { type: integer, format: int64 }
+
+    UpdateRequestInput:
+      type: object
+      description: Частичное обновление. Отсутствующие поля не трогаются.
+      properties:
+        title: { type: string }
+        description: { type: string }
+        object_id: { type: integer, format: int64 }
+        project_id:
+          type: integer
+          format: int64
+          description: Смена значения пересобирает `customer_number`. 0 — убрать проект.
+        group_id: { type: integer, format: int64 }
+        priority: { $ref: '#/components/schemas/Priority' }
+        test_purpose: { type: string }
+        ekn: { type: string }
+        external_id: { type: string }
+
+    PushRequest:
+      type: object
+      description: Заявка в виде, в котором её присылает клиент при синхронизации.
+      properties:
+        id: { type: integer, format: int64, description: '0 — создание; тогда нужен client_id.' }
+        client_id: { type: integer, format: int64, description: Локальный идентификатор клиента. }
+        group_key: { type: string, description: Метка пачки под-заявок, созданных вместе. }
+        parent_id: { type: integer, format: int64 }
+        title: { type: string }
+        description: { type: string }
+        object_id: { type: integer, format: int64 }
+        project_id: { type: integer, format: int64 }
+        group_id: { type: integer, format: int64 }
+        status: { $ref: '#/components/schemas/RequestStatus' }
+        priority: { $ref: '#/components/schemas/Priority' }
+        test_purpose: { type: string }
+        ekn: { type: string }
+        external_id: { type: string }
+        updated_at:
+          type: string
+          format: date-time
+          description: Отметка клиента. Строка не новее серверной пропускается.
+        method_id: { type: integer, format: int64 }
+        lab_id: { type: integer, format: int64 }
+        method_ids:
+          type: array
+          items: { type: integer, format: int64 }
+          description: Только для совместимости со старыми клиентами; берётся первый.
+
+    PullResponse:
+      type: object
+      properties:
+        requests: { type: array, items: { $ref: '#/components/schemas/Request' } }
+        projects: { type: array, items: { $ref: '#/components/schemas/Project' } }
+        groups: { type: array, items: { $ref: '#/components/schemas/Group' } }
+        labs: { type: array, items: { $ref: '#/components/schemas/Lab' } }
+        methods: { type: array, items: { $ref: '#/components/schemas/Method' } }
+        objects: { type: array, items: { $ref: '#/components/schemas/Object' } }
+
+    AuditLogEntry:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        kind: { type: string, enum: [status, result_created, result_updated] }
+        who: { type: string, format: email }
+        created_at: { type: string, format: date-time }
+        old_status: { type: string }
+        new_status: { type: string }
+        series_num: { type: integer }
+        values_before: { type: object, description: Состав зависит от метода. }
+        values_after: { type: object, description: Состав зависит от метода. }
+
+    ResultSeries:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        request_id: { type: integer, format: int64 }
+        series_num: { type: integer }
+        is_statistical_row:
+          type: boolean
+          description: Строка автостатистики, а не измерение испытателя.
+        values:
+          type: object
+          description: Измеренные и расчётные значения. Состав задаётся методом.
+        created_by: { type: string, format: email }
+        updated_by: { type: string, format: email }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    ResultSeriesInput:
+      type: object
+      properties:
+        series_num: { type: integer, description: Не указан — следующий свободный. }
+        values: { type: object, description: Состав задаётся формой испытателя метода. }
+
+    Inventor:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        name: { type: string }
+        position: { type: string }
+        email: { type: string, format: email }
+
+    InventorInput:
+      type: object
+      properties:
+        name: { type: string }
+        position: { type: string }
+        email: { type: string, format: email }
+
+    Equipment:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        name: { type: string }
+        inventory_number: { type: string }
+        serial_number: { type: string }
+        lab_id: { type: integer, format: int64 }
+        calibration_due: { type: string, description: Срок следующей поверки. }
+
+    EquipmentInput:
+      type: object
+      properties:
+        name: { type: string }
+        inventory_number: { type: string }
+        serial_number: { type: string }
+        lab_id: { type: integer, format: int64 }
+        calibration_due: { type: string }
+
+    MethodEquipmentLink:
+      type: object
+      properties:
+        method_id: { type: integer, format: int64 }
+        equipment_id: { type: integer, format: int64 }
+        role:
+          type: string
+          enum: [main, auxiliary]
+          description: Основной прибор попадает в протокол, вспомогательный — нет.
+
+    EquipmentNotifySettings:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+          description: Выключено по умолчанию — без этого флага рассылки нет.
+        days_before:
+          type: array
+          items: { type: integer }
+          description: За сколько дней до срока поверки предупреждать.
+        recipients:
+          type: array
+          items: { type: string, format: email }
+
+    LabMember:
+      type: object
+      properties:
+        lab_id: { type: integer, format: int64 }
+        email: { type: string, format: email }
+        role: { type: string, enum: [lab_operator, lab_admin] }

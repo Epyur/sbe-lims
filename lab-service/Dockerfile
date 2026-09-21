@@ -2,6 +2,10 @@ FROM golang:1.24-alpine AS build
 WORKDIR /src
 COPY go.mod ./
 COPY *.go ./
+# Swagger UI и схема вшиваются в бинарь через //go:embed (static.go). Без этой
+# строки сборка падает на `pattern static/...: no matching files found`: в
+# контекст копируются только перечисленные пути, каталога static образ не видит.
+COPY static ./static
 RUN GOFLAGS=-mod=mod CGO_ENABLED=0 GOOS=linux go build -trimpath -o /mailers-lab .
 
 FROM alpine:3.20
