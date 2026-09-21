@@ -330,6 +330,11 @@ export class LimsView extends ItemView {
   /** 'all' | 'active' (new/processing) | 'completed' — 2026-09-04, прямой запрос
    * пользователя. */
   private filterStatus: 'all' | 'active' | 'completed' = 'all';
+  /** Важность: '' — фильтр выключен, иначе normal | critical | blocker
+   * (2026-09-21, прямой запрос пользователя; такой же фильтр в sbe-requests и
+   * в веб-портале). Доски «Очередь лаборатории» не касается — там важность
+   * показана цветом номера карточки. */
+  private filterPriority = '';
   private filterTimeout: number | null = null;
   /** Kanban-доска «Очередь лаборатории»: заявка, которую в данный момент тащат
    * (см. renderQueueBoard) — module-scope не подходит, т.к. вьюх может быть
@@ -1045,6 +1050,19 @@ export class LimsView extends ItemView {
       void this.renderRequests(this.currentRequestsFilter, this.currentRequestsMode);
     });
 
+    const priorityGroup = filterBar.createDiv({ cls: 'tn-lims-filter-group' });
+    priorityGroup.createEl('label', { text: 'Важность', cls: 'tn-lims-filter-lbl' });
+    const priorityFilterSelect = priorityGroup.createEl('select', { cls: 'tn-lims-select' });
+    priorityFilterSelect.createEl('option', { value: '', text: 'Все' });
+    priorityFilterSelect.createEl('option', { value: 'normal', text: 'Обычный' });
+    priorityFilterSelect.createEl('option', { value: 'critical', text: 'Критический' });
+    priorityFilterSelect.createEl('option', { value: 'blocker', text: 'Блокирующий' });
+    priorityFilterSelect.value = this.filterPriority;
+    priorityFilterSelect.addEventListener('change', () => {
+      this.filterPriority = priorityFilterSelect.value;
+      void this.renderRequests(this.currentRequestsFilter, this.currentRequestsMode);
+    });
+
     const objNameGroup = filterBar.createDiv({ cls: 'tn-lims-filter-group' });
     objNameGroup.createEl('label', { text: 'Название объекта', cls: 'tn-lims-filter-lbl' });
     const objNameInput = objNameGroup.createEl('input', { attr: { type: 'text', placeholder: 'Название объекта' }, cls: 'tn-lims-input' });
@@ -1114,6 +1132,9 @@ export class LimsView extends ItemView {
     if (this.filterMethodId !== null && r.method_id !== this.filterMethodId) return false;
     if (this.filterStatus === 'active' && r.status === 'completed') return false;
     if (this.filterStatus === 'completed' && r.status !== 'completed') return false;
+    // Важность у старых заявок может быть пустой — считаем её обычной, так же
+    // как priorityRank в request-sort.ts и подпись в priorityLabel.
+    if (this.filterPriority && (r.priority || 'normal') !== this.filterPriority) return false;
     const objNameQ = this.filterObjectName.trim().toLowerCase();
     if (objNameQ && !this.objectName(r.object_id).toLowerCase().includes(objNameQ)) return false;
     const idQ = this.filterIdentifier.trim().toLowerCase();
@@ -1385,12 +1406,15 @@ export class LimsView extends ItemView {
     return g ? g.name : '—';
   }
 
+  /** Подписи важности — один набор на плагины и портал (2026-09-21, решение
+   * пользователя). Скобки с пояснением здесь нет: важность в ЛИМС только
+   * показывается, выбирают её в плагине «Заявки». */
   private priorityLabel(priority: string): string {
     switch (priority) {
-      case 'critical': return 'Критичный';
-      case 'blocker': return 'Блокер (остановить исполнение других заявок)';
-      case 'normal': return 'Средний';
-      default: return priority || 'Средний';
+      case 'critical': return 'Критический';
+      case 'blocker': return 'Блокирующий';
+      case 'normal': return 'Обычный';
+      default: return priority || 'Обычный';
     }
   }
 
