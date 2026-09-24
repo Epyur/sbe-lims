@@ -1588,14 +1588,32 @@ func (s *Server) saveResultSeries(ctx context.Context, requestID, methodID, inve
 	// формулами/классификацией (см. вызов logResultSave после апсерта).
 	var beforeValues map[string]any
 	var beforeRaw []byte
+	var oldPhotoBefore, oldPhotoAfter string
 	if err := s.pool.QueryRow(ctx, `
-SELECT values FROM measurement_results
+SELECT values, photo_before, photo_after FROM measurement_results
 WHERE request_id = $1 AND method_id = $2 AND series_num = $3 AND is_statistical_row = false`,
-		requestID, methodID, seriesNum).Scan(&beforeRaw); err == nil {
+		requestID, methodID, seriesNum).Scan(&beforeRaw, &oldPhotoBefore, &oldPhotoAfter); err == nil {
 		beforeValues = map[string]any{}
 		if len(beforeRaw) > 0 {
 			_ = json.Unmarshal(beforeRaw, &beforeValues)
 		}
+	}
+	// photo_before/photo_after — те же "пустое значение не трогает сохранённое",
+	// что у report_date и пр. (см. handleCreateResult) и что carryOverUnownedValues
+	// делает для values ниже (2026-09-21, живая потеря данных при повторном
+	// сохранении формы без части полей) — но это отдельные колонки, тот перенос их
+	// не касается. Мобильный клиент инициализирует поля фото пустой строкой при
+	// КАЖДОЙ перерисовке формы серии (переключение на другую серию и назад), не
+	// подставляя уже сохранённое фото, — без этой защиты повторное сохранение
+	// серии без повторного выбора фото стирало снимок из протокола и лишало
+	// зеркалирование в Фотобанк повода сработать (см. changedPhotoFields ниже:
+	// стёртое в пустую строку значение не считается изменением, но реального
+	// фото при этом уже нет).
+	if photoBefore == "" {
+		photoBefore = oldPhotoBefore
+	}
+	if photoAfter == "" {
+		photoAfter = oldPhotoAfter
 	}
 
 	// Поля, которых во входящем наборе нет и которыми форма испытателя не
@@ -1690,7 +1708,20 @@ RETURNING id`,
 	// (who="legacy-import") исключён по спеке — зеркалируются только фото, загруженные
 	// ПОСЛЕ включения функции, а не перенесённые исторические.
 	if who != "legacy-import" {
-		if changed := changedPhotoFields(beforeValues, values); len(changed) > 0 {
+		// photo_before/photo_after живут в отдельных колонках, не в values (см.
+		// комментарий у oldPhotoBefore/oldPhotoAfter выше) — changedPhotoFields
+		// сравнивает произвольную пару map[string]any, поэтому её сюда подмешиваем,
+		// не трогая саму функцию (photo_before_test/photo_after_test по-прежнему
+		// берутся из values — это отдельные атрибуты формы метода, не эти колонки).
+		beforeWithPhotos := map[string]any{"photo_before": oldPhotoBefore, "photo_after": oldPhotoAfter}
+		for k, v := range beforeValues {
+			beforeWithPhotos[k] = v
+		}
+		afterWithPhotos := map[string]any{"photo_before": photoBefore, "photo_after": photoAfter}
+		for k, v := range values {
+			afterWithPhotos[k] = v
+		}
+		if changed := changedPhotoFields(beforeWithPhotos, afterWithPhotos); len(changed) > 0 {
 			labName, customerNumber := s.requestLabAndNumber(ctx, requestID)
 			for field, sourceURL := range changed {
 				title := fmt.Sprintf("Заявка %s, серия %d, %s", customerNumber, seriesNum, photoFieldKind(field))

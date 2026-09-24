@@ -43,7 +43,7 @@ func main() {
 		log.Fatalf("ping: %v", err)
 	}
 
-	s3Store, err := NewS3Store()
+	s3Store, err := NewS3Store(pool)
 	if err != nil {
 		log.Fatalf("S3: %v", err)
 	}
@@ -113,6 +113,10 @@ func main() {
 	// не шлёт (см. equipment_notify.go).
 	s.startEquipmentNotifyJob()
 
+	// Фоновая дозаливка буфера загрузки при недоступности S3 (2026-09-24, см.
+	// upload_buffer.go) — живёт весь процесс, не привязан к стартовому ctx.
+	s.s3.startUploadFlushWorker(context.Background())
+
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /api/lab/health", s.handleHealth)
@@ -181,6 +185,7 @@ func main() {
 	// протокола/выписки не может приложить Authorization-заголовок; защита — случайность
 	// ключа объекта, не JWT.
 	mux.HandleFunc("GET /api/lab/file-redirect", s.handleFileRedirect)
+	mux.HandleFunc("GET /api/lab/buffer/status", s.requirePerm("admin")(s.handleBufferStatus))
 
 	// Права доступа
 	mux.HandleFunc("GET /api/lab/permissions/me", s.requirePerm("viewer")(s.handleMyPermission))
@@ -841,6 +846,16 @@ WHERE mr.request_id = r.id AND mr.is_statistical_row = false AND COALESCE(r.amb_
 		// findProjectByMailTrigger. Пусто — проект вне авто-маршрутизации.
 		`ALTER TABLE projects ADD COLUMN IF NOT EXISTS mail_trigger_ekn TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE projects ADD COLUMN IF NOT EXISTS mail_trigger_sender TEXT NOT NULL DEFAULT ''`,
+		// Буфер загрузки при недоступности S3 (2026-09-24, см. docs/superpowers/
+		// specs/2026-09-24-s3-upload-buffer-design.md) — очередь файлов, временно
+		// осевших на локальном диске вместо S3, и фоновая дозаливка (upload_buffer.go).
+		`CREATE TABLE IF NOT EXISTS pending_uploads (
+			key TEXT PRIMARY KEY,
+			file_size BIGINT NOT NULL,
+			queued_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+			attempts INT NOT NULL DEFAULT 0,
+			last_error TEXT
+		)`,
 	}
 	for _, q := range stmts {
 		if _, err := s.pool.Exec(ctx, q); err != nil {

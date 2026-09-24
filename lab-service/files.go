@@ -2,12 +2,15 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
+	"mime"
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -65,6 +68,10 @@ func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 	url, err := s.uploadFileBytes(r.Context(), requestID, header.Filename, data, currentEmail(r))
 	if err != nil {
 		log.Printf("s3 put: %v", err)
+		if errors.Is(err, ErrBufferFull) {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": ErrBufferFull.Error()})
+			return
+		}
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "s3 error"})
 		return
 	}
@@ -143,6 +150,24 @@ func (s *Server) handleFileRedirect(w http.ResponseWriter, r *http.Request) {
 	key := r.URL.Query().Get("key")
 	if key == "" || !validObjectKey(key, "lab") {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid or missing key"})
+		return
+	}
+	// Файл ещё в локальном буфере (2026-09-24, S3 был недоступен на момент
+	// загрузки) — presigned-ссылка на объект, которого в S3 ещё нет, не имеет
+	// смысла; отдаём байты напрямую тем же адресом, каким они уже встроены в
+	// HTML протокола. Content-Type по расширению ключа — иначе <img src> в
+	// протоколе не отрисуется как картинка, пока файл не долетел до S3 (там
+	// rclone проставляет тип сам).
+	if data, err := os.ReadFile(s.s3.bufferPath(key)); err == nil {
+		contentType := mime.TypeByExtension(path.Ext(key))
+		if contentType == "" {
+			contentType = "application/octet-stream"
+		}
+		w.Header().Set("Content-Type", contentType)
+		w.WriteHeader(http.StatusOK)
+		if _, err := w.Write(data); err != nil {
+			log.Printf("file redirect (buffer) write: %v", err)
+		}
 		return
 	}
 	link, err := s.s3.Link(r.Context(), key, 7*24*time.Hour)

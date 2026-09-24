@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"image/png"
 	"math"
 	"testing"
 )
@@ -305,5 +307,102 @@ func TestRenderChartWithTitleAndLabelsDoesNotFail(t *testing.T) {
 	}
 	if len(png) == 0 {
 		t.Errorf("got empty PNG bytes")
+	}
+}
+
+// Легенда переехала из поля графика (2026-08-25, правый верхний угол списком)
+// в подрисуночную подпись под графиком (2026-09-24, прямой запрос пользователя
+// — у метода ГГ несколько каналов датчика, список внутри графика перекрывал
+// половину данных). Дальше — тесты на новую раскладку.
+
+func TestLayoutLegendRowsWrapsByWidth(t *testing.T) {
+	items := []legendItem{
+		{label: "aaaaaaaaaa", color: chartRed},
+		{label: "bbbbbbbbbb", color: chartBlue},
+		{label: "cccccccccc", color: chartGreen},
+	}
+	itemW := legendItemWidth(items[0]) // одинаковая длина подписи => одинаковая ширина
+
+	// Ширины хватает только на один элемент в строке — перенос после каждого.
+	narrow := layoutLegendRows(items, itemW+5)
+	if len(narrow) != 3 {
+		t.Fatalf("ожидали 3 строки по одному элементу, получили %d: %v", len(narrow), narrow)
+	}
+	for _, row := range narrow {
+		if len(row) != 1 {
+			t.Fatalf("ожидали ровно 1 элемент в строке при узкой ширине, получили %v", row)
+		}
+	}
+
+	// Ширины хватает на все три элемента подряд — одна строка.
+	wide := layoutLegendRows(items, itemW*3+legendItemGap*2+10)
+	if len(wide) != 1 || len(wide[0]) != 3 {
+		t.Fatalf("ожидали одну строку из 3 элементов, получили %v", wide)
+	}
+}
+
+func TestLayoutLegendRowsEmpty(t *testing.T) {
+	if rows := layoutLegendRows(nil, 800); rows != nil {
+		t.Fatalf("пустой список подписей должен дать nil, получили %v", rows)
+	}
+}
+
+func TestLegendCaptionHeightEmptyIsZero(t *testing.T) {
+	if h := legendCaptionHeight(nil); h != 0 {
+		t.Fatalf("ожидали 0 высоты без легенды, получили %d", h)
+	}
+	rows := [][]legendItem{{{label: "a", color: chartRed}}, {{label: "b", color: chartBlue}}}
+	if h := legendCaptionHeight(rows); h != legendPadTop+2*legendRowH {
+		t.Fatalf("ожидали %d, получили %d", legendPadTop+2*legendRowH, h)
+	}
+}
+
+// TestRenderChartLegendCaptionGrowsImageNotPlot — главная проверка самого
+// запроса пользователя: легенда должна УВЕЛИЧИВАТЬ изображение снизу (новые
+// строки под графиком), а не накладываться на область данных. Сравниваем
+// итоговую высоту PNG с расчётной высотой подписи — если бы легенда всё ещё
+// рисовалась внутри поля графика, эта высота никак не зависела бы от числа
+// серий.
+func TestRenderChartLegendCaptionGrowsImageNotPlot(t *testing.T) {
+	manySeries := []chartSeries{
+		{Name: "Термопара канал 1 (у стенки)", X: []float64{0, 1}, Y: []float64{0, 1}},
+		{Name: "Термопара канал 2 (у стенки)", X: []float64{0, 1}, Y: []float64{0, 1}},
+		{Name: "Термопара канал 3 (в центре)", X: []float64{0, 1}, Y: []float64{0, 1}},
+		{Name: "Термопара канал 4 (в центре)", X: []float64{0, 1}, Y: []float64{0, 1}},
+		{Name: "Средняя температура дыма", X: []float64{0, 1}, Y: []float64{0, 1}},
+		{Name: "Производная температуры", X: []float64{0, 1}, Y: []float64{0, 1}, Y2: true},
+	}
+	withLegend, err := renderChart("line", "T", "X", "Y", "Y2", manySeries, chartAxisOverrides{})
+	if err != nil {
+		t.Fatalf("renderChart: %v", err)
+	}
+	noLegendSeries := []chartSeries{{X: []float64{0, 1}, Y: []float64{0, 1}}} // без Name — buildLegendItems пропускает
+	withoutLegend, err := renderChart("line", "T", "X", "Y", "Y2", noLegendSeries, chartAxisOverrides{})
+	if err != nil {
+		t.Fatalf("renderChart (без легенды): %v", err)
+	}
+
+	imgWith, err := png.Decode(bytes.NewReader(withLegend))
+	if err != nil {
+		t.Fatalf("decode withLegend: %v", err)
+	}
+	imgWithout, err := png.Decode(bytes.NewReader(withoutLegend))
+	if err != nil {
+		t.Fatalf("decode withoutLegend: %v", err)
+	}
+	if imgWith.Bounds().Dx() != imgWithout.Bounds().Dx() {
+		t.Fatalf("ширина изображения не должна зависеть от легенды: %d vs %d",
+			imgWith.Bounds().Dx(), imgWithout.Bounds().Dx())
+	}
+
+	rows := layoutLegendRows(buildLegendItems(manySeries), chartW-24)
+	if len(rows) < 2 {
+		t.Fatalf("тест рассчитан на перенос длинных подписей в 2+ строки, получили %d: %v", len(rows), rows)
+	}
+	wantExtra := legendCaptionHeight(rows)
+	gotExtra := imgWith.Bounds().Dy() - imgWithout.Bounds().Dy()
+	if gotExtra != wantExtra {
+		t.Fatalf("высота подписи не совпала: разница по факту %d px, ожидали %d px (строк: %d)",
+			gotExtra, wantExtra, len(rows))
 	}
 }

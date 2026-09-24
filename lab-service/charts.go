@@ -119,45 +119,85 @@ func buildLegendItems(series []chartSeries) []legendItem {
 	return items
 }
 
-// drawLegendBox рисует список подписей серий одной колонкой ВНУТРИ поля графика
-// (marginLeft..marginLeft+plotW, начиная от top), правый верхний угол по умолчанию
-// (2026-08-25, прямой запрос пользователя). Непрозрачный фон + рамка вокруг списка —
-// рисуется ПОСЛЕ серий (см. вызов в renderChart), поэтому подписи остаются читаемыми,
-// даже если легенда физически перекрывает линию/точки данных под ней.
-func drawLegendBox(img *image.RGBA, items []legendItem, marginLeft, top, plotW int) {
+// legendSwatchW/legendItemGap/legendSwatchGap — геометрия одного элемента подписи
+// легенды (см. drawLegendCaption): цветной квадрат + отступ + текст, элементы в
+// строке разделены legendItemGap.
+const (
+	legendSwatchW   = 12
+	legendSwatchGap = 6
+	legendItemGap   = 18
+	legendPadTop    = 8
+)
+
+// legendItemWidth — ширина одного элемента легенды в пикселях (квадрат + отступ + текст).
+func legendItemWidth(it legendItem) int {
+	return legendSwatchW + legendSwatchGap + chartTextWidth(it.label)
+}
+
+// layoutLegendRows раскладывает подписи легенды в строки подрисуночной подписи —
+// жадно, слева направо, с переносом на новую строку, когда очередной элемент не
+// помещается в maxWidth (2026-09-24, прямой запрос пользователя: легенда ВНУТРИ
+// графика — см. историю у прежнего drawLegendBox, версия 2026-08-25 — при
+// нескольких сериях (например каналах датчика) занимала высокий список и
+// перекрывала половину данных. Легенда переехала ПОД график подрисуночной
+// подписью — там нельзя расти вверх поверх линий, поэтому вместо колонки
+// произвольной высоты она переносится по ширине).
+func layoutLegendRows(items []legendItem, maxWidth int) [][]legendItem {
 	if len(items) == 0 {
-		return
+		return nil
 	}
-	const (
-		legendPad     = 6
-		legendSwatchW = 12
-		legendGap     = 6
-	)
-	maxLabelW := 0
+	var rows [][]legendItem
+	var row []legendItem
+	rowW := 0
 	for _, it := range items {
-		if w := chartTextWidth(it.label); w > maxLabelW {
-			maxLabelW = w
+		w := legendItemWidth(it)
+		next := rowW
+		if len(row) > 0 {
+			next += legendItemGap
 		}
+		next += w
+		if len(row) > 0 && next > maxWidth {
+			rows = append(rows, row)
+			row = nil
+			rowW = 0
+			next = w
+		}
+		row = append(row, it)
+		rowW = next
 	}
-	boxW := legendPad*2 + legendSwatchW + legendGap + maxLabelW
-	boxH := legendPad*2 + len(items)*legendRowH
-	x1 := marginLeft + plotW - legendPad
-	x0 := x1 - boxW
-	if x0 < marginLeft {
-		x0 = marginLeft
+	if len(row) > 0 {
+		rows = append(rows, row)
 	}
-	y0 := top + legendPad
-	y1 := y0 + boxH
+	return rows
+}
 
-	drawRectFilled(img, x0, y0, x1, y1, chartBg)
-	drawRect(img, x0, y0, x1, y1, chartGrid)
+// legendCaptionHeight — высота подрисуночной подписи (0, если легенда пуста —
+// тогда её вообще нет в итоговом изображении, ни одной строки, ни отступа).
+func legendCaptionHeight(rows [][]legendItem) int {
+	if len(rows) == 0 {
+		return 0
+	}
+	return legendPadTop + len(rows)*legendRowH
+}
 
-	textY := y0 + legendPad + legendRowH - 5
-	for _, it := range items {
-		sx := x0 + legendPad
-		drawRectFilled(img, sx, textY-9, sx+legendSwatchW, textY+3, it.color)
-		drawText(img, sx+legendSwatchW+legendGap, textY, it.label, chartText)
-		textY += legendRowH
+// drawLegendCaption рисует подрисуночную подпись — легенду строками ПОД графиком,
+// каждая строка центрирована по ширине изображения (см. layoutLegendRows). top —
+// верхняя граница первой строки.
+func drawLegendCaption(img *image.RGBA, rows [][]legendItem, top int) {
+	y := top
+	for _, row := range rows {
+		rowW := -legendItemGap
+		for _, it := range row {
+			rowW += legendItemGap + legendItemWidth(it)
+		}
+		x := (chartW - rowW) / 2
+		baselineY := y + legendRowH - 5
+		for _, it := range row {
+			drawRectFilled(img, x, baselineY-9, x+legendSwatchW, baselineY+3, it.color)
+			drawText(img, x+legendSwatchW+legendSwatchGap, baselineY, it.label, chartText)
+			x += legendItemWidth(it) + legendItemGap
+		}
+		y += legendRowH
 	}
 }
 
@@ -400,9 +440,13 @@ func renderChart(chartType, title, xLabel, yLabel, y2Label string, series []char
 		xTicks[i] = formatTickValue(v)
 	}
 
-	// легенда (2026-08-25) теперь рисуется ВНУТРИ поля графика (см. drawLegendBox
-	// ниже, после серий) — больше не отдельная полоса над графиком, поэтому marginTop
-	// от неё не зависит.
+	// легенда (2026-09-24) — подрисуночная подпись ПОД графиком, а не полоса над
+	// ним и не список поверх данных (см. drawLegendCaption/layoutLegendRows выше)
+	// — высота считается заранее, чтобы заложить её в totalH до создания img.
+	legendItems := buildLegendItems(series)
+	legendRows := layoutLegendRows(legendItems, chartW-24)
+	captionH := legendCaptionHeight(legendRows)
+
 	marginTop := 10
 	if title != "" {
 		marginTop = titleBandH
@@ -412,7 +456,7 @@ func renderChart(chartType, title, xLabel, yLabel, y2Label string, series []char
 		marginBottom += xLabelBandH
 	}
 	top := marginTop
-	totalH := marginTop + chartPlotH + marginBottom
+	totalH := marginTop + chartPlotH + marginBottom + captionH
 
 	img := image.NewRGBA(image.Rect(0, 0, chartW, totalH))
 	draw.Draw(img, img.Bounds(), &image.Uniform{chartBg}, image.Point{}, draw.Src)
@@ -495,12 +539,6 @@ func renderChart(chartType, title, xLabel, yLabel, y2Label string, series []char
 	if title != "" {
 		drawTextCentered(img, chartW/2, 20, title, chartText)
 	}
-	// легенда — списком ВНУТРИ поля графика, правый верхний угол по умолчанию
-	// (2026-08-25, прямой запрос пользователя: "легенду нужно размещать в поле
-	// графика списком... предпочтительное расположение — правый верхний угол").
-	// Рисуется ПОСЛЕ серий, с непрозрачным фоном — подписи остаются читаемыми, даже
-	// если легенда физически перекрывает линию/точки данных.
-	drawLegendBox(img, buildLegendItems(series), marginLeft, top, plotW)
 	// подпись оси X — под делениями, по центру графика
 	if xLabel != "" {
 		drawTextCentered(img, marginLeft+plotW/2, top+chartPlotH+xLabelBandH, xLabel, chartText)
@@ -516,6 +554,12 @@ func renderChart(chartType, title, xLabel, yLabel, y2Label string, series []char
 	if y2Label != "" {
 		drawVerticalText(img, y2Label, chartW-4-axisLabelThickness, top+chartPlotH/2, chartText)
 	}
+	// легенда — подрисуночная подпись, строками ПОД графиком (2026-09-24, прямой
+	// запрос пользователя — прежнее место внутри поля графика, версия 2026-08-25,
+	// при нескольких сериях перекрывало половину данных; см. историю у
+	// layoutLegendRows/drawLegendCaption выше). Рисуется последней, под самой
+	// нижней подписью оси X.
+	drawLegendCaption(img, legendRows, top+chartPlotH+marginBottom+legendPadTop)
 
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, img); err != nil {
