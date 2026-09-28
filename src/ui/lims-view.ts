@@ -1911,7 +1911,12 @@ export class LimsView extends ItemView {
     };
 
     // Лог наблюдений — общий на ВСЕ log-кнопки, тот же формат "N сек - label",
-    // что и в протоколе (formatEventLog, lab-service/protocol.go).
+    // что и в протоколе (formatEventLog, lab-service/protocol.go). Правка и
+    // удаление отдельной записи (2026-09-28) — только здесь, только на
+    // десктопе: список строк с ✎/✖ вместо read-only текста; персистентность —
+    // через общую кнопку "💾 Сохранить" формы, отдельного сохранения нет (см.
+    // дизайн docs/superpowers/specs/2026-09-28-lims-observation-log-edit-design.md).
+    type EventLogEntry = { label: string; seconds: number };
     const logAttributeIds = timer.buttons
       .filter((b): b is typeof b & { action: { kind: 'log'; attributeId: string } } => b.action.kind === 'log')
       .map(b => b.action.attributeId)
@@ -1923,12 +1928,47 @@ export class LimsView extends ItemView {
         logPreviewEls.set(attributeId, logPreviewWrap.createDiv());
       }
     }
+    const getLogEntries = (attributeId: string): EventLogEntry[] =>
+      Array.isArray(values[attributeId]) ? values[attributeId] as EventLogEntry[] : [];
+
     const redrawLogPreview = (attributeId: string): void => {
       const el = logPreviewEls.get(attributeId);
       if (!el) return;
-      const entries = Array.isArray(values[attributeId]) ? values[attributeId] as Array<{ label: string; seconds: number }> : [];
-      el.setText(entries.length > 0 ? entries.map(e => `${e.seconds} сек - ${e.label}`).join('; ') : '');
+      el.empty();
+      const entries = getLogEntries(attributeId);
+      entries.forEach((entry, index) => {
+        const row = el.createDiv({ cls: 'tn-lims-flex' });
+        row.createSpan({ text: `${entry.seconds} сек - ${entry.label}` });
+        const editBtn = row.createEl('button', { text: '✎', cls: 'tn-btn tn-btn-ghost' });
+        const deleteBtn = row.createEl('button', { text: '✖', cls: 'tn-btn tn-btn-ghost' });
+        editBtn.addEventListener('click', () => editLogEntry(attributeId, index, row));
+        deleteBtn.addEventListener('click', () => {
+          getLogEntries(attributeId).splice(index, 1);
+          redrawLogPreview(attributeId);
+        });
+      });
     };
+
+    const editLogEntry = (attributeId: string, index: number, row: HTMLElement): void => {
+      const entries = getLogEntries(attributeId);
+      const entry = entries[index];
+      if (!entry) return;
+      row.empty();
+      const labelInput = row.createEl('input', { type: 'text', cls: 'tn-lims-input', value: entry.label });
+      const secondsInput = row.createEl('input', { type: 'number', cls: 'tn-lims-input', value: String(entry.seconds) });
+      const applyBtn = row.createEl('button', { text: '✓', cls: 'tn-btn tn-btn-primary' });
+      const cancelBtn = row.createEl('button', { text: '✖', cls: 'tn-btn tn-btn-ghost' });
+      applyBtn.addEventListener('click', () => {
+        const newLabel = labelInput.value.trim() || entry.label;
+        const parsedSeconds = Number(secondsInput.value);
+        const newSeconds = Number.isInteger(parsedSeconds) && parsedSeconds >= 0 ? parsedSeconds : entry.seconds;
+        entries[index] = { label: newLabel, seconds: newSeconds };
+        entries.sort((a, b) => a.seconds - b.seconds);
+        redrawLogPreview(attributeId);
+      });
+      cancelBtn.addEventListener('click', () => redrawLogPreview(attributeId));
+    };
+
     for (const attributeId of logAttributeIds) redrawLogPreview(attributeId);
 
     const btnGrid = wrap.createDiv({ cls: 'tn-lims-flex tn-lims-mt8' });
@@ -1947,7 +1987,7 @@ export class LimsView extends ItemView {
           pause(); // "останавливающая эксперимент" — прямая формулировка роадмапа
         } else {
           const { attributeId } = btn.action;
-          const entries = Array.isArray(values[attributeId]) ? values[attributeId] as unknown[] : [];
+          const entries = getLogEntries(attributeId);
           entries.push({ label: btn.label, seconds });
           values[attributeId] = entries;
           redrawLogPreview(attributeId);
