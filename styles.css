@@ -510,6 +510,17 @@
   color: var(--tn-text, var(--text-normal));
 }
 
+/* --- Офскрин-контейнер для рендера графика (sbe-core/src/charts/chart-render.ts) ---
+   Общий для sbe-dashboards (карточка/экспорт) и sbe-presentations (график на
+   лету при сборке слайда) — ApexCharts требует реальный DOM-контейнер, но его
+   не нужно видеть. Инлайн-стили запрещены правилами, поэтому класс. */
+.tn-offscreen-render {
+  position: fixed;
+  left: -10000px;
+  top: 0;
+  pointer-events: none;
+}
+
 /* Классы вьюхи ЛИМС (tn-lims-*) на семантических токенах дизайн-системы SBE. */
 
 .tn-lims-container {
