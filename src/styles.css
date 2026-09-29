@@ -413,7 +413,11 @@
 .tn-lims-kanban {
   display: flex;
   gap: 12px;
-  align-items: flex-start;
+  /* stretch (не flex-start, 2026-09-29): все колонки растягиваются до высоты
+     самой длинной — иначе короткие колонки кончаются задолго до конца длинного
+     списка «Новых заявок», и их зона перетаскивания становится недостижимой
+     при скролле вниз. */
+  align-items: stretch;
   overflow-x: auto;
   padding-bottom: 8px;
 }
@@ -491,6 +495,21 @@
 }
 .tn-lims-kanban-card:hover {
   border-color: var(--tn-brand);
+}
+
+/* Модалка выбора исполнителя при переносе карточки в «В работу»/«В работе»
+   (2026-09-29). */
+.tn-lims-assignee-modal-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.tn-lims-assignee-modal-btn {
+  text-align: left;
+  width: 100%;
+}
+.tn-lims-assignee-modal-btn--current {
+  font-weight: 600;
 }
 
 .tn-lims-series-form {
