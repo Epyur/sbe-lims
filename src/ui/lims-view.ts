@@ -212,8 +212,11 @@ const NAV_GROUPS: NavGroup[] = [
     icon: '📋',
     label: 'Заявки',
     items: [
-      { key: 'requests', label: 'Все заявки', sub: 'Доступные вам заявки' },
+      // «Очередь лаборатории» — вкладка по умолчанию, выше «Все заявки»
+      // (2026-09-29, прямой запрос пользователя): именно с ней начинается
+      // рабочий день лаборатории, «Все заявки» — второй по частоте раздел.
       { key: 'queue', label: 'Очередь лаборатории', sub: 'Заявки, ещё не взятые в работу' },
+      { key: 'requests', label: 'Все заявки', sub: 'Доступные вам заявки' },
     ],
   },
   {
@@ -288,7 +291,7 @@ export class LimsView extends ItemView {
   private labSwitchEl!: HTMLSelectElement;
   private settingsBtnEl!: HTMLElement;
 
-  private key: NavKey = 'requests';
+  private key: NavKey = 'queue';
   private labId: number | null = null;
   // Открытая модалка протокола (2026-08-23) — раньше showHtmlModal вставляла
   // обычный div прямо в bodyEl без какого-либо singleton-контроля: клик на
@@ -1286,8 +1289,14 @@ export class LimsView extends ItemView {
   }
 
   /** Колонки 2/3 — одна ячейка на испытателя + хвостовая ячейка «Не назначено»
-   * (видна/принимает дроп только руководителю — испытатель сам никого не
-   * назначает и не видит смысла в этой ячейке). */
+   * (видна только руководителю, либо когда в ней реально есть неназначенные
+   * заявки) — деление чисто визуальное, кто чем занят. Дроп-цель у колонки
+   * ОДНА, на весь столбец (2026-09-29, было — по ячейке на испытателя): при
+   * длинном списке «Новые заявки» ячейки соседних коротких колонок уезжают
+   * наверх и становятся недостижимы при скролле вниз (см. дизайн-спеку
+   * 2026-09-29-lims-queue-board-usability-design.md). Кому конкретно
+   * назначить — руководитель выбирает в AssigneeModal при дропе; испытатель
+   * выбора не имеет (см. onDrop ниже), модалка ему не показывается. */
   private renderPerTesterKanbanColumn(
     board: HTMLElement, title: string, requests: LimsRequest[], targetStatus: string,
     testers: LabMember[], isLabHead: boolean, myLabRole: string,
@@ -1297,8 +1306,6 @@ export class LimsView extends ItemView {
     head.createSpan({ text: title });
     head.createSpan({ cls: 'tn-lims-kanban-col-count', text: String(requests.length) });
 
-    const canDropCell = (testerEmail: string): boolean =>
-      isLabHead || (myLabRole !== '' && testerEmail === this.myEmail);
     const canDrag = (r: LimsRequest): boolean =>
       isLabHead || (myLabRole !== '' && r.assigned_to === this.myEmail);
 
@@ -1308,17 +1315,27 @@ export class LimsView extends ItemView {
       for (const r of requests.filter(r => r.assigned_to === testerEmail)) {
         this.renderKanbanCard(cell, r, canDrag(r));
       }
-      if (canDropCell(testerEmail)) {
-        this.makeDropZone(cell, () => {
-          const dragged = this.draggedCard;
-          if (!dragged) return;
-          void this.performKanbanMove(dragged, targetStatus, testerEmail).then(() => this.renderQueueBoard());
-        });
-      }
     };
     for (const tester of testers) renderCell(tester.email, tester.email);
     const unassigned = requests.filter(r => r.assigned_to === '' || !testers.some(t => t.email === r.assigned_to));
     if (isLabHead || unassigned.length > 0) renderCell('Не назначено', '');
+
+    if (!isLabHead && myLabRole === '') return; // не участник этой лабы — дропнуть сюда нечего
+    this.makeDropZone(col, () => {
+      const dragged = this.draggedCard;
+      if (!dragged) return;
+      if (isLabHead) {
+        new AssigneeModal(this.app, title, testers, dragged.assigned_to, (email) => {
+          void this.performKanbanMove(dragged, targetStatus, email).then(() => this.renderQueueBoard());
+        }).open();
+        return;
+      }
+      // Испытатель: выбора нет — либо самозабор неназначенной заявки из
+      // «Новых» себе, либо перенос своей же уже назначенной карточки между
+      // «В работу»⇄«В работе» (assigned_to не меняется).
+      const targetAssignee = dragged.status === 'new' ? this.myEmail : dragged.assigned_to;
+      void this.performKanbanMove(dragged, targetStatus, targetAssignee).then(() => this.renderQueueBoard());
+    });
   }
 
   private renderKanbanCard(container: HTMLElement, req: LimsRequest, draggable: boolean): void {
@@ -5735,6 +5752,44 @@ class UnsavedChangesModal extends Modal {
     discardBtn.addEventListener('click', () => { this.close(); this.onDiscard(); });
     const cancelBtn = row.createEl('button', { text: 'Отмена', cls: 'tn-btn tn-btn-ghost' });
     cancelBtn.addEventListener('click', () => this.close());
+  }
+
+  onClose(): void {
+    this.contentEl.empty();
+  }
+}
+
+/** Выбор исполнителя при перетаскивании карточки в «В работу»/«В работе»
+ * (2026-09-29): дроп теперь принимает вся колонка целиком (не ячейка
+ * конкретного испытателя, см. renderPerTesterKanbanColumn) — эта модалка
+ * закрывает вопрос «кому назначить». Показывается только руководителю;
+ * испытателю выбирать не из чего (см. onDrop в renderPerTesterKanbanColumn),
+ * поэтому у него модалка не открывается вовсе. */
+class AssigneeModal extends Modal {
+  constructor(
+    app: App,
+    private columnTitle: string,
+    private testers: LabMember[],
+    private currentAssignee: string,
+    private onPick: (email: string) => void,
+  ) {
+    super(app);
+  }
+
+  onOpen(): void {
+    this.titleEl.setText(`Кому назначить — «${this.columnTitle}»?`);
+    const list = this.contentEl.createDiv({ cls: 'tn-lims-assignee-modal-list' });
+    const renderOption = (label: string, email: string): void => {
+      const isCurrent = email === this.currentAssignee;
+      const btn = list.createEl('button', {
+        text: isCurrent ? `${label} — текущий` : label,
+        cls: 'tn-btn tn-btn-ghost tn-lims-assignee-modal-btn',
+      });
+      if (isCurrent) btn.addClass('tn-lims-assignee-modal-btn--current');
+      btn.addEventListener('click', () => { this.close(); this.onPick(email); });
+    };
+    for (const tester of this.testers) renderOption(tester.email, tester.email);
+    renderOption('Не назначено', '');
   }
 
   onClose(): void {
