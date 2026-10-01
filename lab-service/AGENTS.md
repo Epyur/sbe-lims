@@ -1319,6 +1319,19 @@ docker compose exec lab wget -qO- http://localhost:3000/api/lab/health   # вн�
 
 ## История
 
+### 2026-10-01 — развёрнуто на VDS (партии 1, 2, 4)
+
+Контейнер `lab` пересобран и поднят скриптом `scripts/lab_deploy.sh` (откат —
+`lab-service.bak` рядом): health `{"status":"ok"}`, закрытая ручка `sync/pull`
+без ключа даёт 401, `/api/lab/docs/` — 200, схема отдаётся. В бинаре проверены
+новые строки `object_id and object cannot be used together`,
+`method_id does not match request method`,
+`forbidden: cannot attach files to this request`; новый маршрут
+`GET /api/lab/buffer/status` без ключа отвечает 401. Аутентифицированный E2E
+на тестовых данных (видимость агрегатов, чужой `method_id`, очистка статистики,
+upload, `outcomes`, атомарный объект) на момент записи не проводился — нужен
+токен/тестовые данные.
+
 ### 2026-10-01 - партия 4 аудита: атомарный объект и заявка (локально, не развёрнуто)
 
 В `POST /requests` и `PATCH /requests/{id}` добавлен необязательный блок
