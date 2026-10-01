@@ -1327,10 +1327,20 @@ docker compose exec lab wget -qO- http://localhost:3000/api/lab/health   # вн�
 новые строки `object_id and object cannot be used together`,
 `method_id does not match request method`,
 `forbidden: cannot attach files to this request`; новый маршрут
-`GET /api/lab/buffer/status` без ключа отвечает 401. Аутентифицированный E2E
-на тестовых данных (видимость агрегатов, чужой `method_id`, очистка статистики,
-upload, `outcomes`, атомарный объект) на момент записи не проводился — нужен
-токен/тестовые данные.
+`GET /api/lab/buffer/status` без ключа отвечает 401.
+
+Аутентифицированный E2E проведён 2026-10-01 по реальному JWT (magic-link
+портала, `channel=web`, владелец/супер-админ). Проверено, без записи в боевые
+данные:
+- права на агрегаты: скрытая заявка — `viewer` 403, `admin` 200; обычные
+  результаты ведут себя так же (то же и раньше);
+- чужой `method_id` у серии — 400 `method_id does not match request method`;
+- upload без `request_id` — 400; с несуществующей заявкой — 404 (до S3);
+- `sync/push` со старой `updated_at` — `outcomes: [{status:"rejected"}]`;
+- подмена роли (`X-View-As-Role`) применяется (`role: viewer`).
+Не проверялись вживую (берегли боевые данные): успешная загрузка файла с
+`file_key`, создание заявки с `object` и цели существующего объекта, очистка
+статистики при удалении последней серии — покрыты unit-тестами и кодом.
 
 ### 2026-10-01 - партия 4 аудита: атомарный объект и заявка (локально, не развёрнуто)
 
