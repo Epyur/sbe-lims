@@ -1851,10 +1851,10 @@ export class LimsView extends ItemView {
         }
         await this.plugin.syncService.saveResult(req.id, {
           method_id: req.method_id,
-          inventor_id: 0,
+          inventor_id: series.inventor_id || 0,
           series_num: series.series_num,
           values: submitValues,
-          equipment_id: equipmentSelect ? Number(equipmentSelect.value) : undefined,
+          equipment_id: equipmentSelect ? Number(equipmentSelect.value) : series.equipment_id || undefined,
         });
         new Notice('Серия сохранена, расчёт выполнен');
         onDone();
