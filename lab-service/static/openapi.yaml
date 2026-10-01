@@ -693,6 +693,18 @@ paths:
                         client_id: { type: integer, format: int64 }
                         group_key: { type: string }
                         request: { $ref: '#/components/schemas/Request' }
+                  outcomes:
+                    type: array
+                    description: Результат обработки каждой записи push.
+                    items:
+                      type: object
+                      required: [client_id, status]
+                      properties:
+                        client_id: { type: integer, format: int64 }
+                        request_id: { type: integer, format: int64 }
+                        status: { type: string, enum: [created, updated, rejected, failed] }
+                        request: { $ref: '#/components/schemas/Request' }
+                        error: { type: string }
 
   # ---- Файлы ----
 

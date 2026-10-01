@@ -217,6 +217,18 @@ type CreatedPush struct {
 	Request  *Request `json:"request"`
 }
 
+// PushOutcome фиксирует результат обработки КАЖДОЙ записи входящего push. Клиент
+// не должен помечать локальную правку синхронизированной по одному только
+// агрегированному счётчику: LWW-отказ, 403 и ошибка одной записи требуют повтора
+// или показа причины, а не молчаливого снятия sync_status=local.
+type PushOutcome struct {
+	ClientID  int64    `json:"client_id"`
+	RequestID int64    `json:"request_id,omitempty"`
+	Status    string   `json:"status"`
+	Request   *Request `json:"request,omitempty"`
+	Error     string   `json:"error,omitempty"`
+}
+
 func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Requests []PushRequest `json:"requests"`
@@ -226,7 +238,7 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(req.Requests) == 0 {
-		writeJSON(w, http.StatusOK, map[string]any{"inserted": 0, "updated": 0, "created": []CreatedPush{}})
+		writeJSON(w, http.StatusOK, map[string]any{"inserted": 0, "updated": 0, "created": []CreatedPush{}, "outcomes": []PushOutcome{}})
 		return
 	}
 
@@ -235,6 +247,7 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 	inserted := 0
 	updated := 0
 	created := make([]CreatedPush, 0)
+	outcomes := make([]PushOutcome, 0, len(req.Requests))
 
 	updates := make([]PushRequest, 0, len(req.Requests))
 	creates := make([]PushRequest, 0, len(req.Requests))
@@ -250,10 +263,14 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 		ok, err := s.pushUpdate(r.Context(), p, email, now)
 		if err != nil {
 			log.Printf("push update %d: %v", p.ID, err)
+			outcomes = append(outcomes, PushOutcome{ClientID: p.ClientID, RequestID: p.ID, Status: "failed", Error: "update failed"})
 			continue
 		}
 		if ok {
 			updated++
+			outcomes = append(outcomes, PushOutcome{ClientID: p.ClientID, RequestID: p.ID, Status: "updated"})
+		} else {
+			outcomes = append(outcomes, PushOutcome{ClientID: p.ClientID, RequestID: p.ID, Status: "rejected", Error: "update rejected or outdated"})
 		}
 	}
 
@@ -292,22 +309,26 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 	for _, p := range creates {
 		seq, y, ok := resolveSeq(p)
 		if !ok {
+			outcomes = append(outcomes, PushOutcome{ClientID: p.ClientID, Status: "failed", Error: "could not allocate request number"})
 			continue
 		}
 
 		full, err := s.pushCreate(r.Context(), p, email, now, seq, y)
 		if err != nil {
 			log.Printf("push create: %v", err)
+			outcomes = append(outcomes, PushOutcome{ClientID: p.ClientID, Status: "failed", Error: "create failed"})
 			continue
 		}
 		if full == nil {
+			outcomes = append(outcomes, PushOutcome{ClientID: p.ClientID, Status: "rejected", Error: "create rejected"})
 			continue
 		}
 		created = append(created, CreatedPush{ClientID: p.ClientID, GroupKey: p.GroupKey, Request: full})
+		outcomes = append(outcomes, PushOutcome{ClientID: p.ClientID, RequestID: full.ID, Status: "created", Request: full})
 		inserted++
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{"inserted": inserted, "updated": updated, "created": created})
+	writeJSON(w, http.StatusOK, map[string]any{"inserted": inserted, "updated": updated, "created": created, "outcomes": outcomes})
 }
 
 func (s *Server) pushUpdate(ctx context.Context, p PushRequest, email string, now time.Time) (bool, error) {
