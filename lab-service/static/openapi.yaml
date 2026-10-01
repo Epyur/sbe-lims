@@ -1866,7 +1866,14 @@ components:
       properties:
         title: { type: string }
         description: { type: string }
-        object_id: { type: integer, format: int64 }
+        object_id:
+          type: integer
+          format: int64
+          description: Существующий объект. Обязателен, если не передан `object`.
+        object:
+          $ref: '#/components/schemas/RequestObjectInput'
+        target_indicators:
+          $ref: '#/components/schemas/TargetIndicators'
         project_id: { type: integer, format: int64 }
         group_id: { type: integer, format: int64 }
         priority: { $ref: '#/components/schemas/Priority' }
@@ -1894,6 +1901,10 @@ components:
         title: { type: string }
         description: { type: string }
         object_id: { type: integer, format: int64 }
+        object:
+          $ref: '#/components/schemas/RequestObjectInput'
+        target_indicators:
+          $ref: '#/components/schemas/TargetIndicators'
         project_id:
           type: integer
           format: int64
@@ -1903,6 +1914,23 @@ components:
         test_purpose: { type: string }
         ekn: { type: string }
         external_id: { type: string }
+
+    RequestObjectInput:
+      type: object
+      required: [name]
+      description: |
+        Новый объект, создаваемый в одной транзакции с заявкой. Нельзя передавать
+        вместе с `object_id`.
+      properties:
+        name: { type: string }
+        description: { type: string }
+        characteristics: { type: object, additionalProperties: true }
+
+    TargetIndicators:
+      type: object
+      description: Карта `method_id` → целевой показатель. Метод обязан принадлежать заявке.
+      additionalProperties:
+        type: string
 
     PushRequest:
       type: object

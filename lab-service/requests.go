@@ -106,6 +106,70 @@ type RequestFile struct {
 	FileURL  string `json:"file_url"`
 }
 
+type RequestObjectInput struct {
+	Name            string         `json:"name"`
+	Description     string         `json:"description"`
+	Characteristics map[string]any `json:"characteristics"`
+}
+
+func createRequestObject(ctx context.Context, tx pgx.Tx, input RequestObjectInput) (int64, error) {
+	if strings.TrimSpace(input.Name) == "" {
+		return 0, fmt.Errorf("object name is required")
+	}
+	if input.Characteristics == nil {
+		input.Characteristics = map[string]any{}
+	}
+	chars, err := json.Marshal(input.Characteristics)
+	if err != nil {
+		return 0, err
+	}
+	var id int64
+	err = tx.QueryRow(ctx, `
+INSERT INTO objects (name, description, characteristics) VALUES ($1, $2, $3) RETURNING id`,
+		input.Name, input.Description, chars).Scan(&id)
+	return id, err
+}
+
+func applyTargetIndicators(ctx context.Context, tx pgx.Tx, objectID int64, indicators map[string]string) error {
+	if len(indicators) == 0 {
+		return nil
+	}
+	clean := map[string]string{}
+	for methodID, indicator := range indicators {
+		if _, err := strconv.ParseInt(methodID, 10, 64); err != nil || strings.TrimSpace(indicator) == "" {
+			return fmt.Errorf("invalid target indicators")
+		}
+		clean[methodID] = strings.TrimSpace(indicator)
+	}
+	raw, err := json.Marshal(clean)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `
+UPDATE objects SET characteristics = jsonb_set(
+ characteristics, '{target_indicators}',
+ COALESCE(characteristics->'target_indicators', '{}'::jsonb) || $2::jsonb, true
+), updated_at = now() WHERE id = $1`, objectID, string(raw))
+	return err
+}
+
+func (s *Server) validateTargetIndicators(ctx context.Context, indicators map[string]string, allowedMethodIDs map[int64]bool) error {
+	for rawMethodID, indicator := range indicators {
+		methodID, err := strconv.ParseInt(rawMethodID, 10, 64)
+		if err != nil || !allowedMethodIDs[methodID] {
+			return fmt.Errorf("target indicator method is not part of request")
+		}
+		rankOrder, err := s.loadMethodRankOrder(ctx, methodID)
+		if err != nil {
+			return err
+		}
+		if indexOfString(rankOrder, strings.TrimSpace(indicator)) < 0 {
+			return fmt.Errorf("invalid target indicator")
+		}
+	}
+	return nil
+}
+
 // Request — LabID (2026-08-19) заменяет старую ExternalLabID: методы теперь могут
 // принадлежать нескольким лабораториям (method_labs), поэтому заявка обязана явно
 // зафиксировать, КАКАЯ конкретно лаба из списка метода выполняет испытание — именно
@@ -585,16 +649,18 @@ WHERE m.id = $1`, methodID, labID).Scan(&row.methodCode, &row.labCode)
 
 func (s *Server) handleCreateRequest(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Title       string `json:"title"`
-		Description string `json:"description"`
-		ObjectID    int64  `json:"object_id"`
-		ProjectID   int64  `json:"project_id"`
-		GroupID     int64  `json:"group_id"`
-		Priority    string `json:"priority"`
-		TestPurpose string `json:"test_purpose"`
-		EKN         string `json:"ekn"`
-		ExternalID  string `json:"external_id"`
-		Methods     []struct {
+		Title            string              `json:"title"`
+		Description      string              `json:"description"`
+		ObjectID         int64               `json:"object_id"`
+		Object           *RequestObjectInput `json:"object"`
+		TargetIndicators map[string]string   `json:"target_indicators"`
+		ProjectID        int64               `json:"project_id"`
+		GroupID          int64               `json:"group_id"`
+		Priority         string              `json:"priority"`
+		TestPurpose      string              `json:"test_purpose"`
+		EKN              string              `json:"ekn"`
+		ExternalID       string              `json:"external_id"`
+		Methods          []struct {
 			MethodID int64 `json:"method_id"`
 			LabID    int64 `json:"lab_id"`
 		} `json:"methods"`
@@ -607,8 +673,12 @@ func (s *Server) handleCreateRequest(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "title is required"})
 		return
 	}
-	if req.ObjectID <= 0 {
+	if req.ObjectID <= 0 && req.Object == nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "object_id is required"})
+		return
+	}
+	if req.ObjectID > 0 && req.Object != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "object_id and object cannot be used together"})
 		return
 	}
 	if len(req.Methods) == 0 {
@@ -642,6 +712,13 @@ func (s *Server) handleCreateRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
+	if req.Object != nil {
+		req.ObjectID, err = createRequestObject(r.Context(), tx, *req.Object)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid object"})
+			return
+		}
+	}
 
 	effProjectID := req.ProjectID
 	if req.ProjectID <= 0 && req.EKN != "" {
@@ -688,6 +765,18 @@ func (s *Server) handleCreateRequest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	methods = uniq
+	allowedMethodIDs := map[int64]bool{}
+	for _, method := range methods {
+		allowedMethodIDs[method.mid] = true
+	}
+	if err := s.validateTargetIndicators(r.Context(), req.TargetIndicators, allowedMethodIDs); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid target indicators"})
+		return
+	}
+	if err := applyTargetIndicators(r.Context(), tx, req.ObjectID, req.TargetIndicators); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
+		return
+	}
 
 	// Один запрос → N под-заявок с общим NNN (одинаковые number_seq + number_year).
 	created := make([]*Request, 0, len(methods))
@@ -736,18 +825,24 @@ func (s *Server) handleUpdateRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Title       *string `json:"title"`
-		Description *string `json:"description"`
-		ObjectID    *int64  `json:"object_id"`
-		ProjectID   *int64  `json:"project_id"`
-		GroupID     *int64  `json:"group_id"`
-		Priority    *string `json:"priority"`
-		TestPurpose *string `json:"test_purpose"`
-		EKN         *string `json:"ekn"`
-		ExternalID  *string `json:"external_id"`
+		Title            *string             `json:"title"`
+		Description      *string             `json:"description"`
+		ObjectID         *int64              `json:"object_id"`
+		Object           *RequestObjectInput `json:"object"`
+		TargetIndicators map[string]string   `json:"target_indicators"`
+		ProjectID        *int64              `json:"project_id"`
+		GroupID          *int64              `json:"group_id"`
+		Priority         *string             `json:"priority"`
+		TestPurpose      *string             `json:"test_purpose"`
+		EKN              *string             `json:"ekn"`
+		ExternalID       *string             `json:"external_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json"})
+		return
+	}
+	if req.ObjectID != nil && *req.ObjectID > 0 && req.Object != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "object_id and object cannot be used together"})
 		return
 	}
 
@@ -780,6 +875,26 @@ func (s *Server) handleUpdateRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
+	if req.Object != nil {
+		objectID, err := createRequestObject(r.Context(), tx, *req.Object)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid object"})
+			return
+		}
+		req.ObjectID = &objectID
+	}
+	effectiveObjectID := existing.ObjectID
+	if req.ObjectID != nil {
+		effectiveObjectID = *req.ObjectID
+	}
+	if err := s.validateTargetIndicators(r.Context(), req.TargetIndicators, map[int64]bool{existing.MethodID: true}); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid target indicators"})
+		return
+	}
+	if err := applyTargetIndicators(r.Context(), tx, effectiveObjectID, req.TargetIndicators); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
+		return
+	}
 
 	effProjectID := int64(0)
 	if existing.ProjectID > 0 {
