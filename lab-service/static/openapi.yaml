@@ -54,6 +54,7 @@ tags:
   - name: Группы
   - name: Синхронизация
   - name: Файлы
+  - name: Буфер загрузок
   - name: Права
   - name: Результаты
   - name: Испытатели и оборудование
@@ -975,6 +976,42 @@ paths:
       responses:
         '200': { $ref: '#/components/responses/OK' }
         '400': { $ref: '#/components/responses/BadRequest' }
+
+  /api/lab/buffer/status:
+    get:
+      tags: [Буфер загрузок]
+      summary: Состояние буфера файлов при недоступном S3
+      description: |
+        Роль admin. Буфер хранит принятые файлы локально, пока их нельзя
+        выгрузить в S3. `stuck` показывает файлы, исчерпавшие автоматические
+        попытки выгрузки и требующие разбора.
+      responses:
+        '200':
+          description: Сводка буфера
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [count, total_bytes, stuck]
+                properties:
+                  count:
+                    type: integer
+                    minimum: 0
+                    description: Число файлов в буфере.
+                  total_bytes:
+                    type: integer
+                    format: int64
+                    minimum: 0
+                    description: Суммарный размер файлов в байтах.
+                  oldest_queued_at:
+                    type: string
+                    format: date-time
+                    nullable: true
+                    description: Время постановки в очередь самого старого файла.
+                  stuck:
+                    type: integer
+                    minimum: 0
+                    description: Число файлов без оставшихся автоматических попыток.
 
   # ---- Испытатели и оборудование ----
 
