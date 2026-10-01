@@ -716,14 +716,14 @@ ruleLoop:
 		}
 	}
 	if !hasAggregatedFormula && !hasAggregatedClassification {
-		return nil
+		return s.clearAggregatedFormulas(ctx, requestID, methodID)
 	}
 	seriesValues, err := s.loadSeriesValues(ctx, requestID, methodID)
 	if err != nil {
 		return err
 	}
 	if len(seriesValues) == 0 {
-		return nil
+		return s.clearAggregatedFormulas(ctx, requestID, methodID)
 	}
 	rankOrder, err := s.loadMethodRankOrder(ctx, methodID)
 	if err != nil {
@@ -758,16 +758,13 @@ ruleLoop:
 		}
 	}
 	if len(result) == 0 {
-		return nil
+		return s.clearAggregatedFormulas(ctx, requestID, methodID)
 	}
 	dataJSON, err := json.Marshal(result)
 	if err != nil {
 		return err
 	}
-	if _, err := s.pool.Exec(ctx, `
-DELETE FROM aggregated_results
-WHERE request_id = $1 AND method_id = $2 AND calculation_type = 'formula_aggregated'`,
-		requestID, methodID); err != nil {
+	if err := s.clearAggregatedFormulas(ctx, requestID, methodID); err != nil {
 		return err
 	}
 	_, err = s.pool.Exec(ctx, `
@@ -775,6 +772,14 @@ INSERT INTO aggregated_results (request_id, method_id, calculation_type, result_
 	source_series_count, source_series_range, updated_at)
 VALUES ($1, $2, 'formula_aggregated', $3::jsonb, $4, $5, now())`,
 		requestID, methodID, string(dataJSON), len(seriesValues), "1-"+strconv.Itoa(len(seriesValues)))
+	return err
+}
+
+func (s *Server) clearAggregatedFormulas(ctx context.Context, requestID, methodID int64) error {
+	_, err := s.pool.Exec(ctx, `
+DELETE FROM aggregated_results
+WHERE request_id = $1 AND method_id = $2 AND calculation_type = 'formula_aggregated'`,
+		requestID, methodID)
 	return err
 }
 
@@ -1317,6 +1322,19 @@ func (s *Server) handleCreateResult(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "method_id is required"})
 		return
 	}
+	stored, err := s.loadRequest(r.Context(), requestID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeJSON(w, http.StatusNotFound, map[string]any{"error": "request not found"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
+		return
+	}
+	if !requestMethodMatches(stored.MethodID, req.MethodID) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "method_id does not match request method"})
+		return
+	}
 	if req.Values == nil {
 		req.Values = map[string]any{}
 	}
@@ -1413,6 +1431,10 @@ func (s *Server) handleCreateResult(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"id": id, "series_num": seriesNum, "values": req.Values})
+}
+
+func requestMethodMatches(requestMethodID, submittedMethodID int64) bool {
+	return requestMethodID > 0 && requestMethodID == submittedMethodID
 }
 
 // handleCreateInstrumentBuffer принимает {hash, values} от внешнего прибора
@@ -1755,17 +1777,15 @@ func (s *Server) recomputeStatistics(ctx context.Context, requestID, methodID in
 		return err
 	}
 	if len(series) == 0 {
-		return nil
+		return s.clearStatistics(ctx, requestID, methodID)
 	}
 	stats := computeStats(series)
 	if len(stats) == 0 {
-		return nil
+		return s.clearStatistics(ctx, requestID, methodID)
 	}
 	statsJSON, _ := json.Marshal(stats)
 	// удалить старую стат-строку и вставить новую
-	if _, err := s.pool.Exec(ctx, `
-DELETE FROM measurement_results WHERE request_id = $1 AND method_id = $2 AND is_statistical_row = true`,
-		requestID, methodID); err != nil {
+	if err := s.clearStatistics(ctx, requestID, methodID); err != nil {
 		return err
 	}
 	// Фиксированный вне-диапазонный номер -1 (2026-08-28) — ИСПРАВЛЕНИЕ реального
@@ -1790,11 +1810,22 @@ VALUES ($1, $2, $3, $4::jsonb, true, 'auto_statistics', $5, $6)`,
 	return err
 }
 
+func (s *Server) clearStatistics(ctx context.Context, requestID, methodID int64) error {
+	_, err := s.pool.Exec(ctx, `
+DELETE FROM measurement_results WHERE request_id = $1 AND method_id = $2 AND is_statistical_row = true`,
+		requestID, methodID)
+	return err
+}
+
 // handleListAggregated возвращает агрегаты заявки.
 func (s *Server) handleListAggregated(w http.ResponseWriter, r *http.Request) {
 	requestID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid id"})
+		return
+	}
+	if ok, err := s.requireLabRead(r.Context(), currentEmail(r), requestID); err != nil || !ok {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden: not lab member"})
 		return
 	}
 	rows, err := s.pool.Query(r.Context(), `
@@ -1819,8 +1850,8 @@ FROM aggregated_results WHERE request_id = $1 ORDER BY id`, requestID)
 		if len(dataRaw) > 0 && string(dataRaw) != "{}" {
 			_ = json.Unmarshal(dataRaw, &a.ResultData)
 		}
-		a.CreatedAt = ca.Format(time.RFC3339)
-		a.UpdatedAt = ua.Format(time.RFC3339)
+		a.CreatedAt = ca.Format(time.RFC3339Nano)
+		a.UpdatedAt = ua.Format(time.RFC3339Nano)
 		res = append(res, a)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"aggregated": res})
@@ -1847,10 +1878,15 @@ func (s *Server) handleDeleteResultSeries(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid series"})
 		return
 	}
-	var methodID int64
+	req, err := s.loadRequest(r.Context(), requestID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
+		return
+	}
+	methodID := req.MethodID
 	if err := s.pool.QueryRow(r.Context(),
-		`SELECT method_id FROM measurement_results WHERE request_id = $1 AND series_num = $2 AND is_statistical_row = false`,
-		requestID, seriesNum).Scan(&methodID); err != nil {
+		`SELECT method_id FROM measurement_results WHERE request_id = $1 AND method_id = $2 AND series_num = $3 AND is_statistical_row = false`,
+		requestID, methodID, seriesNum).Scan(&methodID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeJSON(w, http.StatusNotFound, map[string]any{"error": "series not found"})
 			return
@@ -1910,11 +1946,15 @@ func (s *Server) handleCalculateSeries(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid series"})
 		return
 	}
-	// найти метод по серии
-	var methodID int64
+	req, err := s.loadRequest(r.Context(), requestID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
+		return
+	}
+	methodID := req.MethodID
 	err = s.pool.QueryRow(r.Context(), `
-SELECT method_id FROM measurement_results WHERE request_id = $1 AND series_num = $2`,
-		requestID, seriesNum).Scan(&methodID)
+SELECT method_id FROM measurement_results WHERE request_id = $1 AND method_id = $2 AND series_num = $3 AND is_statistical_row = false`,
+		requestID, methodID, seriesNum).Scan(&methodID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeJSON(w, http.StatusNotFound, map[string]any{"error": "series not found"})

@@ -717,7 +717,9 @@ paths:
     post:
       tags: [Файлы]
       summary: Загрузить файл к заявке
-      description: Роль editor. Тело — multipart с полем файла и идентификатором заявки.
+      description: |
+        Роль editor. `request_id` обязателен: прикрепить файл можно только к
+        заявке, доступной владельцу или сотруднику её лаборатории.
       requestBody:
         required: true
         content:
@@ -727,13 +729,16 @@ paths:
               properties:
                 file: { type: string, format: binary }
                 request_id: { type: integer, format: int64 }
+              required: [file, request_id]
       responses:
         '200':
           description: Загруженный файл
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/RequestFile' }
+              schema: { $ref: '#/components/schemas/UploadFileResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
 
   /api/lab/file-redirect:
     get:
@@ -1772,6 +1777,14 @@ components:
         file_name: { type: string }
         file_size: { type: integer, format: int64 }
         file_url: { type: string }
+
+    UploadFileResponse:
+      allOf:
+        - $ref: '#/components/schemas/RequestFile'
+        - type: object
+          required: [request_id]
+          properties:
+            request_id: { type: integer, format: int64 }
 
     Request:
       type: object

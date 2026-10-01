@@ -317,6 +317,26 @@ func (s *S3Store) Get(ctx context.Context, key string) ([]byte, error) {
 	return data, nil
 }
 
+// Delete удаляет объект, который не был зарегистрирован в БД после неудачной
+// загрузки. Новый ключ ещё не мог стать доступен пользователю, поэтому
+// компенсирующее удаление не затрагивает существующие файлы заявки.
+func (s *S3Store) Delete(ctx context.Context, key string) error {
+	if err := os.Remove(s.bufferPath(key)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove buffered file: %w", err)
+	}
+	if _, err := s.pool.Exec(ctx, `DELETE FROM pending_uploads WHERE key = $1`, key); err != nil {
+		return fmt.Errorf("remove buffered queue row: %w", err)
+	}
+	rcCtx, cancel := context.WithTimeout(ctx, rcloneTimeout)
+	defer cancel()
+	cmd := s.rcloneArgs(rcCtx, "deletefile", "--log-level", "ERROR", s.remote(key))
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("rclone deletefile: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 // s3Key формирует уникальный ключ для файла заявки.
 func s3Key(fileName string) string {
 	return fmt.Sprintf("lab/%s/main-%s", randomID(), sanitizeKey(fileName))

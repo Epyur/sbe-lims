@@ -283,6 +283,27 @@ func TestApplyRuleToSubjectsMultiple(t *testing.T) {
 	}
 }
 
+func TestRequestMethodMatches(t *testing.T) {
+	tests := []struct {
+		name      string
+		requestID int64
+		submitID  int64
+		want      bool
+	}{
+		{name: "same positive id", requestID: 12, submitID: 12, want: true},
+		{name: "different ids", requestID: 12, submitID: 13, want: false},
+		{name: "missing request method", requestID: 0, submitID: 12, want: false},
+		{name: "missing submitted method", requestID: 12, submitID: 0, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := requestMethodMatches(tt.requestID, tt.submitID); got != tt.want {
+				t.Fatalf("requestMethodMatches(%d, %d) = %t, want %t", tt.requestID, tt.submitID, got, tt.want)
+			}
+		})
+	}
+}
+
 // wantAggregated (2026-08-23) — subject с aggregated-output должен сработать
 // ТОЛЬКО при wantAggregated=true, и не сработать (не найти input, который никогда
 // не появляется в per-series values) при wantAggregated=false — реальный сценарий

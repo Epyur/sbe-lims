@@ -1248,12 +1248,12 @@ func (s *Server) resolvePhotoAttachments(ctx context.Context, cfg *emailIngestCo
 	matched := matchPhotoFields(payload, attachments)
 	out := map[string]string{}
 	for field, att := range matched {
-		url, err := s.uploadFileBytes(ctx, requestID, att.Filename, att.Data, cfg.login)
+		uploaded, err := s.uploadFileBytes(ctx, requestID, att.Filename, att.Data, cfg.login)
 		if err != nil {
 			log.Printf("email ingest: upload photo attachment %q (%s): %v", att.Filename, field, err)
 			continue
 		}
-		out[field] = url
+		out[field] = uploaded.URL
 	}
 	return out
 }

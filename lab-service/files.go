@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // validObjectKey проверяет ключ S3: разрешён только собственный префикс сервиса,
@@ -58,14 +60,31 @@ func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var requestID int64
-	if v := r.FormValue("request_id"); v != "" {
-		if parsed, err := strconv.ParseInt(v, 10, 64); err == nil {
-			requestID = parsed
+	requestID, err := strconv.ParseInt(r.FormValue("request_id"), 10, 64)
+	if err != nil || requestID <= 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "valid request_id is required"})
+		return
+	}
+	req, err := s.loadRequest(r.Context(), requestID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeJSON(w, http.StatusNotFound, map[string]any{"error": "request not found"})
+			return
 		}
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
+		return
+	}
+	canWrite, err := s.requireLabAccess(r.Context(), currentEmail(r), requestID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
+		return
+	}
+	if req.OwnerEmail != currentEmail(r) && !canWrite {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden: cannot attach files to this request"})
+		return
 	}
 
-	url, err := s.uploadFileBytes(r.Context(), requestID, header.Filename, data, currentEmail(r))
+	uploaded, err := s.uploadFileBytes(r.Context(), requestID, header.Filename, data, currentEmail(r))
 	if err != nil {
 		log.Printf("s3 put: %v", err)
 		if errors.Is(err, ErrBufferFull) {
@@ -77,11 +96,19 @@ func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"file_name":  header.Filename,
-		"file_size":  len(data),
-		"file_url":   url,
+		"file_key":   uploaded.Key,
+		"file_name":  uploaded.Name,
+		"file_size":  uploaded.Size,
+		"file_url":   uploaded.URL,
 		"request_id": requestID,
 	})
+}
+
+type uploadedRequestFile struct {
+	Key  string
+	Name string
+	Size int64
+	URL  string
 }
 
 // uploadFileBytes грузит байты в объектное хранилище (тот же S3Store, что
@@ -97,7 +124,7 @@ func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 // сохранённое в values/measurement_results, остаётся рабочим сколько угодно, а не только
 // пока не истёк срок какой-то одной подписанной ссылки.
 func (s *Server) uploadFileBytes(ctx context.Context, requestID int64, filename string,
-	data []byte, uploadedBy string) (string, error) {
+	data []byte, uploadedBy string) (uploadedRequestFile, error) {
 	// Дедуп по (request_id, file_name, file_size) — 2026-08-25, реальный инцидент:
 	// заявка 287/2026 набрала 10 файлов вместо 2 (по 5 копий каждого) из-за ручных
 	// повторных запусков одноразового CLI fetch-mail-photos во время отладки
@@ -111,31 +138,34 @@ func (s *Server) uploadFileBytes(ctx context.Context, requestID int64, filename 
 	// момента заявка ещё не найдена (см. resolvePhotoAttachments pending-путь) —
 	// дедуп не имеет смысла, files ничего не знает про такую заявку.
 	if requestID > 0 {
-		var existingURL string
+		var existing uploadedRequestFile
 		err := s.pool.QueryRow(ctx, `
-SELECT file_url FROM files WHERE request_id = $1 AND file_name = $2 AND file_size = $3
-ORDER BY id LIMIT 1`, requestID, filename, len(data)).Scan(&existingURL)
+SELECT file_key, file_name, file_size, file_url
+FROM files WHERE request_id = $1 AND file_name = $2 AND file_size = $3
+ORDER BY id LIMIT 1`, requestID, filename, len(data)).Scan(
+			&existing.Key, &existing.Name, &existing.Size, &existing.URL)
 		if err == nil {
-			return existingURL, nil
+			return existing, nil
 		}
 	}
 	key := s3Key(filename)
 	size, _, err := s.s3.Put(ctx, key, data)
 	if err != nil {
-		return "", err
+		return uploadedRequestFile{}, err
 	}
 	fileURL := fmt.Sprintf("%s/api/lab/file-redirect?key=%s", publicBaseURL(), url.QueryEscape(key))
 	if requestID > 0 {
-		var exists bool
-		if err := s.pool.QueryRow(ctx,
-			`SELECT EXISTS(SELECT 1 FROM requests WHERE id = $1)`, requestID).Scan(&exists); err == nil && exists {
-			_, _ = s.pool.Exec(ctx, `
+		if _, err := s.pool.Exec(ctx, `
 INSERT INTO files (request_id, file_key, file_name, file_size, file_url, uploaded_by)
 VALUES ($1, $2, $3, $4, $5, $6)`,
-				requestID, key, filename, size, fileURL, uploadedBy)
+			requestID, key, filename, size, fileURL, uploadedBy); err != nil {
+			if deleteErr := s.s3.Delete(ctx, key); deleteErr != nil {
+				log.Printf("file upload cleanup %s after database error: %v", key, deleteErr)
+			}
+			return uploadedRequestFile{}, fmt.Errorf("register uploaded file: %w", err)
 		}
 	}
-	return fileURL, nil
+	return uploadedRequestFile{Key: key, Name: filename, Size: size, URL: fileURL}, nil
 }
 
 // handleFileRedirect — GET /api/lab/file-redirect?key=... — БЕЗ requirePerm (2026-08-24):
