@@ -21,7 +21,9 @@ export interface SbeLimsSettings {
 
 const DEFAULT_SETTINGS: SbeLimsSettings = {
   apiUrl: 'https://epyur.fvds.ru',
-  llmModel: 'gpt-5.6-luna',
+  // Пусто — модель подставит сервер: на общем ключе организации назначенную
+  // администратором, на личном — умолчание провайдера. Список моделей — в настройках.
+  llmModel: '',
 };
 
 export default class SbeLimsPlugin extends Plugin {
@@ -52,9 +54,9 @@ export default class SbeLimsPlugin extends Plugin {
 
     if (this.settings.lastAnnouncedVersion !== this.manifest.version) {
       void this.announceUpdateSafely(
-        'Исправлена правка результатов: сохранение серии больше не теряет ' +
-        'информацию об испытателе и оборудовании. Также сброс фильтров теперь ' +
-        'действительно возвращает полный список заявок.',
+        'Модель, на которой работает помощник (подбор формул и разбор стандарта), '
+        + 'теперь выбирается из списка доступных — вписывать название вручную больше '
+        + 'не нужно. Если модель не выбрана, используется общая.',
       );
     }
   }

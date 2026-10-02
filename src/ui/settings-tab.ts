@@ -2,6 +2,7 @@ import { App, Notice, PluginSettingTab, Setting } from 'obsidian';
 import type SbeLimsPlugin from '../main';
 import { getService } from '../../../sbe-core/src/bridge';
 import { errorMessage } from '../../../sbe-core/src/utils/errors';
+import type { SbeLlmModel } from '../../../sbe-core/src/types';
 
 /** Ключи env почтового приёма lab-service, управляемые через ЦУП (auth-service
  * /auth/apps/env, белый список — на сервере, env_admin.go). Пароль сюда НЕ входит —
@@ -41,16 +42,14 @@ export class LimsSettingsTab extends PluginSettingTab {
           await this.plugin.saveSettings();
         }));
 
-    new Setting(containerEl)
+    const modelSetting = new Setting(containerEl)
       .setName('Модель LLM')
-      .setDesc('Модель для ИИ-помощника формул и черновика конфигурации из стандарта (используется sbe-llm). Пусто — модель по умолчанию.')
-      .addText(text => text
-        .setPlaceholder('gpt-5.6-luna')
-        .setValue(this.plugin.settings.llmModel)
-        .onChange(async (value) => {
-          this.plugin.settings.llmModel = value.trim();
-          await this.plugin.saveSettings();
-        }));
+      .setDesc('Проверяем список моделей…');
+    void this.renderModelSetting(
+      modelSetting,
+      'Модель для ИИ-помощника формул и черновика конфигурации из стандарта (используется sbe-llm). '
+      + 'На общем ключе организации модель назначает администратор — выбор здесь не применится.',
+    );
 
     new Setting(containerEl)
       .setHeading()
@@ -67,6 +66,43 @@ export class LimsSettingsTab extends PluginSettingTab {
     const mailDiv = containerEl.createDiv({ cls: 'tn-lims-meta' });
     mailDiv.setText('Загрузка…');
     void this.renderMailSettings(mailDiv);
+  }
+
+  /** Выпадающий список моделей из LLM-центра (как в «Базе знаний»). Пусто —
+   *  модель подставит сервер; на общем ключе он отдаёт ровно одну назначенную
+   *  модель, и она проставляется значением по умолчанию. */
+  private async renderModelSetting(setting: Setting, description: string): Promise<void> {
+    let models: SbeLlmModel[] = [];
+    try {
+      const llm = await getService('sbe-llm');
+      models = await llm.listModels();
+    } catch (e: unknown) {
+      console.warn('ЛИМС: список моделей недоступен:', errorMessage(e));
+    }
+    if (!setting.settingEl.isConnected) return;
+    let value = this.plugin.settings.llmModel;
+    if (value === '' && models.length === 1) {
+      value = models[0].id;
+      this.plugin.settings.llmModel = value;
+      await this.plugin.saveSettings();
+    }
+    setting.setDesc(description);
+    setting.addDropdown((dropdown) => {
+      dropdown.addOption('', 'Как решит сервер');
+      for (const model of models) {
+        dropdown.addOption(model.id, model.is_old_model ? `${model.id} (устаревшая)` : model.id);
+      }
+      // Выбранная ранее модель, исчезнувшая из списка, не должна молча
+      // превращаться в «как решит сервер» — показываем её как есть.
+      if (value !== '' && !models.some((m) => m.id === value)) {
+        dropdown.addOption(value, `${value} (нет в списке)`);
+      }
+      dropdown.setValue(value);
+      dropdown.onChange(async (v) => {
+        this.plugin.settings.llmModel = v;
+        await this.plugin.saveSettings();
+      });
+    });
   }
 
   /** Учётка почты (IMAP), с которой lab-service принимает письма-результаты —
