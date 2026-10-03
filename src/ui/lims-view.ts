@@ -40,7 +40,7 @@ import { LIMS_HELP } from './help';
 import { errorMessage } from '../../../sbe-core/src/utils/errors';
 import { downloadBase64File } from '../../../sbe-core/src/utils/download';
 import { sortRequestsByPriority, sortRequestsForList } from '../../../sbe-core/src/utils/request-sort';
-import type { RequestListMode } from '../../../sbe-core/src/utils/request-sort';
+import type { RequestListMode, RequestSortKey } from '../../../sbe-core/src/utils/request-sort';
 import { sanitizeAttributesWithRename } from '../services/llm-assist.service';
 import type { ExistingAttributeSummary } from '../services/llm-assist.service';
 import { extractStandardText } from '../services/rtf-to-text';
@@ -965,7 +965,8 @@ export class LimsView extends ItemView {
       // и с реальным порядком поступления совпадает не всегда. Статус в панели
       // фильтров сильнее режима страницы: человек выбрал его руками.
       requests = sortRequestsForList(
-        requests, this.filterStatus === 'all' ? this.currentRequestsMode : this.filterStatus);
+        requests, this.filterStatus === 'all' ? this.currentRequestsMode : this.filterStatus,
+        this.currentRequestSort());
       listEl.empty();
       for (const r of requests) {
         const card = listEl.createDiv({ cls: 'tn-lims-req-card' });
@@ -990,6 +991,21 @@ export class LimsView extends ItemView {
       listEl.empty();
       listEl.createDiv({ cls: 'tn-lims-error' }).setText(`Ошибка: ${errorMessage(e)}`);
     }
+  }
+
+  /** Выбранный порядок списка заявок (2026-10-03, прямой запрос пользователя):
+   * хранится в настройках плагина, переживает перезапуск. 'default' — прежнее
+   * правило по фильтру статуса; остальные — явное поле+направление. */
+  private currentRequestSort(): RequestSortKey {
+    const v = this.plugin.settings.requestSort;
+    return v === 'created-asc' || v === 'created-desc'
+      || v === 'completed-asc' || v === 'completed-desc' ? v : 'default';
+  }
+
+  private async setRequestSort(key: RequestSortKey): Promise<void> {
+    this.plugin.settings.requestSort = key;
+    await this.plugin.saveSettings();
+    await this.renderRequests(this.currentRequestsFilter, this.currentRequestsMode);
   }
 
   /** Панель фильтров списка заявок (2026-09-04, по образцу sbe-requests
@@ -1048,6 +1064,19 @@ export class LimsView extends ItemView {
     statusSelect.addEventListener('change', () => {
       this.filterStatus = statusSelect.value as 'all' | 'active' | 'completed';
       void this.renderRequests(this.currentRequestsFilter, this.currentRequestsMode);
+    });
+
+    const sortGroup = filterBar.createDiv({ cls: 'tn-lims-filter-group' });
+    sortGroup.createEl('label', { text: 'Сортировка', cls: 'tn-lims-filter-lbl' });
+    const sortSelect = sortGroup.createEl('select', { cls: 'tn-lims-select' });
+    sortSelect.createEl('option', { value: 'default', text: '— По умолчанию —' });
+    sortSelect.createEl('option', { value: 'created-desc', text: 'Дата создания: сначала новые' });
+    sortSelect.createEl('option', { value: 'created-asc', text: 'Дата создания: сначала старые' });
+    sortSelect.createEl('option', { value: 'completed-desc', text: 'Дата завершения: сначала новые' });
+    sortSelect.createEl('option', { value: 'completed-asc', text: 'Дата завершения: сначала старые' });
+    sortSelect.value = this.currentRequestSort();
+    sortSelect.addEventListener('change', () => {
+      void this.setRequestSort(sortSelect.value as RequestSortKey);
     });
 
     const priorityGroup = filterBar.createDiv({ cls: 'tn-lims-filter-group' });
@@ -1453,7 +1482,14 @@ export class LimsView extends ItemView {
     this.bodyEl.empty();
 
     const back = this.bodyEl.createEl('button', { text: '← Назад', cls: 'tn-btn tn-btn-ghost' });
-    back.addEventListener('click', () => void this.renderRequests(this.currentRequestsFilter, this.currentRequestsMode));
+    // Возврат — туда, откуда открыли карточку (2026-10-03, исправление): this.key
+    // при открытии карточки не меняется, поэтому он и есть источник. Раньше
+    // «Назад» всегда звал renderRequests, и из «Очереди лаборатории» человек
+    // попадал в «Все заявки», а подсветка сайдбара оставалась на очереди.
+    back.addEventListener('click', () => {
+      if (this.key === 'queue') void this.renderQueueBoard();
+      else void this.renderRequests(this.currentRequestsFilter, this.currentRequestsMode);
+    });
 
     const extIdSuffix = req.external_id ? ` (${req.external_id})` : '';
     this.bodyEl.createEl('h3', { text: `№ ${fullRequestNumber(req)}${extIdSuffix} — ${req.title || 'без названия'}` });
