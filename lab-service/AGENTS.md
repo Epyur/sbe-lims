@@ -1333,6 +1333,12 @@ docker compose exec lab wget -qO- http://localhost:3000/api/lab/health   # вн�
   раньше были жёстко `id="0"` у ВСЕХ изображений (дубликаты id — тоже повод для
   Word «восстановить документ»); теперь id уникален (`registerImageBytes`
   передаёт порядковый номер).
+- `protocol.go`: `registerImageBytes` даёт медиа отдельный префикс `reportimgN.*`
+  вместо `imageN.*` — у бланка в `word/media` свои `image1.png`/`image2.png`
+  (логотип/водяной знак, ссылки из header/footer); имя `imageN.*` при двух
+  PNG-графиках пересеклось бы с ними и затёрло оформление бланка (найдено при
+  разборе скачанного отчёта: у нас были `.jpg` + один `.png`, потому не
+  проявилось).
 - Регресс-тест `TestStaticTableDocxHasTblGrid`. `gofmt`/`go build`/`go test` —
   чисто. Версия плагина не поднимается (правка чисто бэковая). Задеплоено.
 

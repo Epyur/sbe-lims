@@ -987,8 +987,12 @@ func (reg *docxPhotoRegistry) registerImageBytes(data []byte, ext, contentType s
 	idx := len(reg.images) + 1
 	relID := fmt.Sprintf("rIdPhoto%d", idx)
 	img := docxImage{
-		relID:       relID,
-		mediaName:   fmt.Sprintf("image%d.%s", idx, ext),
+		relID: relID,
+		// Префикс "reportimg", а НЕ "image": у бланка организации в word/media
+		// свои image1.png/image2.png (логотип/водяной знак, ссылки из header/
+		// footer). Имя imageN.* пересеклось бы с ними и затёрло оформление
+		// бланка (2026-10-16 — найдено при разборе скачанного отчёта).
+		mediaName:   fmt.Sprintf("reportimg%d.%s", idx, ext),
 		contentType: contentType,
 		data:        data,
 	}
