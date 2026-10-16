@@ -998,8 +998,17 @@ func (reg *docxPhotoRegistry) registerImageBytes(data []byte, ext, contentType s
 	}
 	reg.images = append(reg.images, img)
 	cx, cy := docxImageExtent(data)
-	return docxDrawingXML(relID, idx, cx, cy)
+	// docxDrawingIDBase — id рисунков (wp:docPr/pic:cNvPr) в документе должны быть
+	// УНИКАЛЬНЫ внутри всего документа, включая шапку/футер. Бланк уже занимает
+	// id 1..25 (логотип/водяной знак в header/footer) — с прежним счётом «с 1»
+	// наши id совпадали с бланковыми, и Word объявлял документ повреждённым
+	// (2026-10-16: бланк + несколько картинок = ошибка, без бланка — всё
+	// открывалось). Отступ 1000 заведомо выше и не пересекается.
+	return docxDrawingXML(relID, docxDrawingIDBase+idx, cx, cy)
 }
+
+// docxDrawingIDBase — см. комментарий в registerImageBytes.
+const docxDrawingIDBase = 1000
 
 // fileRedirectKey достаёт S3-ключ из ссылки вида ".../api/lab/file-redirect?key=..." —
 // та же ссылка, что хранится в values/measurement_results (uploadFileBytes, files.go).
