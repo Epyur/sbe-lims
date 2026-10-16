@@ -824,6 +824,38 @@ export class LimsSyncService {
 
   // ---- Хелперы ----
 
+  /** ИИ-отчёт по испытанию (DOCX на бланке) — base64 для скачивания в вольт.
+   * Бинарный ответ, поэтому requestUrl напрямую (обёртка request() отдаёт только
+   * .text). Если отчёт ещё не собран — сервер собирает его на месте. */
+  async getReport(requestId: number): Promise<string> {
+    const token = await this.getToken();
+    const res = await requestUrl({
+      url: `${this.baseUrl}/api/lab/requests/${requestId}/report.docx`,
+      method: 'GET',
+      headers: { Authorization: `Bearer ${token}` },
+      throw: false,
+    });
+    if (res.status >= 400) throw new Error(`Сервер вернул ${res.status} при формировании отчёта`);
+    return arrayBufferToBase64(res.arrayBuffer);
+  }
+
+  /** Пересобрать отчёт по испытанию (после правок результатов). */
+  async regenerateReport(requestId: number): Promise<{ ok: boolean; has_ai: boolean }> {
+    const token = await this.getToken();
+    const res = await this.request({
+      url: `${this.baseUrl}/api/lab/requests/${requestId}/report`,
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    this.assertOk(res);
+    try {
+      return JSON.parse(res.text) as { ok: boolean; has_ai: boolean };
+    } catch (e: unknown) {
+      console.warn('ЛИМС: не JSON в ответе report:', errorMessage(e));
+      throw new Error('Сервер вернул не JSON при пересборке отчёта');
+    }
+  }
+
   private async createEntity(path: string, body: Record<string, unknown>): Promise<number> {
     const token = await this.getToken();
     const res = await this.request({

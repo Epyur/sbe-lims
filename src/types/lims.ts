@@ -552,6 +552,9 @@ export interface LabMethod {
   /** «Параметры калибровки» (2026-08-26) — см. CalibrationAttribute. */
   calibration_attributes: CalibrationAttribute[];
   calibration_operator_form: MethodOperatorForm;
+  /** Инструкция ИИ по составлению отчёта по испытанию (2026-10-16). Пусто —
+   * отчёт собирается без ИИ-разделов (протокол + приложение со статистикой). */
+  report_instruction: string;
   created_at: string;
   updated_at: string;
 }
@@ -742,6 +745,8 @@ export interface MethodConfig {
   /** «Параметры калибровки» (2026-08-26) — см. CalibrationAttribute. */
   calibration_attributes: CalibrationAttribute[];
   calibration_operator_form: MethodOperatorForm;
+  /** Инструкция ИИ по составлению отчёта по испытанию (2026-10-16). */
+  report_instruction: string;
 }
 
 /** Протокол / выписка / краткий вид заявки — HTML+DOCX, вид задаёт kind

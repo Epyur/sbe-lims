@@ -1729,6 +1729,22 @@ export class LimsView extends ItemView {
         }
       });
     }
+    // ИИ-отчёт по испытанию (2026-10-16) — DOCX на бланке организации: протокол
+    // + аналитические разделы по инструкции метода + приложение со статистикой
+    // по аналогичным объектам. Собирается на сервере (при завершении заявки —
+    // автоматически и уходит заказчику; здесь — по запросу).
+    const reportBtn = protoRow.createEl('button', { text: '📄 ИИ-отчёт', cls: 'tn-btn tn-btn-primary' });
+    reportBtn.addEventListener('click', () => {
+      void (async () => {
+        try {
+          new Notice('Формирую отчёт…');
+          const b64 = await this.plugin.syncService.getReport(req.id);
+          this.downloadDocx(b64, `report_${fullRequestNumber(req).replace(/\//g, '-')}.docx`);
+        } catch (e: unknown) {
+          new Notice(`Ошибка: ${errorMessage(e)}`);
+        }
+      })();
+    });
   }
 
   /** Список серий результатов заявки (2026-08-28, WP3a) — просмотр + правка + удаление.
@@ -2321,6 +2337,23 @@ export class LimsView extends ItemView {
     form.createDiv({ cls: 'tn-lims-meta' }).setText('Лаборатории (метод может принадлежать нескольким):');
     const getLabIDs = this.renderLabCheckboxes(form, method?.lab_ids || []);
 
+    // ---- Инструкция ИИ по отчёту (2026-10-16) ----
+    // По ней ИИ пишет аналитические разделы отчёта по испытанию; сам отчёт —
+    // протокол + эти разделы + приложение со статистикой по аналогичным
+    // объектам — формируется автоматически при завершении заявки, вкладывается
+    // в письмо заказчику и доступен кнопкой «📄 ИИ-отчёт» в карточке заявки.
+    // Пусто — отчёт собирается без ИИ-разделов.
+    const reportBody = this.renderCollapsibleSection(form, 'Инструкция по отчёту (для ИИ)');
+    reportBody.createDiv({ cls: 'tn-lims-meta' }).setText(
+      'Опишите, что и как ИИ должен отразить в отчёте по испытанию (структура, разделы, ' +
+      'на что обратить внимание). Отчёт формируется автоматически при завершении заявки и ' +
+      'вкладывается в письмо заказчику; в карточке заявки доступен кнопкой «📄 ИИ-отчёт». ' +
+      'Пусто — отчёт без ИИ-разделов (протокол + приложение со статистикой).',
+    );
+    const reportInstruction = reportBody.createEl('textarea', { cls: 'tn-lims-input' });
+    reportInstruction.rows = 6;
+    reportInstruction.value = method?.report_instruction || '';
+
     // ---- Показатели метода (determinable_indicators) — порядок = ранг ----
     const indicatorsBody = this.renderCollapsibleSection(form, 'Показатели метода');
     indicatorsBody.createDiv({ cls: 'tn-lims-meta' }).setText(
@@ -2900,6 +2933,7 @@ export class LimsView extends ItemView {
         calibration_operator_form: {
           fields: calibrationOperatorFormFields.filter(f => calibrationAttrs.some(a => a.id === f.attribute_id)),
         },
+        report_instruction: reportInstruction.value.trim(),
         determinable_indicators: determinableIndicators.filter(Boolean),
       };
     };
@@ -5487,6 +5521,7 @@ export class LimsView extends ItemView {
       calibration_attributes: Array.isArray(m?.calibration_attributes) ? m.calibration_attributes : [],
       calibration_operator_form: m?.calibration_operator_form && Array.isArray(m.calibration_operator_form.fields)
         ? m.calibration_operator_form : { fields: [] },
+      report_instruction: m?.report_instruction || '',
     };
   }
 
