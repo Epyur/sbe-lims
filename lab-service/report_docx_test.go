@@ -61,6 +61,21 @@ func TestDeclaredExtensions(t *testing.T) {
 	}
 }
 
+func TestStaticTableDocxHasTblGrid(t *testing.T) {
+	ctx := &placeholderCtx{}
+	rows := [][][]InlineNode{
+		{{textNode("A")}, {textNode("B")}},
+		{{textNode("1")}, {textNode("2")}},
+	}
+	out := renderStaticTableDocx(ctx, rows)
+	if !strings.Contains(out, "<w:tblGrid><w:gridCol/><w:gridCol/></w:tblGrid>") {
+		t.Fatalf("tblGrid missing/wrong (Word needs it — CT_Tbl): %s", out)
+	}
+	if strings.Index(out, "<w:tblGrid>") > strings.Index(out, "<w:tr>") {
+		t.Fatal("tblGrid must come after tblPr and before rows")
+	}
+}
+
 func TestReportDocxBuildsValidPackage(t *testing.T) {
 	ctx := &placeholderCtx{}
 	p := &protocolData{

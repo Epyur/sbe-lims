@@ -810,6 +810,15 @@ func docxCenteredParagraph(runProps, text string) string {
 func renderTableDocx(ctx *placeholderCtx, columns []TableColumn) string {
 	var b strings.Builder
 	b.WriteString(`<w:tbl><w:tblPr><w:tblBorders><w:top w:val="single"/><w:left w:val="single"/><w:bottom w:val="single"/><w:right w:val="single"/><w:insideH w:val="single"/><w:insideV w:val="single"/></w:tblBorders></w:tblPr>`)
+	// <w:tblGrid> обязателен в CT_Tbl (ECMA-376): без него Word считает
+	// документ повреждённым, а таблицы — «сломанными» (живая жалоба 2026-10-16
+	// по отчёту: «таблицы все сломанные, ошибка при открытии»). Одна <w:gridCol/>
+	// на столбец.
+	b.WriteString(`<w:tblGrid>`)
+	for range columns {
+		b.WriteString(`<w:gridCol/>`)
+	}
+	b.WriteString(`</w:tblGrid>`)
 	b.WriteString(`<w:tr>`)
 	for _, c := range columns {
 		fmt.Fprintf(&b, `<w:tc>%s</w:tc>`,
@@ -873,6 +882,19 @@ func docxAlignPPr(align string) string {
 func renderStaticTableDocx(ctx *placeholderCtx, rows [][][]InlineNode) string {
 	var b strings.Builder
 	b.WriteString(`<w:tbl><w:tblPr><w:tblBorders><w:top w:val="single"/><w:left w:val="single"/><w:bottom w:val="single"/><w:right w:val="single"/><w:insideH w:val="single"/><w:insideV w:val="single"/></w:tblBorders></w:tblPr>`)
+	// <w:tblGrid> обязателен в CT_Tbl (ECMA-376) — см. тот же комментарий в
+	// renderTableDocx. Число столбцов — максимум ячеек в строке.
+	cols := 0
+	for _, row := range rows {
+		if len(row) > cols {
+			cols = len(row)
+		}
+	}
+	b.WriteString(`<w:tblGrid>`)
+	for i := 0; i < cols; i++ {
+		b.WriteString(`<w:gridCol/>`)
+	}
+	b.WriteString(`</w:tblGrid>`)
 	for _, row := range rows {
 		b.WriteString(`<w:tr>`)
 		for _, cell := range row {
@@ -972,7 +994,7 @@ func (reg *docxPhotoRegistry) registerImageBytes(data []byte, ext, contentType s
 	}
 	reg.images = append(reg.images, img)
 	cx, cy := docxImageExtent(data)
-	return docxDrawingXML(relID, cx, cy)
+	return docxDrawingXML(relID, idx, cx, cy)
 }
 
 // fileRedirectKey достаёт S3-ключ из ссылки вида ".../api/lab/file-redirect?key=..." —
@@ -1012,21 +1034,21 @@ func docxImageExtent(data []byte) (cx, cy int64) {
 // элементах (не в корневом <w:document>, чтобы не трогать остальной, уже стабильный,
 // generator) — валидно для OOXML, в отличие от HTML там разрешено объявлять namespace
 // на любом элементе, не только на корне.
-func docxDrawingXML(relID string, cx, cy int64) string {
+func docxDrawingXML(relID string, picID int, cx, cy int64) string {
 	return fmt.Sprintf(
 		`<w:r><w:drawing>`+
 			`<wp:inline distT="0" distB="0" distL="0" distR="0" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing">`+
 			`<wp:extent cx="%d" cy="%d"/>`+
-			`<wp:docPr id="0" name="Photo"/>`+
+			`<wp:docPr id="%d" name="Photo%d"/>`+
 			`<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">`+
 			`<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">`+
 			`<pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">`+
-			`<pic:nvPicPr><pic:cNvPr id="0" name="Photo"/><pic:cNvPicPr/></pic:nvPicPr>`+
+			`<pic:nvPicPr><pic:cNvPr id="%d" name="Photo%d"/><pic:cNvPicPr/></pic:nvPicPr>`+
 			`<pic:blipFill><a:blip xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="%s"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>`+
 			`<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="%d" cy="%d"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>`+
 			`</pic:pic></a:graphicData></a:graphic>`+
 			`</wp:inline></w:drawing></w:r>`,
-		cx, cy, relID, cx, cy)
+		cx, cy, picID, picID, picID, picID, relID, cx, cy)
 }
 
 // docxImagePlaceholder — раньше график секции в DOCX рисовался только текстовой
