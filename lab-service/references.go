@@ -310,8 +310,11 @@ type Method struct {
 	// калибровки»: см. results.go MethodConfig за подробным комментарием.
 	CalibrationAttributes   []map[string]any   `json:"calibration_attributes"`
 	CalibrationOperatorForm MethodOperatorForm `json:"calibration_operator_form"`
-	CreatedAt               string             `json:"created_at"`
-	UpdatedAt               string             `json:"updated_at"`
+	// ReportInstruction (2026-10-16) — инструкция ИИ по составлению отчёта по
+	// испытанию (аналитические разделы). Пусто — отчёт без ИИ-разделов.
+	ReportInstruction string `json:"report_instruction"`
+	CreatedAt         string `json:"created_at"`
+	UpdatedAt         string `json:"updated_at"`
 }
 
 // unmarshalJSONBArray разбирает JSONB-массив объектов (formulas/classification/
@@ -392,7 +395,7 @@ func (s *Server) handleListMethods(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.pool.Query(r.Context(), `
 SELECT id, code, name, description, determinable_indicators, formulas, classification,
 	chart_configs, input_parameters, presentation, operator_form,
-	calibration_attributes, calibration_operator_form, created_at, updated_at FROM methods ORDER BY id`)
+	calibration_attributes, calibration_operator_form, report_instruction, created_at, updated_at FROM methods ORDER BY id`)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
 		return
@@ -406,7 +409,7 @@ SELECT id, code, name, description, determinable_indicators, formulas, classific
 		var indsRaw, formulasRaw, classRaw, chartsRaw, inputsRaw, presRaw, opFormRaw, calibAttrsRaw, calibFormRaw []byte
 		if err := rows.Scan(&m.ID, &m.Code, &m.Name, &m.Description, &indsRaw,
 			&formulasRaw, &classRaw, &chartsRaw, &inputsRaw, &presRaw, &opFormRaw,
-			&calibAttrsRaw, &calibFormRaw, &ca, &ua); err != nil {
+			&calibAttrsRaw, &calibFormRaw, &m.ReportInstruction, &ca, &ua); err != nil {
 			log.Printf("methods scan: %v", err)
 			continue
 		}

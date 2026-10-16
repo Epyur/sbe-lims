@@ -61,6 +61,8 @@ SBE-плагин «ЛИМС» для сотрудников лаборатори
 |---|---|---|---|
 | GET | `/requests/{id}/chart/{cfg_id}` | viewer | PNG (рендер по `methods.chart_configs`), используется в `<img src>` |
 | POST | `/requests/{id}/protocol?template=ui\|excerpt\|protocol&format=html\|full` | editor+ | `{html, docx_base64, generated_at}` (`template` по умолчанию `protocol`; `format=html`, 2026-08-23 — не тратить время на DOCX, `docx_base64` пустой) |
+| GET | `/requests/{id}/report.docx` | viewer (лабораторное чтение) | **ИИ-отчёт на бланке (2026-10-16)**: протокол + ИИ-разделы по `methods.report_instruction` + приложение со статистикой по аналогичным объектам (тот же ЕКН + метод). Если отчёта ещё нет — собирается на месте; иначе отдаётся сохранённый. `application/vnd...wordprocessingml.document` |
+| POST | `/requests/{id}/report` | editor+ | пересобрать отчёт заново → `{ok, has_ai}` (`has_ai=false` — ИИ-разделы не получены, отчёт без них). Автоматически собирается при завершении заявки и вкладывается в письмо заказчику |
 | GET | `/dashboard?period=week\|month\|quarter\|year` | viewer | `{by_status, by_method:[{method_id,count}], total, completed_in_period, period}` — ⚠️ **HЕ используется плагином** (дашборд вынесен, 2026-08-18), эндпоинт оставлен на сервере |
 
 ### Общие (все плагины lab-service)

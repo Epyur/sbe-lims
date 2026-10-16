@@ -521,6 +521,28 @@
   pointer-events: none;
 }
 
+/* --- ���������������� ��������� (sbe-core/src/sources/) ---
+   ����� ���� ������ 007 � ���������: ����� ����� ������, ������ ����� ������.
+   ������ tn-sources-*, ����� �� �������� ��� � ������ �������. */
+.tn-sources-head { margin-bottom: 12px; }
+.tn-sources-hint { color: var(--tn-muted); font-size: 13px; line-height: 1.45; margin: 4px 0; }
+.tn-sources-path { font-weight: 600; margin-bottom: 4px; word-break: break-all; }
+.tn-sources-tabs { display: flex; gap: 8px; margin-bottom: 10px; }
+.tn-sources-tabs .tn-btn.active { border-color: var(--tn-brand); color: var(--tn-brand); }
+.tn-sources-tree { max-height: 320px; overflow: auto; border: 1px solid var(--tn-border); border-radius: 8px; padding: 6px; margin-bottom: 10px; }
+.tn-sources-node { display: block; }
+.tn-sources-row { display: flex; align-items: center; gap: 4px; }
+.tn-sources-toggle { min-width: 18px; padding: 2px 4px; }
+.tn-sources-pick { text-align: left; }
+.tn-sources-children.hidden { display: none; }
+.tn-sources-actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+.tn-sources-input { width: 100%; }
+.tn-sources-list { margin-top: 8px; max-height: 320px; overflow: auto; }
+.tn-sources-file { display: flex; align-items: center; gap: 8px; padding: 6px 4px; border-bottom: 1px solid var(--tn-border); }
+.tn-sources-file-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tn-sources-file-meta { color: var(--tn-muted); font-size: 12px; white-space: nowrap; }
+.tn-sources-upload { display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
+
 /* Классы вьюхи ЛИМС (tn-lims-*) на семантических токенах дизайн-системы SBE. */
 
 .tn-lims-container {

@@ -86,7 +86,7 @@ FROM labs ORDER BY id`)
 	rows, err = s.pool.Query(r.Context(), `
 SELECT id, code, name, description, determinable_indicators, formulas, classification,
 	chart_configs, input_parameters, presentation, operator_form,
-	calibration_attributes, calibration_operator_form, created_at, updated_at FROM methods ORDER BY id`)
+	calibration_attributes, calibration_operator_form, report_instruction, created_at, updated_at FROM methods ORDER BY id`)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
 		return
@@ -97,7 +97,7 @@ SELECT id, code, name, description, determinable_indicators, formulas, classific
 		var indsRaw, formulasRaw, classRaw, chartsRaw, inputsRaw, presRaw, opFormRaw, calibAttrsRaw, calibFormRaw []byte
 		if err := rows.Scan(&m.ID, &m.Code, &m.Name, &m.Description, &indsRaw,
 			&formulasRaw, &classRaw, &chartsRaw, &inputsRaw, &presRaw, &opFormRaw,
-			&calibAttrsRaw, &calibFormRaw, &ca, &ua); err != nil {
+			&calibAttrsRaw, &calibFormRaw, &m.ReportInstruction, &ca, &ua); err != nil {
 			log.Printf("pull methods scan: %v", err)
 			continue
 		}

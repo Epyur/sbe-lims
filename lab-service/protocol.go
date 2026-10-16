@@ -952,6 +952,16 @@ func (reg *docxPhotoRegistry) register(rawURL string) string {
 	if strings.HasSuffix(strings.ToLower(key), ".png") {
 		ext, contentType = "png", "image/png"
 	}
+	return reg.registerImageBytes(data, ext, contentType)
+}
+
+// registerImageBytes — регистрирует уже готовые байты изображения (2026-10-16,
+// для графиков, отрендеренных сервером, — см. renderBlockChartDocx) и отдаёт
+// <w:drawing> XML. "" — если байты пусты/регистр nil.
+func (reg *docxPhotoRegistry) registerImageBytes(data []byte, ext, contentType string) string {
+	if reg == nil || len(data) == 0 {
+		return ""
+	}
 	idx := len(reg.images) + 1
 	relID := fmt.Sprintf("rIdPhoto%d", idx)
 	img := docxImage{
@@ -1019,10 +1029,12 @@ func docxDrawingXML(relID string, cx, cy int64) string {
 		cx, cy, relID, cx, cy)
 }
 
-// DOCX-writer раньше не встраивал изображения вовсе (нет media-частей/relationships) —
-// график секции по-прежнему только текстовой пометкой (не запрошено — фото, не графики,
-// см. AGENTS.md "фото в протоколе", 2026-08-24); фото внутри таблиц/инлайн — теперь
-// реальные <w:drawing>, см. docxPhotoRegistry.
+// docxImagePlaceholder — раньше график секции в DOCX рисовался только текстовой
+// пометкой «см. HTML-версию» (фото, не графики, см. AGENTS.md «фото в протоколе»,
+// 2026-08-24). С 2026-10-16 (отчёт на бланке, требование «с графиками») график
+// рендерится тем же renderChartConfigPNG, что HTML-версия, и встраивается как
+// изображение через docxPhotoRegistry (общий на документ) — если картинка не
+// получилась, остаётся одна текстовая пометка, документ не рвётся.
 func renderBlockChartDocx(doc *strings.Builder, m protocolMethod, chartID string) {
 	if chartID == "" {
 		return
@@ -1035,8 +1047,42 @@ func renderBlockChartDocx(doc *strings.Builder, m protocolMethod, chartID string
 	if title == "" {
 		title, _ = chartCfg["id"].(string)
 	}
+	var reg *docxPhotoRegistry
+	if m.Ctx != nil {
+		reg = m.Ctx.photoRegistry
+	}
+	if reg != nil {
+		if png, err := renderChartConfigPNG(chartCfg, seriesValuesRowsFromCtx(m.Ctx)); err == nil && png != nil {
+			if drawing := reg.registerImageBytes(png, "png", "image/png"); drawing != "" {
+				if title != "" {
+					fmt.Fprintf(doc, `<w:p><w:r><w:rPr><w:i/></w:rPr><w:t>%s</w:t></w:r></w:p>`, xmlEscape(title))
+				}
+				fmt.Fprintf(doc, `<w:p>%s</w:p>`, drawing)
+				return
+			}
+		}
+	}
 	fmt.Fprintf(doc, `<w:p><w:r><w:rPr><w:i/></w:rPr><w:t>%s</w:t></w:r></w:p>`,
 		xmlEscape(fmt.Sprintf("[График: %s — см. HTML-версию]", title)))
+}
+
+// buildDocxBodyInner рендерит ТОЛЬКО содержимое тела документа (без
+// <w:document>/<w:body>/<w:sectPr>) — вынесено из protocolDocx (2026-10-16),
+// чтобы обычный протокол и отчёт на бланке (reportDocx) использовали один и
+// тот же рендер узлов/таблиц/графиков/фото. Регистр фото должен быть назначен
+// в Ctx.photoRegistry ДО вызова (см. protocolDocx/reportDocx).
+func buildDocxBodyInner(p *protocolData) string {
+	var doc strings.Builder
+	for _, m := range p.Methods {
+		for _, blk := range m.Blocks {
+			m.Ctx.currentBlockID = blk.ID
+			for _, node := range blk.Content {
+				doc.WriteString(renderNodeDocx(m.Ctx, node))
+			}
+			renderBlockChartDocx(&doc, m, blk.ChartID)
+		}
+	}
+	return doc.String()
 }
 
 func (s *Server) protocolDocx(ctx context.Context, p *protocolData, kind string) ([]byte, error) {
@@ -1055,15 +1101,7 @@ func (s *Server) protocolDocx(ctx context.Context, p *protocolData, kind string)
 	doc.WriteString(`<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">`)
 	doc.WriteString(`<w:body>`)
 	// Жёсткий заголовок убран (2026-08-27) — см. тот же комментарий в protocolHTML.
-	for _, m := range p.Methods {
-		for _, blk := range m.Blocks {
-			m.Ctx.currentBlockID = blk.ID
-			for _, node := range blk.Content {
-				doc.WriteString(renderNodeDocx(m.Ctx, node))
-			}
-			renderBlockChartDocx(&doc, m, blk.ChartID)
-		}
-	}
+	doc.WriteString(buildDocxBodyInner(p))
 	doc.WriteString(`<w:sectPr/></w:body></w:document>`)
 
 	var buf bytes.Buffer

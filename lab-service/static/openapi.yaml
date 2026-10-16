@@ -1486,6 +1486,43 @@ paths:
                 properties:
                   docx_base64: { type: string }
 
+  /api/lab/requests/{id}/report.docx:
+    get:
+      tags: [Отчёты]
+      summary: Отчёт по испытанию (DOCX на бланке)
+      description: |
+        Роль viewer (лабораторный доступ). ИИ-отчёт на бланке организации:
+        протокол + аналитические разделы + приложение со статистикой по
+        аналогичным объектам. Если отчёт ещё не собран — собирается на месте.
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        '200':
+          description: Word-документ отчёта
+          content:
+            application/vnd.openxmlformats-officedocument.wordprocessingml.document:
+              schema: { type: string, format: binary }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/lab/requests/{id}/report:
+    post:
+      tags: [Отчёты]
+      summary: Пересобрать отчёт по испытанию
+      description: Роль editor+ (запись результатов). Полная пересборка отчёта, включая ИИ-разделы.
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        '200':
+          description: Результат пересборки
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  has_ai:
+                    type: boolean
+                    description: Удалось ли получить ИИ-разделы (иначе отчёт без них).
+        '403': { $ref: '#/components/responses/Forbidden' }
+
   /api/lab/requests/{id}/export.xlsx:
     get:
       tags: [Отчёты]
@@ -1683,6 +1720,11 @@ components:
           description: Схема формы испытателя.
         calibration_attributes: { type: array, items: { type: object } }
         calibration_operator_form: { type: object }
+        report_instruction:
+          type: string
+          description: |
+            Инструкция ИИ по составлению отчёта по испытанию (аналитические
+            разделы). Пусто — отчёт собирается без ИИ-разделов.
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
 

@@ -6,6 +6,8 @@ COPY *.go ./
 # строки сборка падает на `pattern static/...: no matching files found`: в
 # контекст копируются только перечисленные пути, каталога static образ не видит.
 COPY static ./static
+# Бланк организации для отчёта вшивается через //go:embed (template.go).
+COPY template ./template
 RUN GOFLAGS=-mod=mod CGO_ENABLED=0 GOOS=linux go build -trimpath -o /mailers-lab .
 
 FROM alpine:3.20

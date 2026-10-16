@@ -181,17 +181,11 @@ func (s *Server) sendCompletionEmails(ctx context.Context, req Request, sendCust
 	if !sendCustomer && !sendLpitrack {
 		return
 	}
-	p, err := s.buildProtocol(ctx, req.ID, "protocol")
-	if err != nil {
-		log.Printf("sendCompletionEmails: build protocol %d: %v", req.ID, err)
+	attachment := s.completionAttachment(ctx, req.ID)
+	if attachment == nil {
+		log.Printf("sendCompletionEmails: no attachment for request %d", req.ID)
 		return
 	}
-	docxBytes, err := s.protocolDocx(ctx, p, "protocol")
-	if err != nil {
-		log.Printf("sendCompletionEmails: protocol docx %d: %v", req.ID, err)
-		return
-	}
-	attachment := &emailAttachment{Name: fmt.Sprintf("protocol-%d.docx", req.ID), Data: docxBytes}
 
 	if sendCustomer {
 		if req.OwnerEmail == "" {
@@ -211,6 +205,31 @@ func (s *Server) sendCompletionEmails(ctx context.Context, req Request, sendCust
 				fmt.Sprintf("Заявка №%s (external_id=%s) завершена.", req.CustomerNumber, req.ExternalID))
 		}
 	}
+}
+
+// completionAttachment — вложение письма о завершении заявки (2026-10-16):
+// ИИ-отчёт на бланке; при полном сбое его сборки — обычный протокол (как было
+// до этой правки). nil — не удалось собрать ни то, ни другое (без вложения
+// письмо не шлём).
+func (s *Server) completionAttachment(ctx context.Context, requestID int64) *emailAttachment {
+	if res, err := s.ensureReport(ctx, requestID); err == nil {
+		if len(res.DOCX) > 0 {
+			return &emailAttachment{Name: reportFilename(requestID), Data: res.DOCX}
+		}
+	} else {
+		log.Printf("completionAttachment: report %d: %v", requestID, err)
+	}
+	p, err := s.buildProtocol(ctx, requestID, "protocol")
+	if err != nil {
+		log.Printf("completionAttachment: build protocol %d: %v", requestID, err)
+		return nil
+	}
+	docxBytes, err := s.protocolDocx(ctx, p, "protocol")
+	if err != nil {
+		log.Printf("completionAttachment: protocol docx %d: %v", requestID, err)
+		return nil
+	}
+	return &emailAttachment{Name: protocolFilename(requestID), Data: docxBytes}
 }
 
 // legacyExternalKey — тема служебного письма в LPITrack должна совпадать с исходным

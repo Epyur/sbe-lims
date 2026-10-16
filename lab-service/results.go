@@ -71,6 +71,9 @@ type MethodConfig struct {
 	// вручную, ровно один раз за запись журнала, расчётов/агрегации нет.
 	CalibrationAttributes   []map[string]any   `json:"calibration_attributes"`
 	CalibrationOperatorForm MethodOperatorForm `json:"calibration_operator_form"`
+	// ReportInstruction (2026-10-16) — инструкция ИИ по составлению отчёта;
+	// пусто — ИИ-разделы в отчёт не добавляются (см. report.go).
+	ReportInstruction string `json:"report_instruction"`
 }
 
 // InlineNode — текстовый узел форматированного текста ИЛИ плейсхолдер-чип
@@ -217,11 +220,12 @@ type MethodOperatorForm struct {
 // loadMethodConfig читает конфиги метода.
 func (s *Server) loadMethodConfig(ctx context.Context, methodID int64) (*MethodConfig, error) {
 	var formulas, classification, charts, inputs, presentation, operatorForm, calibAttrs, calibForm []byte
+	var reportInstruction string
 	err := s.pool.QueryRow(ctx, `
 SELECT formulas, classification, chart_configs, input_parameters, presentation, operator_form,
-	calibration_attributes, calibration_operator_form
+	calibration_attributes, calibration_operator_form, report_instruction
 FROM methods WHERE id = $1`, methodID).Scan(&formulas, &classification, &charts, &inputs, &presentation, &operatorForm,
-		&calibAttrs, &calibForm)
+		&calibAttrs, &calibForm, &reportInstruction)
 	if err != nil {
 		return nil, err
 	}
@@ -234,6 +238,7 @@ FROM methods WHERE id = $1`, methodID).Scan(&formulas, &classification, &charts,
 		OperatorForm:            parseMethodOperatorForm(operatorForm),
 		CalibrationAttributes:   []map[string]any{},
 		CalibrationOperatorForm: parseMethodOperatorForm(calibForm),
+		ReportInstruction:       reportInstruction,
 	}
 	if len(formulas) > 0 && string(formulas) != "[]" {
 		_ = json.Unmarshal(formulas, &cfg.Formulas)

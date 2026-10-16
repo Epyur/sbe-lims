@@ -255,6 +255,8 @@ func main() {
 	// глобальной ролью на роуте. Раньше viewer (участник группы) не мог дойти
 	// даже до requireLabRead — падал на этом внешнем гейте.
 	mux.HandleFunc("POST /api/lab/requests/{id}/protocol", s.requirePerm("viewer")(s.handleProtocol))
+	mux.HandleFunc("GET /api/lab/requests/{id}/report.docx", s.requirePerm("viewer")(s.handleGetReport))
+	mux.HandleFunc("POST /api/lab/requests/{id}/report", s.requirePerm("viewer")(s.handleRegenerateReport))
 	mux.HandleFunc("GET /api/lab/requests/{id}/export.xlsx", s.requirePerm("viewer")(s.handleExportExcel))
 	// export-summary.xlsx (2026-09-04) — сводный экспорт по списку заявок из
 	// тела запроса (export_summary.go), та же базовая роль на роуте, что и
@@ -691,6 +693,10 @@ func (s *Server) migrate(ctx context.Context) error {
 		// что operator_form, но какие ИЗ calibration_attributes показывать испытателю.
 		`ALTER TABLE methods ADD COLUMN IF NOT EXISTS calibration_attributes JSONB NOT NULL DEFAULT '[]'`,
 		`ALTER TABLE methods ADD COLUMN IF NOT EXISTS calibration_operator_form JSONB NOT NULL DEFAULT '{}'`,
+		// report_instruction (2026-10-16) — инструкция ИИ по составлению отчёта по
+		// испытанию (аналитические разделы); пусто — метод без ИИ-разделов, отчёт
+		// собирается как протокол + приложение со статистикой. См. report.go.
+		`ALTER TABLE methods ADD COLUMN IF NOT EXISTS report_instruction TEXT NOT NULL DEFAULT ''`,
 		// equipment_calibrations — привязка к методу (чьи calibration_attributes
 		// применялись — оборудование может быть "Основное" сразу для нескольких методов,
 		// см. method_equipment.role) + универсальные системные поля (одни и те же для
@@ -753,6 +759,18 @@ func (s *Server) migrate(ctx context.Context) error {
 			success BOOLEAN NOT NULL,
 			error TEXT NOT NULL DEFAULT '',
 			triggered_by TEXT NOT NULL
+		)`,
+		// request_reports (2026-10-16) — ИИ-отчёт по испытанию на бланке: где
+		// лежит готовый DOCX (S3), был ли ИИ-раздел, когда собран. Генерация —
+		// при завершении заявки (report_store.go ensureReport) и по кнопке;
+		// скачивание отдаёт тот же сохранённый файл.
+		`CREATE TABLE IF NOT EXISTS request_reports (
+			request_id BIGINT PRIMARY KEY REFERENCES requests(id) ON DELETE CASCADE,
+			file_key TEXT NOT NULL DEFAULT '',
+			has_ai BOOLEAN NOT NULL DEFAULT false,
+			ai_error TEXT NOT NULL DEFAULT '',
+			generated_at TIMESTAMPTZ,
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 		)`,
 		// WP3b (2026-08-28) — системные поля (report_date/samples_in_date/exp_date/
 		// amb_temp/amb_pres/amb_moist) переезжают с requests.* (одно значение на

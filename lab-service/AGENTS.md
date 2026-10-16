@@ -1319,6 +1319,51 @@ docker compose exec lab wget -qO- http://localhost:3000/api/lab/health   # вн�
 
 ## История
 
+### 2026-10-16 — ИИ-отчёт по испытанию на бланке + приложение статистики
+
+Прямой запрос пользователя (дизайн — `docs/superpowers/specs/2026-10-16-sbe-lims-ai-report-design.md`,
+план — одноимённый в `plans/`). Отчёт = протокол (блоки метода, таблицы,
+графики, фото) + ИИ-разделы по `methods.report_instruction` + приложение со
+статистикой по аналогичным объектам (тот же ЕКН + тот же метод); всё на
+корпоративном бланке. Собирается автоматически при завершении заявки,
+вкладывается в письмо заказчику, доступен скачиванием и пересборкой.
+
+- **Поле метода** `report_instruction TEXT` (миграция `main.go`; `Method`
+  `references.go`, `MethodConfig`/`loadMethodConfig` `results.go`, `PATCH
+  /methods/{id}` `lims_refs.go` COALESCE, pull `sync.go`, `openapi.yaml`).
+- **Бланк** — `template/standard.docx` (копия из `sbe-agent/agent-service`,
+  SHA-256 совпадает) + `template.go` (`//go:embed`). `Dockerfile` — строка
+  `COPY template ./template` (иначе `go:embed` рвёт сборку — те же грабли, что
+  со `static`).
+- **Рендер на бланке** — `report_docx.go`: `splitTemplateBody` (перенос из
+  `agent-service/files.go`) + `reportDocx` (тело из `buildDocxBodyInner`,
+  поверх — части бланка; слияние `word/_rels/document.xml.rels` и
+  `[Content_Types].xml` бланка с media содержимого; rel-id содержимого —
+  `rIdPhotoN`, не пересекается с `rIdN` бланка).
+- **Тело** — `protocol.go`: вынес `buildDocxBodyInner` (общий для обычного
+  протокола и отчёта). Заодно **график в DOCX теперь встраивается картинкой**
+  (`renderBlockChartDocx` → `renderChartConfigPNG` → `docxPhotoRegistry.
+  registerImageBytes`), а не текстовой пометкой — требование «с графиками».
+- **Статистика и контекст** — `report_context.go` (`loadReportContext`, батч по
+  аналогам; чистые `computeIndicatorStats`/`buildAnalogues`/`orderedMethodAttributes`).
+- **Композиция** — `report.go` (`composeReportBlocks`/`composeAppendixNodes`,
+  типы `aiSection`/`aiSections`).
+- **ИИ** — `report_ai.go`: `generateReportSections` → новая внутренняя ручка
+  `llm-service` `POST /internal/llm/complete` (`X-Service-Secret`,
+  `LLM_SERVICE_URL`) на ОБЩЕМ ключе; пустая инструкция/сбой → фолбэк без
+  ИИ-разделов (`has_ai=false`).
+- **Хранение/ручки** — `report_store.go`: таблица `request_reports`, S3
+  (`lab/{id}/report-{unix}.docx`), `ensureReport`, `GET .../report.docx`
+  (`requireLabRead`), `POST .../report` (`requireLabAccess`).
+- **Письмо** — `outbound_email.go` `completionAttachment` → отчёт (при полном
+  сбое — обычный протокол, как раньше).
+- **Инфраструктура** — `sbe-core/docker/docker-compose.yml`: у сервиса `lab`
+  `LLM_SERVICE_URL`/`LLM_SERVICE_SECRET`.
+- Тесты: `report_docx_test.go`, `report_context_test.go`, `report_compose_test.go`,
+  `report_ai_test.go`. `gofmt`/`go build`/`go vet`/`go test` — чисто;
+  `check_lab_openapi.mjs` — 85 маршрутов. Версия плагина `sbe-lims` 1.0.16 →
+  **1.0.17**.
+
 ### 2026-10-01 — развёрнуто на VDS (партии 1, 2, 4)
 
 Контейнер `lab` пересобран и поднят скриптом `scripts/lab_deploy.sh` (откат —

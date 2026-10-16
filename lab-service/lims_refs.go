@@ -938,6 +938,7 @@ func (s *Server) handleUpdateMethodConfig(w http.ResponseWriter, r *http.Request
 		LabIDs                  *[]int64         `json:"lab_ids"`
 		Description             *string          `json:"description"`
 		DeterminableIndicators  *[]string        `json:"determinable_indicators"`
+		ReportInstruction       *string          `json:"report_instruction"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json"})
@@ -1061,9 +1062,10 @@ UPDATE methods SET
 	operator_form = COALESCE($9::jsonb, operator_form),
 	calibration_attributes = COALESCE($10::jsonb, calibration_attributes),
 	calibration_operator_form = COALESCE($11::jsonb, calibration_operator_form),
+	report_instruction = COALESCE($12, report_instruction),
 	updated_at = now()
 WHERE id = $1`, id, formulasParam, classParam, chartsParam, inputParam, presParam, req.Description, indicatorsParam, opFormParam,
-		calibAttrsParam, calibFormParam); err != nil {
+		calibAttrsParam, calibFormParam, req.ReportInstruction); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
 		return
 	}
