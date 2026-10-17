@@ -302,14 +302,21 @@ func (s *Server) handleGetMaterial(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	nameWeb := ""
-	if groups, err := lookupEknGroups(r.Context(), cleanEkn(ekn)); err == nil {
-		nameWeb = groups.NameWeb()
-	}
-	writeJSON(w, http.StatusOK, materialFeatureResult{
+	// Габарит и цвет берём из кэша — он уже сохранён при разборе; второй сетевой
+	// запрос к ekn-service нужен только ради name_web.
+	result := materialFeatureResult{
 		EKN: cleanEkn(ekn), Type: key.Type, Line: key.Line, Modifier: key.Modifier,
-		Thickness: thickness, Source: source, NameWeb: nameWeb,
-	})
+		Thickness: thickness, Source: source,
+	}
+	if cached, ok := s.loadMaterialFeature(r.Context(), ekn); ok {
+		result.WidthMM = cached.WidthMM
+		result.LengthMM = cached.LengthMM
+		result.Color = cached.Color
+	}
+	if groups, err := lookupEknGroups(r.Context(), cleanEkn(ekn)); err == nil {
+		result.NameWeb = groups.NameWeb()
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 // jsonGroups — разбор JSON-ответа QRC в map (для тестов и ручки).
