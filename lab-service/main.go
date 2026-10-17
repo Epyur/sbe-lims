@@ -257,6 +257,10 @@ func main() {
 	mux.HandleFunc("POST /api/lab/requests/{id}/protocol", s.requirePerm("viewer")(s.handleProtocol))
 	mux.HandleFunc("GET /api/lab/requests/{id}/report.docx", s.requirePerm("viewer")(s.handleGetReport))
 	mux.HandleFunc("POST /api/lab/requests/{id}/report", s.requirePerm("viewer")(s.handleRegenerateReport))
+	// Диагностика разбора материала по ЕКН (2026-10-17): что сервис понял про
+	// карточку — тип/линейка/модификатор/толщина/габарит. Нужна, чтобы проверить
+	// отбор аналогов, не собирая отчёт целиком (material_cache.go).
+	mux.HandleFunc("GET /api/lab/materials/{ekn}", s.requirePerm("viewer")(s.handleGetMaterial))
 	mux.HandleFunc("GET /api/lab/requests/{id}/export.xlsx", s.requirePerm("viewer")(s.handleExportExcel))
 	// export-summary.xlsx (2026-09-04) — сводный экспорт по списку заявок из
 	// тела запроса (export_summary.go), та же базовая роль на роуте, что и
@@ -771,6 +775,26 @@ func (s *Server) migrate(ctx context.Context) error {
 			ai_error TEXT NOT NULL DEFAULT '',
 			generated_at TIMESTAMPTZ,
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+		)`,
+		// ekn_material_features (2026-10-17) — разобранные признаки материала по
+		// ЕКН: тип/линейка/модификатор/толщина/габарит/цвет. Отбор аналогов для
+		// приложения отчёта идёт по ключу (тип, линейка, модификатор), а не по
+		// равенству ЕКН (ЕКН — артикул фасовки, см. material_key.go). Кэш свой, а
+		// не из ekn-базы: там сырой QRC-дамп с TTL 7 дней, здесь — готовый разбор,
+		// переживающий рестарты и недоступность ekn-service. source='manual' —
+		// ручная перезапись, автоматика её не трогает.
+		`CREATE TABLE IF NOT EXISTS ekn_material_features (
+			ekn TEXT PRIMARY KEY,
+			type TEXT NOT NULL DEFAULT '',
+			line TEXT NOT NULL DEFAULT '',
+			modifier TEXT NOT NULL DEFAULT '',
+			thickness DOUBLE PRECISION,
+			width_mm DOUBLE PRECISION,
+			length_mm DOUBLE PRECISION,
+			color TEXT NOT NULL DEFAULT '',
+			source TEXT NOT NULL DEFAULT '',
+			note TEXT NOT NULL DEFAULT '',
+			fetched_at TIMESTAMPTZ NOT NULL DEFAULT now()
 		)`,
 		// WP3b (2026-08-28) — системные поля (report_date/samples_in_date/exp_date/
 		// amb_temp/amb_pres/amb_moist) переезжают с requests.* (одно значение на

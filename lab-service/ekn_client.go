@@ -114,6 +114,55 @@ func lookupEknProductName(ctx context.Context, ekn string) string {
 	return strings.TrimSpace(product.Name)
 }
 
+// eknGroupsResponse — ответ ekn-service, который нужен разбору материала:
+// data.groups приходит целиком (см. material_cache.go).
+type eknGroupsResponse struct {
+	Name string `json:"name"`
+	Data struct {
+		Groups map[string]any `json:"groups"`
+	} `json:"data"`
+}
+
+// lookupEknGroups — полная карточка ЕКН из ekn-service (только группы QRC).
+// Тот же сетевой путь и служебный токен, что у lookupEknProductName; вынесено
+// отдельно, чтобы не грузить лишний JSON ради одного названия. Ошибка/пустой
+// ответ — не фатальны: вызывающий отбор аналогов падает обратно на разбор
+// названия (см. resolveMaterialKey).
+func lookupEknGroups(ctx context.Context, ekn string) (eknGroupsData, error) {
+	ekn = strings.TrimSpace(ekn)
+	if ekn == "" {
+		return nil, nil
+	}
+	token, err := serviceToken(ctx, "ekn")
+	if err != nil {
+		return nil, fmt.Errorf("ekn groups: service token: %w", err)
+	}
+	endpoint := fmt.Sprintf("%s/api/ekn/product/%s", eknServiceURL(), url.PathEscape(ekn))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("ekn groups: request %s: %w", ekn, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("ekn groups: %s status %d", ekn, resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if err != nil {
+		return nil, err
+	}
+	var parsed eknGroupsResponse
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return nil, fmt.Errorf("ekn groups: parse %s: %w", ekn, err)
+	}
+	return eknGroupsData(parsed.Data.Groups), nil
+}
+
 // handleBackfillEknNames — разовое исправление уже импортированных объектов/
 // заявок, у которых имя застряло на заглушке missingNamePlaceholder, хотя ЕКН
 // задан и реально есть в справочнике (тот же случай, что lookupEknProductName

@@ -1503,6 +1503,42 @@ paths:
               schema: { type: string, format: binary }
         '403': { $ref: '#/components/responses/Forbidden' }
 
+  /api/lab/materials/{ekn}:
+    get:
+      tags: [Заявки]
+      summary: Разбор материала по ЕКН (диагностика)
+      description: |
+        Роль viewer. Возвращает то, что сервис понял про карточку ЕКН: тип
+        материала, линейку, модификатор, толщину (мм), габарит и цвет — и откуда
+        взяты признаки (`qrc` — из карточки ЕКН, `name` — разбором названия,
+        `manual` — ручная перезапись). По этому ключу отбираются аналогичные
+        объекты для приложения ИИ-отчёта. Вызов заполняет кэш признаков.
+      parameters:
+        - name: ekn
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Разобранный материал
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ekn: { type: string }
+                  type: { type: string, description: 'Канонический тип материала' }
+                  line: { type: string, description: 'Линейка (нормализованная)' }
+                  modifier: { type: string, description: 'FR / Pro / Arctic / Middle / Ф/Ф / Полы ФЛ/ФЛ' }
+                  thickness: { type: number, description: 'Толщина, мм (0 — не определена)' }
+                  width_mm: { type: number }
+                  length_mm: { type: number }
+                  color: { type: string }
+                  source: { type: string, enum: [qrc, name, manual] }
+                  name_web: { type: string }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
   /api/lab/requests/{id}/report:
     post:
       tags: [Отчёты]

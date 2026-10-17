@@ -17,7 +17,7 @@ func TestComputeIndicatorStatsNumericAndAggregated(t *testing.T) {
 		2: {"group": "Г2"},
 	}
 
-	stats := computeIndicatorStats(attrs, seriesByReq, aggByReq)
+	stats := computeIndicatorStats(attrs, nil, seriesByReq, aggByReq)
 	if len(stats) != 2 {
 		t.Fatalf("want 2 stats, got %d (%+v)", len(stats), stats)
 	}
@@ -44,7 +44,7 @@ func TestComputeIndicatorStatsNumericAndAggregated(t *testing.T) {
 
 func TestComputeIndicatorStatsSkipsEmpty(t *testing.T) {
 	attrs := []MethodAttribute{{ID: "a", Name: "A", Level: "experiment"}}
-	if got := computeIndicatorStats(attrs, map[int64][]map[string]any{}, map[int64]map[string]any{}); len(got) != 0 {
+	if got := computeIndicatorStats(attrs, nil, map[int64][]map[string]any{}, map[int64]map[string]any{}); len(got) != 0 {
 		t.Fatalf("want no stats, got %+v", got)
 	}
 }

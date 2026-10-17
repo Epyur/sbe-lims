@@ -139,6 +139,41 @@ func renderReportContext(rc *reportContext) string {
 			fmt.Fprintf(&b, "- %s (оценки): %s\n", st.Name, strings.Join(vals, ", "))
 		}
 	}
+	// Разрез по толщинам (2026-10-17): ИИ НЕ считает тренд — он получает уже
+	// посчитанные цифры и детерминированный вывод. При отсутствии данных модели
+	// прямо говорится, что зависимость утверждать нельзя.
+	var withSplit []indicatorStat
+	for _, st := range rc.IndicatorStats {
+		if len(st.ByThickness) > 0 {
+			withSplit = append(withSplit, st)
+		}
+	}
+	if len(withSplit) > 0 {
+		fmt.Fprintf(&b, "\nЗАВИСИМОСТЬ ОТ ТОЛЩИНЫ (материал: %s; толщины одной линейки — один материал):\n",
+			materialKeyLabel(rc.Material))
+		for _, st := range withSplit {
+			fmt.Fprintf(&b, "Показатель: %s\n", st.Name)
+			for _, tb := range st.ByThickness {
+				thickness := tb.Thickness
+				if thickness == "" {
+					thickness = "не указана"
+				}
+				if tb.HasNumeric {
+					fmt.Fprintf(&b, "  - толщина %s мм: испытаний %d, среднее=%s (мин %s, макс %s)\n",
+						thickness, tb.Tests, fmtVal(tb.Avg), fmtVal(tb.Min), fmtVal(tb.Max))
+				} else {
+					fmt.Fprintf(&b, "  - толщина %s мм: испытаний %d, значения: %s\n",
+						thickness, tb.Tests, distributionText(tb.Distribution))
+				}
+			}
+			if st.Trend != nil && st.Trend.Direction != "немонотонно" {
+				fmt.Fprintf(&b, "  ВЫВОД (посчитан сервером, не вычисляй заново): %s\n", trendSentence(st))
+			} else {
+				fmt.Fprintf(&b, "  ВНИМАНИЕ: данных для вывода о зависимости от толщины недостаточно (нужно не менее %d испытаний на каждую толщину) — не утверждай наличие закономерности.\n", minTestsForTrend)
+			}
+		}
+	}
+
 	return b.String()
 }
 
@@ -157,7 +192,7 @@ func renderKeyValues(m map[string]any) string {
 }
 
 // parseAiSections разбирает ответ модели: JSON-объект {"sections":[...]},
-// возможно в markdown-обёртке/с прозой вокруг. Пусто/не JSON → ошибка.
+// обёрнутый в markdown-обёртки/с прозой вокруг. Пусто/не JSON — ошибка.
 func parseAiSections(content string) (*aiSections, error) {
 	start := strings.Index(content, "{")
 	end := strings.LastIndex(content, "}")

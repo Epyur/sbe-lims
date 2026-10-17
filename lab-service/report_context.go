@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"log"
 )
 
 // ---- Сбор контекста отчёта и статистика по аналогичным объектам (2026-10-16) ----
@@ -23,17 +22,27 @@ type indicatorStat struct {
 	Min          float64        `json:"min"`
 	Max          float64        `json:"max"`
 	Distribution map[string]int `json:"distribution,omitempty"`
+
+	// Разрез по толщинам (2026-10-17): все толщины одной линейки — один материал,
+	// но различие толщин показывается отдельно (см. analogues.go, groupByThickness).
+	ByThickness []thicknessBucket `json:"by_thickness,omitempty"`
+	Trend       *trendNote        `json:"trend,omitempty"`
 }
 
 // analogueRow — одна строка таблицы «Аналоги» (испытание аналогичного объекта).
 type analogueRow struct {
-	RequestID   int64  `json:"request_id"`
-	Number      string `json:"number"`
-	Object      string `json:"object"`
-	Batch       string `json:"batch"`
-	CompletedAt string `json:"completed_at"`
-	Result      string `json:"result"`
-	Compliance  string `json:"compliance"`
+	RequestID    int64  `json:"request_id"`
+	Number       string `json:"number"`
+	Object       string `json:"object"`
+	Batch        string `json:"batch"`
+	CompletedAt  string `json:"completed_at"`
+	Result       string `json:"result"`
+	Compliance   string `json:"compliance"`
+	Tier         int    `json:"tier"`                    // 1 — тот же материал (с ЕКН), 2 — по названию, 3 — модификация
+	Line         string `json:"line"`                    // линейка материала
+	Modifier     string `json:"modifier"`                // модификатор (fr/pro/arctic/middle/…)
+	Thickness    string `json:"thickness"`               // "1,5" или "" (не определена)
+	MaterialNote string `json:"material_note,omitempty"` // пояснение, почему попал в ступень
 }
 
 // reportContext — всё, что нужно для отчёта: данные заявки/метода/результатов +
@@ -52,6 +61,11 @@ type reportContext struct {
 	Agg             map[string]any
 	IndicatorStats  []indicatorStat
 	Analogues       []analogueRow
+
+	// Материал текущей заявки (2026-10-17): по какому ключу собраны аналоги —
+	// выводится в шапке приложения, чтобы было видно, что попало в статистику.
+	Material  MaterialKey
+	Thickness float64 // толщина текущей заявки, мм (0 — не определена)
 }
 
 const maxAnalogues = 300
@@ -101,44 +115,34 @@ func (s *Server) loadReportContext(ctx context.Context, requestID int64) (*repor
 		rc.Agg = ag
 	}
 
+	// Материал текущей заявки — по нему отобраны аналоги (см. analogues.go).
+	rc.Material, rc.Thickness, _ = s.resolveRequestMaterial(ctx, req)
+
 	analogues, ids := s.loadAnalogueRequests(ctx, req)
 	seriesByReq := s.loadSeriesBatch(ctx, ids, req.MethodID)
 	aggByReq := s.loadAggBatch(ctx, ids, req.MethodID)
 
-	rc.IndicatorStats = computeIndicatorStats(orderedMethodAttributes(cfg), seriesByReq, aggByReq)
+	rc.IndicatorStats = computeIndicatorStats(orderedMethodAttributes(cfg), analogues, seriesByReq, aggByReq)
 
 	resultAttr, complianceAttr := resolveResultCompliance(cfg)
 	rc.Analogues = buildAnalogues(analogues, aggByReq, resultAttr, complianceAttr)
 	return rc, nil
 }
 
-// loadAnalogueRequests — заявки-аналоги: тот же метод и тот же (непустой) ЕКН,
-// кроме самой заявки. Возвращает строки для таблицы и список id для батч-загрузки.
+// loadAnalogueRequests — заявки-аналоги текущей: материал определяется ключом
+// (тип, линейка, модификатор), а не равенством ЕКН (см. analogues.go и
+// material_key.go). Возвращает строки для таблицы и список id для батч-загрузки;
+// текущая заявка исключена. Ступени не смешиваются — каждая строка помечена Tier.
 func (s *Server) loadAnalogueRequests(ctx context.Context, req *Request) ([]analogueRow, []int64) {
 	out := []analogueRow{}
 	ids := []int64{}
-	if req.EKN == "" {
+	current, _, _ := s.resolveRequestMaterial(ctx, req)
+	if !MaterialKeyFilled(current) {
 		return out, ids
 	}
-	rows, err := s.pool.Query(ctx, `
-SELECT r.id, COALESCE(NULLIF(r.customer_number, ''), r.lab_number), COALESCE(o.name, ''),
-	COALESCE(o.characteristics->>'batch_number', ''), COALESCE(r.completed_at::text, '')
-FROM requests r
-LEFT JOIN objects o ON o.id = r.object_id
-WHERE r.method_id = $1 AND r.ekn = $2 AND r.id <> $3
-ORDER BY r.completed_at DESC NULLS LAST, r.id DESC
-LIMIT $4`, req.MethodID, req.EKN, req.ID, maxAnalogues)
-	if err != nil {
-		log.Printf("report context: analogues query: %v", err)
-		return out, ids
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var a analogueRow
-		if err := rows.Scan(&a.RequestID, &a.Number, &a.Object, &a.Batch, &a.CompletedAt); err != nil {
-			continue
-		}
-		out = append(out, a)
+	candidates := s.loadAnalogueCandidates(ctx, req.MethodID, req.ID)
+	out = s.classifyCandidates(ctx, current, candidates)
+	for _, a := range out {
 		ids = append(ids, a.RequestID)
 	}
 	return out, ids
@@ -239,24 +243,40 @@ func orderedMethodAttributes(cfg *MethodConfig) []MethodAttribute {
 // показателю метода собирает значения по аналогам (experiment-уровень — все
 // серии всех аналогов; aggregated-уровень — по одному значению на аналог) и
 // считает count/avg/min/max, а для нечисловых значений — распределение.
-func computeIndicatorStats(attrs []MethodAttribute, seriesByReq map[int64][]map[string]any, aggByReq map[int64]map[string]any) []indicatorStat {
+// Для ступени 1 дополнительно строится разрез по толщинам и вывод о тренде
+// (см. analogues.go): ступени 2/3 в тренд не попадают (решение пользователя).
+func computeIndicatorStats(attrs []MethodAttribute, analogues []analogueRow, seriesByReq map[int64][]map[string]any, aggByReq map[int64]map[string]any) []indicatorStat {
+	// Индекс аналогов по заявке — нужен для раскладки значений по толщинам.
+	rowsByReq := make(map[int64]analogueRow, len(analogues))
+	for _, a := range analogues {
+		rowsByReq[a.RequestID] = a
+	}
+
 	out := make([]indicatorStat, 0, len(attrs))
 	for _, a := range attrs {
 		if a.ID == "" {
 			continue
 		}
 		var vals []any
+		var split []analogueValue
 		if a.Level == "aggregated" {
-			for _, agg := range aggByReq {
+			for rid, agg := range aggByReq {
 				if v, ok := agg[a.ID]; ok && v != nil && fmtVal(v) != "" {
 					vals = append(vals, v)
+					if row, ok := rowsByReq[rid]; ok && row.Tier == analogueTierSameEKN {
+						split = append(split, analogueValue{row: row, value: v})
+					}
 				}
 			}
 		} else {
-			for _, series := range seriesByReq {
+			for rid, series := range seriesByReq {
+				row, hasRow := rowsByReq[rid]
 				for _, s := range series {
 					if v, ok := s[a.ID]; ok && v != nil && fmtVal(v) != "" {
 						vals = append(vals, v)
+						if hasRow && row.Tier == analogueTierSameEKN {
+							split = append(split, analogueValue{row: row, value: v})
+						}
 					}
 				}
 			}
@@ -289,6 +309,11 @@ func computeIndicatorStats(attrs []MethodAttribute, seriesByReq map[int64][]map[
 			st.Avg = sum / float64(len(nums))
 			st.Min = mn
 			st.Max = mx
+		}
+		// Разрез по толщинам — только по ступени 1 (тот же материал + ЕКН).
+		if len(split) > 0 {
+			st.ByThickness = groupByThickness(split)
+			st.Trend = computeTrend(a.ID, st.ByThickness)
 		}
 		// Распределение ценно для оценок/классификаций (мало различимых значений);
 		// для свободного текста с сотнями уникальных — не раздуваем документ.
