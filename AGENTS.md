@@ -290,7 +290,15 @@ lab_operator/lab_admin/владелец. Не трогали: эндпоинт �
 - **Темы форум-супергрупп (2026-10-18, дополнение).** У канала в UI появилось
   поле «тема (id)» (`TelegramChannel.thread_id` → `message_thread_id`; пусто —
   «General»). Id темы — число из ссылки темы `https://t.me/c/<группа>/<id>`.
-  «Тест» учитывает тему. **Не выпущено** — ждёт «Фиксируй».
+  «Тест» учитывает тему.
+- **Выпущено 2026-10-18 как 1.1.0.** Коммиты: `backend` `80d45ec` (плагин) +
+  `1a9b9b5` (`lab-service`), `main` `b278ada` (черри-пик, `main.js` побайтово
+  совпал); `portal-embed` `128dc93`; реестр `Epyur/sbe-apstore-registry`
+  `e7c1181`. Самораздача 1.1.0 (`uploadedAt` 2026-10-18T12:45:18Z): три sha256
+  совпали локально/на сервере/по https (manifest `1ee26ac6…e757`, main
+  `9c9c4ef8…acf1`, styles `31381175…f447254`), raw-путь GitHub — MATCH.
+  Контейнеры `lab` (ALTER `thread_id` применён) и `portal-embed` пересобраны,
+  health ok. Живой E2E отправки в тему — за пользователем.
 - `help.ts` — раздел «Уведомления в Telegram»; текст новости ЦУП переписан.
 - **Проверки:** `npx tsc --noEmit` EXIT=0, `npm run build` OK. Версия 1.0.18 →
   **1.0.19**. Серверная правка — `lab-service/AGENTS.md`, транспорт —
