@@ -1029,46 +1029,135 @@ export class LimsView extends ItemView {
     }
     loading.remove();
 
-    const chainChannels = (chs: TelegramRule['channels']): TelegramRule['channels'] =>
-      (chs || []).map((c) => ({ chat_id: c.chat_id, label: c.label, thread_id: c.thread_id ?? 0 }));
-    const rules: TelegramRule[] = own.map((r) => ({
-      method_id: r.method_id,
-      deleted: r.deleted,
-      channels: chainChannels(r.channels),
-      on_created: r.on_created,
-      on_completed: r.on_completed,
-      with_attachment: r.with_attachment,
-    }));
+    // Канал-центричная модель: карточка = канал + отмеченные методы. У метода
+    // в проекте один канал (сервер это же и проверяет).
+    interface ChannelCard {
+      chat_id: string;
+      label: string;
+      thread_id: number;
+      on_created: boolean;
+      on_completed: boolean;
+      with_attachment: boolean;
+      method_ids: number[];
+    }
+    const cards: ChannelCard[] = [];
+    const excluded = new Set<number>();
+    const cardByKey = new Map<string, ChannelCard>();
+    const keyOf = (chat: string, thread: number): string => `${chat}#${thread}`;
+    for (const r of own) {
+      if (r.deleted) {
+        excluded.add(r.method_id);
+        continue;
+      }
+      const ch = (r.channels || [])[0];
+      if (!ch) continue;
+      const key = keyOf(ch.chat_id, ch.thread_id ?? 0);
+      let card = cardByKey.get(key);
+      if (!card) {
+        card = {
+          chat_id: ch.chat_id,
+          label: ch.label || '',
+          thread_id: ch.thread_id ?? 0,
+          on_created: r.on_created,
+          on_completed: r.on_completed,
+          with_attachment: r.with_attachment,
+          method_ids: [],
+        };
+        cardByKey.set(key, card);
+        cards.push(card);
+      }
+      if (!card.method_ids.includes(r.method_id)) card.method_ids.push(r.method_id);
+    }
 
     const listEl = body.createDiv();
     const redraw = (): void => {
       listEl.empty();
-      rules.forEach((rule, idx) => this.renderTelegramRuleRow(listEl, rule, idx, rules, redraw));
-      if (rules.length === 0) {
-        listEl.createDiv({ cls: 'tn-lims-meta' }).setText('Своих правил нет — действуют унаследованные (если есть).');
+      if (cards.length === 0) {
+        listEl.createDiv({ cls: 'tn-lims-meta' }).setText('Каналов нет — добавьте канал и отметьте методы.');
+      }
+      cards.forEach((card, idx) => this.renderTelegramChannelCard(listEl, card, idx, cards, redraw));
+      if (excluded.size > 0) {
+        listEl.createEl('h4', { text: 'Исключено (не наследуется)' });
+        for (const mid of [...excluded]) {
+          const row = listEl.createDiv({ cls: 'tn-lims-flex tn-lims-mb8' });
+          row.createSpan({ cls: 'tn-lims-meta', text: this.methodName(mid) });
+          const back = row.createEl('button', { cls: 'tn-btn tn-btn-ghost', text: '↩ Вернуть' });
+          back.addEventListener('click', () => {
+            excluded.delete(mid);
+            redraw();
+          });
+        }
       }
       if (inherited.length > 0) {
         listEl.createEl('h4', { text: 'Унаследовано от предков' });
-        for (const inh of inherited) this.renderTelegramInheritedRow(listEl, inh, rules, redraw);
+        for (const inh of inherited) this.renderTelegramInheritedRow(listEl, inh, cards, excluded, redraw);
       }
 
       const actions = listEl.createDiv({ cls: 'tn-lims-flex tn-lims-mb8' });
-      const addBtn = actions.createEl('button', { cls: 'tn-btn tn-btn-ghost', text: '＋ Правило' });
+      const addBtn = actions.createEl('button', { cls: 'tn-btn tn-btn-ghost', text: '＋ Канал' });
       addBtn.addEventListener('click', () => {
-        const fallback = this.plugin.methods[0]?.id ?? 1;
-        rules.push({
-          method_id: fallback,
-          deleted: false,
-          channels: [{ chat_id: '', label: '', thread_id: 0 }],
+        cards.push({
+          chat_id: '',
+          label: '',
+          thread_id: 0,
           on_created: true,
           on_completed: true,
           with_attachment: false,
+          method_ids: [],
         });
         redraw();
       });
       const saveBtn = actions.createEl('button', { cls: 'tn-btn', text: '💾 Сохранить' });
       saveBtn.addEventListener('click', () => {
         void (async () => {
+          // Собираем плоский набор правил (сервер хранит их по методу).
+          const used = new Map<number, string>();
+          for (const card of cards) {
+            const chatId = card.chat_id.trim();
+            if (!chatId && card.method_ids.length === 0) continue;
+            if (!chatId) {
+              new Notice('Укажите chat id канала');
+              return;
+            }
+            if (card.method_ids.length === 0) {
+              new Notice(`У канала ${card.label.trim() || chatId} не отмечено ни одного метода`);
+              return;
+            }
+            for (const mid of card.method_ids) {
+              const prev = used.get(mid);
+              if (prev !== undefined) {
+                new Notice(`Метод «${this.methodName(mid)}» уже привязан к каналу ${prev}`);
+                return;
+              }
+              used.set(mid, card.label.trim() || chatId);
+            }
+          }
+          const rules: TelegramRule[] = [];
+          for (const card of cards) {
+            const chatId = card.chat_id.trim();
+            if (!chatId) continue;
+            for (const mid of card.method_ids) {
+              rules.push({
+                method_id: mid,
+                deleted: false,
+                channels: [{ chat_id: chatId, label: card.label.trim(), thread_id: card.thread_id }],
+                on_created: card.on_created,
+                on_completed: card.on_completed,
+                with_attachment: card.with_attachment,
+              });
+            }
+          }
+          for (const mid of excluded) {
+            if (used.has(mid)) continue;
+            rules.push({
+              method_id: mid,
+              deleted: true,
+              channels: [],
+              on_created: false,
+              on_completed: false,
+              with_attachment: false,
+            });
+          }
           try {
             await this.plugin.syncService.saveTelegramRules(project.id, rules);
             new Notice('Правила сохранены');
@@ -1082,46 +1171,50 @@ export class LimsView extends ItemView {
     redraw();
   }
 
-  /** Строка своего правила: метод, триггеры, каналы. */
-  private renderTelegramRuleRow(
+  /** Карточка канала: реквизиты, события и чекбоксы методов. */
+  private renderTelegramChannelCard(
     parent: HTMLElement,
-    rule: TelegramRule,
+    card: { chat_id: string; label: string; thread_id: number; on_created: boolean; on_completed: boolean; with_attachment: boolean; method_ids: number[] },
     idx: number,
-    rules: TelegramRule[],
+    cards: { method_ids: number[] }[],
     redraw: () => void,
   ): void {
-    const row = parent.createDiv({ cls: 'tn-lims-method tn-lims-mb8' });
-    const head = row.createDiv({ cls: 'tn-lims-flex' });
-
-    if (rule.deleted) {
-      head.createSpan({ cls: 'tn-lims-meta' }).setText(`${this.methodName(rule.method_id)} — исключено`);
-      const back = head.createEl('button', { cls: 'tn-btn tn-btn-ghost', text: '↩ Вернуть' });
-      back.addEventListener('click', () => {
-        rules.splice(idx, 1);
-        redraw();
-      });
-      return;
-    }
-
-    const methodSel = head.createEl('select', { cls: 'tn-lims-select' });
-    for (const m of this.plugin.methods) {
-      methodSel.createEl('option', { value: String(m.id), text: `${m.code}${m.name ? ' — ' + m.name : ''}` });
-    }
-    if (!this.plugin.methods.some((m) => m.id === rule.method_id)) {
-      methodSel.createEl('option', { value: String(rule.method_id), text: `#${rule.method_id}` });
-    }
-    methodSel.value = String(rule.method_id);
-    methodSel.addEventListener('change', () => {
-      rule.method_id = Number(methodSel.value) || 0;
+    const box = parent.createDiv({ cls: 'tn-lims-method tn-lims-mb8' });
+    const head = box.createDiv({ cls: 'tn-lims-flex' });
+    const idIn = head.createEl('input', { cls: 'tn-lims-input', attr: { placeholder: 'chat id группы (-100…)', value: card.chat_id } });
+    idIn.addEventListener('input', () => { card.chat_id = idIn.value.trim(); });
+    const lblIn = head.createEl('input', { cls: 'tn-lims-input', attr: { placeholder: 'подпись канала', value: card.label } });
+    lblIn.addEventListener('input', () => { card.label = lblIn.value; });
+    // Тема форум-супергруппы: пусто — «General». Id темы — из ссылки
+    // «Скопировать ссылку» у темы: https://t.me/c/<группа>/<thread_id>.
+    const thrIn = head.createEl('input', {
+      cls: 'tn-lims-input',
+      attr: { placeholder: 'тема (id)', type: 'number', min: '0', value: card.thread_id ? String(card.thread_id) : '' },
     });
-
+    thrIn.addEventListener('input', () => { card.thread_id = Number(thrIn.value) || 0; });
+    const test = head.createEl('button', { cls: 'tn-btn tn-btn-ghost', text: 'Тест' });
+    test.addEventListener('click', () => {
+      void (async () => {
+        const id = card.chat_id.trim();
+        if (!id) {
+          new Notice('Сначала укажите chat id');
+          return;
+        }
+        try {
+          await this.plugin.syncService.testTelegramRule(id, card.thread_id ?? 0);
+          new Notice('Сообщение отправлено');
+        } catch (e: unknown) {
+          new Notice(`Ошибка: ${errorMessage(e)}`);
+        }
+      })();
+    });
     const del = head.createEl('button', { cls: 'tn-btn tn-btn-ghost', text: '✖' });
     del.addEventListener('click', () => {
-      rules.splice(idx, 1);
+      cards.splice(idx, 1);
       redraw();
     });
 
-    const trig = row.createDiv({ cls: 'tn-lims-flex tn-lims-mb8' });
+    const trig = box.createDiv({ cls: 'tn-lims-flex tn-lims-mb8' });
     const mkCheck = (label: string, get: () => boolean, set: (v: boolean) => void): void => {
       const l = trig.createEl('label', { cls: 'tn-lims-flex' });
       const cb = l.createEl('input', { attr: { type: 'checkbox' } });
@@ -1129,97 +1222,80 @@ export class LimsView extends ItemView {
       cb.addEventListener('change', () => set(cb.checked));
       l.createSpan({ text: ' ' + label });
     };
-    mkCheck('Создана', () => rule.on_created, (v) => { rule.on_created = v; });
-    mkCheck('Выполнена', () => rule.on_completed, (v) => { rule.on_completed = v; });
-    mkCheck('с вложением (DOCX-отчёт)', () => rule.with_attachment, (v) => { rule.with_attachment = v; });
+    mkCheck('Создана', () => card.on_created, (v) => { card.on_created = v; });
+    mkCheck('Выполнена', () => card.on_completed, (v) => { card.on_completed = v; });
+    mkCheck('с вложением (DOCX-отчёт)', () => card.with_attachment, (v) => { card.with_attachment = v; });
 
-    row.createDiv({ cls: 'tn-lims-meta', text: 'Каналы (chat id и подпись):' });
-    rule.channels.forEach((ch, ci) => {
-      const cRow = row.createDiv({ cls: 'tn-lims-flex tn-lims-mb8' });
-      const idIn = cRow.createEl('input', { cls: 'tn-lims-input', attr: { placeholder: '-1001234567890', value: ch.chat_id } });
-      idIn.addEventListener('input', () => { ch.chat_id = idIn.value.trim(); });
-      const lblIn = cRow.createEl('input', { cls: 'tn-lims-input', attr: { placeholder: 'подпись', value: ch.label } });
-      lblIn.addEventListener('input', () => { ch.label = lblIn.value; });
-      // Тема форум-супергруппы: пусто — «General». Id темы виден в ссылке
-      // «Скопировать ссылку» у темы: https://t.me/c/<группа>/<thread_id>.
-      const thrIn = cRow.createEl('input', {
-        cls: 'tn-lims-input',
-        attr: { placeholder: 'тема (id)', type: 'number', min: '0', value: ch.thread_id ? String(ch.thread_id) : '' },
+    box.createDiv({ cls: 'tn-lims-meta', text: 'Методы, которые шлют в этот канал:' });
+    if (this.plugin.methods.length === 0) {
+      box.createDiv({ cls: 'tn-lims-meta', text: 'Справочник методов не загружен.' });
+      return;
+    }
+    const grid = box.createDiv({ cls: 'tn-lims-tg-methods' });
+    for (const m of this.plugin.methods) {
+      // У метода в проекте один канал — занятый в другом канале отмечен и
+      // недоступен здесь.
+      const usedElsewhere = cards.some((c, i) => i !== idx && c.method_ids.includes(m.id));
+      const l = grid.createEl('label', { cls: 'tn-lims-flex' });
+      const cb = l.createEl('input', { attr: { type: 'checkbox' } });
+      cb.checked = card.method_ids.includes(m.id);
+      cb.disabled = usedElsewhere;
+      cb.addEventListener('change', () => {
+        const at = card.method_ids.indexOf(m.id);
+        if (cb.checked && at < 0) card.method_ids.push(m.id);
+        if (!cb.checked && at >= 0) card.method_ids.splice(at, 1);
       });
-      thrIn.addEventListener('input', () => { ch.thread_id = Number(thrIn.value) || 0; });
-      const test = cRow.createEl('button', { cls: 'tn-btn tn-btn-ghost', text: 'Тест' });
-      test.addEventListener('click', () => {
-        void (async () => {
-          const id = ch.chat_id.trim();
-          if (!id) {
-            new Notice('Сначала укажите chat id');
-            return;
-          }
-          try {
-            await this.plugin.syncService.testTelegramRule(id, ch.thread_id ?? 0);
-            new Notice('Сообщение отправлено');
-          } catch (e: unknown) {
-            new Notice(`Ошибка: ${errorMessage(e)}`);
-          }
-        })();
-      });
-      const rm = cRow.createEl('button', { cls: 'tn-btn tn-btn-ghost', text: '✖' });
-      rm.addEventListener('click', () => {
-        rule.channels.splice(ci, 1);
-        redraw();
-      });
-    });
-    const addCh = row.createEl('button', { cls: 'tn-btn tn-btn-ghost', text: '＋ канал' });
-    addCh.addEventListener('click', () => {
-      rule.channels.push({ chat_id: '', label: '', thread_id: 0 });
-      redraw();
-    });
+      l.createSpan({ text: ` ${m.code}${m.name ? ' — ' + m.name : ''}${usedElsewhere ? ' (в другом канале)' : ''}` });
+    }
   }
 
-  /** Строка унаследованного правила: только чтение + «Переопределить»/«Исключить». */
+  /** Унаследованное правило: только чтение; «Переопределить» переносит его в
+   * свою карточку канала, «Исключить» — гасит метод у этого проекта. */
   private renderTelegramInheritedRow(
     parent: HTMLElement,
     inh: TelegramInheritedRule,
-    rules: TelegramRule[],
+    cards: { chat_id: string; label: string; thread_id: number; on_created: boolean; on_completed: boolean; with_attachment: boolean; method_ids: number[] }[],
+    excluded: Set<number>,
     redraw: () => void,
   ): void {
-    const row = parent.createDiv({ cls: 'tn-lims-method tn-lims-mb8' });
-    const head = row.createDiv({ cls: 'tn-lims-flex' });
-    head.createSpan({ cls: 'tn-lims-meta' }).setText(
-      `${this.methodName(inh.method_id)} — унаследовано от «${inh.source_project_name || '#' + inh.source_project_id}»`,
-    );
-    const override = head.createEl('button', { cls: 'tn-btn tn-btn-ghost', text: 'Переопределить' });
-    override.addEventListener('click', () => {
-      rules.push({
-        method_id: inh.method_id,
-        deleted: false,
-        channels: (inh.channels || []).map((c) => ({ chat_id: c.chat_id, label: c.label, thread_id: c.thread_id ?? 0 })),
-        on_created: inh.on_created,
-        on_completed: inh.on_completed,
-        with_attachment: inh.with_attachment,
-      });
-      redraw();
-    });
-    const exclude = head.createEl('button', { cls: 'tn-btn tn-btn-ghost', text: 'Исключить' });
-    exclude.addEventListener('click', () => {
-      rules.push({
-        method_id: inh.method_id,
-        deleted: true,
-        channels: [],
-        on_created: false,
-        on_completed: false,
-        with_attachment: false,
-      });
-      redraw();
-    });
-    const chans = (inh.channels || [])
-      .map((c) => {
-        const base = c.label || c.chat_id;
-        return c.thread_id ? `${base} · тема ${c.thread_id}` : base;
-      })
-      .join(', ');
+    const row = parent.createDiv({ cls: 'tn-lims-flex tn-lims-mb8' });
+    const ch = (inh.channels || [])[0];
+    const chanText = ch ? `${ch.label || ch.chat_id}${ch.thread_id ? ` · тема ${ch.thread_id}` : ''}` : '—';
     const events = [inh.on_created ? 'создана' : '', inh.on_completed ? 'выполнена' : ''].filter(Boolean).join(', ');
-    row.createDiv({ cls: 'tn-lims-meta' }).setText(`Каналы: ${chans || '—'}; события: ${events || '—'}`);
+    row.createDiv({ cls: 'tn-lims-meta' }).setText(
+      `${this.methodName(inh.method_id)} → ${chanText} (${events || '—'}), унаследовано от «${inh.source_project_name || '#' + inh.source_project_id}»`,
+    );
+    const override = row.createEl('button', { cls: 'tn-btn tn-btn-ghost', text: 'Переопределить' });
+    override.addEventListener('click', () => {
+      const chatId = ch?.chat_id ?? '';
+      const threadId = ch?.thread_id ?? 0;
+      const key = `${chatId}#${threadId}`;
+      let card = cards.find((c) => `${c.chat_id.trim()}#${c.thread_id}` === key);
+      if (!card) {
+        card = {
+          chat_id: chatId,
+          label: ch?.label ?? '',
+          thread_id: threadId,
+          on_created: inh.on_created,
+          on_completed: inh.on_completed,
+          with_attachment: inh.with_attachment,
+          method_ids: [],
+        };
+        cards.push(card);
+      }
+      if (!card.method_ids.includes(inh.method_id)) card.method_ids.push(inh.method_id);
+      excluded.delete(inh.method_id);
+      redraw();
+    });
+    const exclude = row.createEl('button', { cls: 'tn-btn tn-btn-ghost', text: 'Исключить' });
+    exclude.addEventListener('click', () => {
+      for (const c of cards) {
+        const at = c.method_ids.indexOf(inh.method_id);
+        if (at >= 0) c.method_ids.splice(at, 1);
+      }
+      excluded.add(inh.method_id);
+      redraw();
+    });
   }
 
   // ---- (наполнение: методы прошлой вьюхи, будут подключены к узлам дерева) ----
