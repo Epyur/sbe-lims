@@ -287,6 +287,10 @@ lab_operator/lab_admin/владелец. Не трогали: эндпоинт �
 - **`sync.service.ts`** — `getTelegramRules`/`saveTelegramRules`/`testTelegramRule`/
   `listTelegramLog` + приватный `putEntity`; типы `TelegramChannel`/`TelegramRule`/
   `TelegramInheritedRule`/`TelegramNotifyLogEntry` (`types/lims.ts`).
+- **Темы форум-супергрупп (2026-10-18, дополнение).** У канала в UI появилось
+  поле «тема (id)» (`TelegramChannel.thread_id` → `message_thread_id`; пусто —
+  «General»). Id темы — число из ссылки темы `https://t.me/c/<группа>/<id>`.
+  «Тест» учитывает тему. **Не выпущено** — ждёт «Фиксируй».
 - `help.ts` — раздел «Уведомления в Telegram»; текст новости ЦУП переписан.
 - **Проверки:** `npx tsc --noEmit` EXIT=0, `npm run build` OK. Версия 1.0.18 →
   **1.0.19**. Серверная правка — `lab-service/AGENTS.md`, транспорт —

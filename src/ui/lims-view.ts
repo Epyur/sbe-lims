@@ -1029,10 +1029,12 @@ export class LimsView extends ItemView {
     }
     loading.remove();
 
+    const chainChannels = (chs: TelegramRule['channels']): TelegramRule['channels'] =>
+      (chs || []).map((c) => ({ chat_id: c.chat_id, label: c.label, thread_id: c.thread_id ?? 0 }));
     const rules: TelegramRule[] = own.map((r) => ({
       method_id: r.method_id,
       deleted: r.deleted,
-      channels: (r.channels || []).map((c) => ({ chat_id: c.chat_id, label: c.label })),
+      channels: chainChannels(r.channels),
       on_created: r.on_created,
       on_completed: r.on_completed,
       with_attachment: r.with_attachment,
@@ -1057,7 +1059,7 @@ export class LimsView extends ItemView {
         rules.push({
           method_id: fallback,
           deleted: false,
-          channels: [{ chat_id: '', label: '' }],
+          channels: [{ chat_id: '', label: '', thread_id: 0 }],
           on_created: true,
           on_completed: true,
           with_attachment: false,
@@ -1138,6 +1140,13 @@ export class LimsView extends ItemView {
       idIn.addEventListener('input', () => { ch.chat_id = idIn.value.trim(); });
       const lblIn = cRow.createEl('input', { cls: 'tn-lims-input', attr: { placeholder: 'подпись', value: ch.label } });
       lblIn.addEventListener('input', () => { ch.label = lblIn.value; });
+      // Тема форум-супергруппы: пусто — «General». Id темы виден в ссылке
+      // «Скопировать ссылку» у темы: https://t.me/c/<группа>/<thread_id>.
+      const thrIn = cRow.createEl('input', {
+        cls: 'tn-lims-input',
+        attr: { placeholder: 'тема (id)', type: 'number', min: '0', value: ch.thread_id ? String(ch.thread_id) : '' },
+      });
+      thrIn.addEventListener('input', () => { ch.thread_id = Number(thrIn.value) || 0; });
       const test = cRow.createEl('button', { cls: 'tn-btn tn-btn-ghost', text: 'Тест' });
       test.addEventListener('click', () => {
         void (async () => {
@@ -1147,7 +1156,7 @@ export class LimsView extends ItemView {
             return;
           }
           try {
-            await this.plugin.syncService.testTelegramRule(id);
+            await this.plugin.syncService.testTelegramRule(id, ch.thread_id ?? 0);
             new Notice('Сообщение отправлено');
           } catch (e: unknown) {
             new Notice(`Ошибка: ${errorMessage(e)}`);
@@ -1162,7 +1171,7 @@ export class LimsView extends ItemView {
     });
     const addCh = row.createEl('button', { cls: 'tn-btn tn-btn-ghost', text: '＋ канал' });
     addCh.addEventListener('click', () => {
-      rule.channels.push({ chat_id: '', label: '' });
+      rule.channels.push({ chat_id: '', label: '', thread_id: 0 });
       redraw();
     });
   }
@@ -1184,7 +1193,7 @@ export class LimsView extends ItemView {
       rules.push({
         method_id: inh.method_id,
         deleted: false,
-        channels: (inh.channels || []).map((c) => ({ chat_id: c.chat_id, label: c.label })),
+        channels: (inh.channels || []).map((c) => ({ chat_id: c.chat_id, label: c.label, thread_id: c.thread_id ?? 0 })),
         on_created: inh.on_created,
         on_completed: inh.on_completed,
         with_attachment: inh.with_attachment,
@@ -1203,7 +1212,12 @@ export class LimsView extends ItemView {
       });
       redraw();
     });
-    const chans = (inh.channels || []).map((c) => c.label || c.chat_id).join(', ');
+    const chans = (inh.channels || [])
+      .map((c) => {
+        const base = c.label || c.chat_id;
+        return c.thread_id ? `${base} · тема ${c.thread_id}` : base;
+      })
+      .join(', ');
     const events = [inh.on_created ? 'создана' : '', inh.on_completed ? 'выполнена' : ''].filter(Boolean).join(', ');
     row.createDiv({ cls: 'tn-lims-meta' }).setText(`Каналы: ${chans || '—'}; события: ${events || '—'}`);
   }
