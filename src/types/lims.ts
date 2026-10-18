@@ -128,11 +128,17 @@ export interface LabProject {
 }
 
 /** Telegram-канал правила уведомлений (2026-10-18). `thread_id` — тема
- * форум-супергруппы (message_thread_id): 0/нет — сообщение уходит в «General». */
+ * форум-супергруппы (message_thread_id): 0/нет — сообщение уходит в «General».
+ * События — СВОИ у канала: один метод может слать «Создана» в один канал, а
+ * «Выполнена» — в другой. Поля необязательны — у старых записей их нет, тогда
+ * действуют флаги уровня правила. */
 export interface TelegramChannel {
   chat_id: string;
   label: string;
   thread_id?: number;
+  on_created?: boolean;
+  on_completed?: boolean;
+  with_attachment?: boolean;
 }
 
 /** Правило Telegram-уведомлений проекта для одного метода: один метод — одна
