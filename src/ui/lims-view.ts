@@ -31,6 +31,9 @@ import type {
   OperatorFormGroup,
   OperatorFormVisibility,
   PresentationKind,
+  TelegramInheritedRule,
+  TelegramNotifyLogEntry,
+  TelegramRule,
   TimeseriesSeriesConfig,
 } from '../types/lims';
 import { OPERATOR_FORM_SYSTEM_FIELDS, renderBlockEditor, SYSTEM_PLACEHOLDERS } from './block-editor';
@@ -190,6 +193,7 @@ type NavKey =
   | 'inventors'
   | 'equipment'
   | 'lab-members'
+  | 'telegram'
   | 'settings';
 
 interface NavItem {
@@ -203,6 +207,8 @@ interface NavGroup {
   icon: string;
   label: string;
   items: NavItem[];
+  /** Раздел виден только app-admin/superadmin (например, «Уведомления»). */
+  adminOnly?: boolean;
 }
 
 /** Группы дерева навигации (по мокапу tn-center, адаптировано под данные lab-service). */
@@ -232,6 +238,15 @@ const NAV_GROUPS: NavGroup[] = [
       { key: 'lab-members', label: 'Сотрудники', sub: 'Состав и права лаборатории' },
     ],
   },
+  {
+    id: 'notify',
+    icon: '📨',
+    label: 'Уведомления',
+    adminOnly: true,
+    items: [
+      { key: 'telegram', label: 'Telegram', sub: 'Правила уведомлений по проектам' },
+    ],
+  },
 ];
 
 const PAGE_META: Record<NavKey, { title: string; sub: string }> = {
@@ -243,6 +258,7 @@ const PAGE_META: Record<NavKey, { title: string; sub: string }> = {
   inventors: { title: 'Испытатели', sub: 'Справочник' },
   equipment: { title: 'Оборудование', sub: 'Справочник' },
   'lab-members': { title: 'Сотрудники', sub: 'Состав и права лаборатории' },
+  telegram: { title: 'Telegram', sub: 'Правила уведомлений по проектам' },
   settings: { title: 'Настройки', sub: 'Лаборатории и их администраторы' },
 };
 
@@ -273,6 +289,33 @@ function moveFieldToItsGroup(fields: OperatorFormField[], idx: number): void {
   if (lastIdx < 0) return;
   fields.splice(idx, 1);
   fields.splice(lastIdx > idx ? lastIdx : lastIdx + 1, 0, field);
+}
+
+/** Проекты в порядке дерева (родитель → его дети по алфавиту) для списка
+ * раздела «Telegram». Проект с отсутствующим родителем в списке не теряется —
+ * уходит в конец. */
+function orderedProjectList(projects: LabProject[]): LabProject[] {
+  const byParent = new Map<number, LabProject[]>();
+  for (const p of projects) {
+    const key = p.parent_id || 0;
+    const arr = byParent.get(key);
+    if (arr) arr.push(p);
+    else byParent.set(key, [p]);
+  }
+  const order = (a: LabProject, b: LabProject): number =>
+    (a.name || a.code).localeCompare(b.name || b.code, 'ru');
+  const out: LabProject[] = [];
+  const walk = (parent: number): void => {
+    for (const p of (byParent.get(parent) || []).slice().sort(order)) {
+      out.push(p);
+      walk(p.id);
+    }
+  };
+  walk(0);
+  for (const p of projects) {
+    if (!out.includes(p)) out.push(p);
+  }
+  return out;
 }
 
 export class LimsView extends ItemView {
@@ -455,6 +498,7 @@ export class LimsView extends ItemView {
   private buildNav(): void {
     this.navEl.empty();
     for (const group of NAV_GROUPS) {
+      if (group.adminOnly && !this.canAdmin) continue;
       const grpBtn = this.navEl.createEl('button', { cls: 'tn-lims-grp' });
       grpBtn.createSpan({ cls: 'tn-lims-grp-ico', text: group.icon });
       grpBtn.createSpan({ cls: 'tn-lims-grp-lbl', text: group.label });
@@ -540,6 +584,9 @@ export class LimsView extends ItemView {
     }
     this.settingsBtnEl.style.display = (await this.canOpenSettings()) ? '' : 'none';
 
+    // Роль известна — пересобираем дерево: разделы с adminOnly («Уведомления»)
+    // появляются только у администратора (первый buildNav шёл до загрузки роли).
+    this.buildNav();
     this.syncNavActive();
     await this.renderPage();
   }
@@ -580,6 +627,7 @@ export class LimsView extends ItemView {
         this.labId = null;
       }
       this.settingsBtnEl.style.display = (await this.canOpenSettings()) ? '' : 'none';
+      this.buildNav();
       this.syncNavActive();
       await this.renderPage();
     } catch (e: unknown) {
@@ -921,10 +969,243 @@ export class LimsView extends ItemView {
       case 'lab-members':
         await this.renderLabMembers();
         return;
+      case 'telegram':
+        await this.renderTelegramSection();
+        return;
       case 'settings':
         await this.renderSettings();
         return;
     }
+  }
+
+  // ---- Telegram-уведомления по проектам (2026-10-18) ----
+
+  /** Раздел «Уведомления → Telegram» (admin/superadmin). Список проектов; в
+   * карточке проекта — свои правила и унаследованные (с переопределением и
+   * исключением). Дизайн:
+   * docs/superpowers/specs/2026-10-18-sbe-lims-telegram-project-notifications-design.md. */
+  private async renderTelegramSection(): Promise<void> {
+    if (!this.canAdmin) {
+      this.bodyEl.createDiv({ cls: 'tn-lims-meta tn-lims-p24' }).setText('Раздел доступен администраторам.');
+      return;
+    }
+    let projects: LabProject[] = [];
+    try {
+      projects = await this.plugin.syncService.listProjects();
+    } catch (e: unknown) {
+      this.bodyEl.createDiv({ cls: 'tn-lims-meta' }).setText(`Не удалось загрузить проекты: ${errorMessage(e)}`);
+      return;
+    }
+    this.bodyEl.createDiv({ cls: 'tn-lims-meta tn-lims-mb8' }).setText(
+      'Правило проекта: метод, каналы и события. Дочерний проект наследует правило предка, пока не задаст ' +
+      'своё или не исключит его. Канал — chat id Telegram; бот должен быть администратором канала.',
+    );
+    if (projects.length === 0) {
+      this.bodyEl.createDiv({ cls: 'tn-lims-meta' }).setText('Проектов нет.');
+      return;
+    }
+    for (const project of orderedProjectList(projects)) {
+      const card = this.bodyEl.createDiv({ cls: 'tn-lims-method tn-lims-mb8' });
+      const title = `📨 ${project.name || project.code}${project.is_ekn ? ' (ЕКН)' : ''}`;
+      this.renderCollapsibleSection(card, title, (body) => {
+        void this.renderTelegramProjectRules(body, project);
+      });
+    }
+  }
+
+  /** Правила одного проекта: свои (редактируемые) и унаследованные. */
+  private async renderTelegramProjectRules(body: HTMLElement, project: LabProject): Promise<void> {
+    body.empty();
+    const loading = body.createDiv({ cls: 'tn-lims-meta', text: 'Загрузка…' });
+    let own: TelegramRule[] = [];
+    let inherited: TelegramInheritedRule[] = [];
+    try {
+      const res = await this.plugin.syncService.getTelegramRules(project.id);
+      own = res.own;
+      inherited = res.inherited;
+    } catch (e: unknown) {
+      loading.setText(`Не удалось загрузить правила: ${errorMessage(e)}`);
+      return;
+    }
+    loading.remove();
+
+    const rules: TelegramRule[] = own.map((r) => ({
+      method_id: r.method_id,
+      deleted: r.deleted,
+      channels: (r.channels || []).map((c) => ({ chat_id: c.chat_id, label: c.label })),
+      on_created: r.on_created,
+      on_completed: r.on_completed,
+      with_attachment: r.with_attachment,
+    }));
+
+    const listEl = body.createDiv();
+    const redraw = (): void => {
+      listEl.empty();
+      rules.forEach((rule, idx) => this.renderTelegramRuleRow(listEl, rule, idx, rules, redraw));
+      if (rules.length === 0) {
+        listEl.createDiv({ cls: 'tn-lims-meta' }).setText('Своих правил нет — действуют унаследованные (если есть).');
+      }
+      if (inherited.length > 0) {
+        listEl.createEl('h4', { text: 'Унаследовано от предков' });
+        for (const inh of inherited) this.renderTelegramInheritedRow(listEl, inh, rules, redraw);
+      }
+
+      const actions = listEl.createDiv({ cls: 'tn-lims-flex tn-lims-mb8' });
+      const addBtn = actions.createEl('button', { cls: 'tn-btn tn-btn-ghost', text: '＋ Правило' });
+      addBtn.addEventListener('click', () => {
+        const fallback = this.plugin.methods[0]?.id ?? 1;
+        rules.push({
+          method_id: fallback,
+          deleted: false,
+          channels: [{ chat_id: '', label: '' }],
+          on_created: true,
+          on_completed: true,
+          with_attachment: false,
+        });
+        redraw();
+      });
+      const saveBtn = actions.createEl('button', { cls: 'tn-btn', text: '💾 Сохранить' });
+      saveBtn.addEventListener('click', () => {
+        void (async () => {
+          try {
+            await this.plugin.syncService.saveTelegramRules(project.id, rules);
+            new Notice('Правила сохранены');
+            await this.renderTelegramProjectRules(body, project);
+          } catch (e: unknown) {
+            new Notice(`Ошибка: ${errorMessage(e)}`);
+          }
+        })();
+      });
+    };
+    redraw();
+  }
+
+  /** Строка своего правила: метод, триггеры, каналы. */
+  private renderTelegramRuleRow(
+    parent: HTMLElement,
+    rule: TelegramRule,
+    idx: number,
+    rules: TelegramRule[],
+    redraw: () => void,
+  ): void {
+    const row = parent.createDiv({ cls: 'tn-lims-method tn-lims-mb8' });
+    const head = row.createDiv({ cls: 'tn-lims-flex' });
+
+    if (rule.deleted) {
+      head.createSpan({ cls: 'tn-lims-meta' }).setText(`${this.methodName(rule.method_id)} — исключено`);
+      const back = head.createEl('button', { cls: 'tn-btn tn-btn-ghost', text: '↩ Вернуть' });
+      back.addEventListener('click', () => {
+        rules.splice(idx, 1);
+        redraw();
+      });
+      return;
+    }
+
+    const methodSel = head.createEl('select', { cls: 'tn-lims-select' });
+    for (const m of this.plugin.methods) {
+      methodSel.createEl('option', { value: String(m.id), text: `${m.code}${m.name ? ' — ' + m.name : ''}` });
+    }
+    if (!this.plugin.methods.some((m) => m.id === rule.method_id)) {
+      methodSel.createEl('option', { value: String(rule.method_id), text: `#${rule.method_id}` });
+    }
+    methodSel.value = String(rule.method_id);
+    methodSel.addEventListener('change', () => {
+      rule.method_id = Number(methodSel.value) || 0;
+    });
+
+    const del = head.createEl('button', { cls: 'tn-btn tn-btn-ghost', text: '✖' });
+    del.addEventListener('click', () => {
+      rules.splice(idx, 1);
+      redraw();
+    });
+
+    const trig = row.createDiv({ cls: 'tn-lims-flex tn-lims-mb8' });
+    const mkCheck = (label: string, get: () => boolean, set: (v: boolean) => void): void => {
+      const l = trig.createEl('label', { cls: 'tn-lims-flex' });
+      const cb = l.createEl('input', { attr: { type: 'checkbox' } });
+      cb.checked = get();
+      cb.addEventListener('change', () => set(cb.checked));
+      l.createSpan({ text: ' ' + label });
+    };
+    mkCheck('Создана', () => rule.on_created, (v) => { rule.on_created = v; });
+    mkCheck('Выполнена', () => rule.on_completed, (v) => { rule.on_completed = v; });
+    mkCheck('с вложением (DOCX-отчёт)', () => rule.with_attachment, (v) => { rule.with_attachment = v; });
+
+    row.createDiv({ cls: 'tn-lims-meta', text: 'Каналы (chat id и подпись):' });
+    rule.channels.forEach((ch, ci) => {
+      const cRow = row.createDiv({ cls: 'tn-lims-flex tn-lims-mb8' });
+      const idIn = cRow.createEl('input', { cls: 'tn-lims-input', attr: { placeholder: '-1001234567890', value: ch.chat_id } });
+      idIn.addEventListener('input', () => { ch.chat_id = idIn.value.trim(); });
+      const lblIn = cRow.createEl('input', { cls: 'tn-lims-input', attr: { placeholder: 'подпись', value: ch.label } });
+      lblIn.addEventListener('input', () => { ch.label = lblIn.value; });
+      const test = cRow.createEl('button', { cls: 'tn-btn tn-btn-ghost', text: 'Тест' });
+      test.addEventListener('click', () => {
+        void (async () => {
+          const id = ch.chat_id.trim();
+          if (!id) {
+            new Notice('Сначала укажите chat id');
+            return;
+          }
+          try {
+            await this.plugin.syncService.testTelegramRule(id);
+            new Notice('Сообщение отправлено');
+          } catch (e: unknown) {
+            new Notice(`Ошибка: ${errorMessage(e)}`);
+          }
+        })();
+      });
+      const rm = cRow.createEl('button', { cls: 'tn-btn tn-btn-ghost', text: '✖' });
+      rm.addEventListener('click', () => {
+        rule.channels.splice(ci, 1);
+        redraw();
+      });
+    });
+    const addCh = row.createEl('button', { cls: 'tn-btn tn-btn-ghost', text: '＋ канал' });
+    addCh.addEventListener('click', () => {
+      rule.channels.push({ chat_id: '', label: '' });
+      redraw();
+    });
+  }
+
+  /** Строка унаследованного правила: только чтение + «Переопределить»/«Исключить». */
+  private renderTelegramInheritedRow(
+    parent: HTMLElement,
+    inh: TelegramInheritedRule,
+    rules: TelegramRule[],
+    redraw: () => void,
+  ): void {
+    const row = parent.createDiv({ cls: 'tn-lims-method tn-lims-mb8' });
+    const head = row.createDiv({ cls: 'tn-lims-flex' });
+    head.createSpan({ cls: 'tn-lims-meta' }).setText(
+      `${this.methodName(inh.method_id)} — унаследовано от «${inh.source_project_name || '#' + inh.source_project_id}»`,
+    );
+    const override = head.createEl('button', { cls: 'tn-btn tn-btn-ghost', text: 'Переопределить' });
+    override.addEventListener('click', () => {
+      rules.push({
+        method_id: inh.method_id,
+        deleted: false,
+        channels: (inh.channels || []).map((c) => ({ chat_id: c.chat_id, label: c.label })),
+        on_created: inh.on_created,
+        on_completed: inh.on_completed,
+        with_attachment: inh.with_attachment,
+      });
+      redraw();
+    });
+    const exclude = head.createEl('button', { cls: 'tn-btn tn-btn-ghost', text: 'Исключить' });
+    exclude.addEventListener('click', () => {
+      rules.push({
+        method_id: inh.method_id,
+        deleted: true,
+        channels: [],
+        on_created: false,
+        on_completed: false,
+        with_attachment: false,
+      });
+      redraw();
+    });
+    const chans = (inh.channels || []).map((c) => c.label || c.chat_id).join(', ');
+    const events = [inh.on_created ? 'создана' : '', inh.on_completed ? 'выполнена' : ''].filter(Boolean).join(', ');
+    row.createDiv({ cls: 'tn-lims-meta' }).setText(`Каналы: ${chans || '—'}; события: ${events || '—'}`);
   }
 
   // ---- (наполнение: методы прошлой вьюхи, будут подключены к узлам дерева) ----
@@ -1672,6 +1953,43 @@ export class LimsView extends ItemView {
           }
         }).catch((e: unknown) => {
           historyList.setText(`Ошибка: ${errorMessage(e)}`);
+        });
+      });
+    }
+
+    // Журнал Telegram-уведомлений по заявке (2026-10-18) — сворачиваемый,
+    // подгружается по клику (как «История»). Видимость — любой, кому видна
+    // заявка (серверный requireLabRead).
+    {
+      const tgWrap = this.bodyEl.createDiv({ cls: 'tn-lims-mb12' });
+      const tgToggle = tgWrap.createEl('button', { text: '📨 Telegram', cls: 'tn-btn tn-btn-ghost' });
+      const tgList = tgWrap.createDiv();
+      let tgLoaded = false;
+      const eventLabel = (ev: string): string => (ev === 'completed' ? 'выполнена' : 'создана');
+      const statusLabel = (s: string): string =>
+        s === 'sent' ? 'отправлено' : s === 'failed' ? 'не отправлено' : 'в очереди';
+      tgToggle.addEventListener('click', () => {
+        if (tgLoaded) {
+          tgList.style.display = tgList.style.display === 'none' ? '' : 'none';
+          return;
+        }
+        tgLoaded = true;
+        tgList.setText('Загрузка…');
+        this.plugin.syncService.listTelegramLog(req.id).then((entries: TelegramNotifyLogEntry[]) => {
+          tgList.empty();
+          if (entries.length === 0) {
+            tgList.createDiv({ cls: 'tn-lims-meta', text: 'Уведомлений не было' });
+            return;
+          }
+          for (const e of entries) {
+            const when = new Date(e.created_at).toLocaleString('ru-RU');
+            const err = e.status === 'failed' && e.last_error ? `: ${e.last_error}` : '';
+            tgList.createDiv({ cls: 'tn-lims-meta' }).setText(
+              `${eventLabel(e.event)} · ${e.chat_id} · ${statusLabel(e.status)}${err} (${when})`,
+            );
+          }
+        }).catch((e: unknown) => {
+          tgList.setText(`Ошибка: ${errorMessage(e)}`);
         });
       });
     }
