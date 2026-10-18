@@ -1049,24 +1049,26 @@ export class LimsView extends ItemView {
         excluded.add(r.method_id);
         continue;
       }
-      const ch = (r.channels || [])[0];
-      if (!ch) continue;
-      const key = keyOf(ch.chat_id, ch.thread_id ?? 0);
-      let card = cardByKey.get(key);
-      if (!card) {
-        card = {
-          chat_id: ch.chat_id,
-          label: ch.label || '',
-          thread_id: ch.thread_id ?? 0,
-          on_created: r.on_created,
-          on_completed: r.on_completed,
-          with_attachment: r.with_attachment,
-          method_ids: [],
-        };
-        cardByKey.set(key, card);
-        cards.push(card);
+      // У метода может быть несколько каналов; события у каждого свои (у старых
+      // записей их нет — тогда берём флаги правила).
+      for (const ch of r.channels || []) {
+        const key = keyOf(ch.chat_id, ch.thread_id ?? 0);
+        let card = cardByKey.get(key);
+        if (!card) {
+          card = {
+            chat_id: ch.chat_id,
+            label: ch.label || '',
+            thread_id: ch.thread_id ?? 0,
+            on_created: ch.on_created ?? r.on_created,
+            on_completed: ch.on_completed ?? r.on_completed,
+            with_attachment: ch.with_attachment ?? r.with_attachment,
+            method_ids: [],
+          };
+          cardByKey.set(key, card);
+          cards.push(card);
+        }
+        if (!card.method_ids.includes(r.method_id)) card.method_ids.push(r.method_id);
       }
-      if (!card.method_ids.includes(r.method_id)) card.method_ids.push(r.method_id);
     }
 
     const listEl = body.createDiv();
@@ -1075,7 +1077,12 @@ export class LimsView extends ItemView {
       if (cards.length === 0) {
         listEl.createDiv({ cls: 'tn-lims-meta' }).setText('Каналов нет — добавьте канал и отметьте методы.');
       }
-      cards.forEach((card, idx) => this.renderTelegramChannelCard(listEl, card, idx, cards, redraw));
+      cards.forEach((card, idx) =>
+        this.renderTelegramChannelCard(listEl, card, () => {
+          cards.splice(idx, 1);
+          redraw();
+        }, redraw),
+      );
       if (excluded.size > 0) {
         listEl.createEl('h4', { text: 'Исключено (не наследуется)' });
         for (const mid of [...excluded]) {
@@ -1110,8 +1117,9 @@ export class LimsView extends ItemView {
       const saveBtn = actions.createEl('button', { cls: 'tn-btn', text: '💾 Сохранить' });
       saveBtn.addEventListener('click', () => {
         void (async () => {
-          // Собираем плоский набор правил (сервер хранит их по методу).
-          const used = new Map<number, string>();
+          // Проверки: канал с методами обязан иметь chat id; один и тот же
+          // адрес (chat + тема) не должен встречаться дважды.
+          const seenDest = new Set<string>();
           for (const card of cards) {
             const chatId = card.chat_id.trim();
             if (!chatId && card.method_ids.length === 0) continue;
@@ -1123,32 +1131,49 @@ export class LimsView extends ItemView {
               new Notice(`У канала ${card.label.trim() || chatId} не отмечено ни одного метода`);
               return;
             }
-            for (const mid of card.method_ids) {
-              const prev = used.get(mid);
-              if (prev !== undefined) {
-                new Notice(`Метод «${this.methodName(mid)}» уже привязан к каналу ${prev}`);
-                return;
-              }
-              used.set(mid, card.label.trim() || chatId);
+            const dest = `${chatId}#${card.thread_id}`;
+            if (seenDest.has(dest)) {
+              new Notice(`Канал ${card.label.trim() || chatId} указан дважды`);
+              return;
             }
+            seenDest.add(dest);
           }
-          const rules: TelegramRule[] = [];
+          // Собираем по методу: у метода может быть НЕСКОЛЬКО каналов, и у
+          // каждого канала свои события (напр. «Создана» в один, «Выполнена» в
+          // другой). Флаги уровня правила — объединение (запасной вариант).
+          const byMethod = new Map<number, TelegramRule>();
           for (const card of cards) {
             const chatId = card.chat_id.trim();
             if (!chatId) continue;
             for (const mid of card.method_ids) {
-              rules.push({
-                method_id: mid,
-                deleted: false,
-                channels: [{ chat_id: chatId, label: card.label.trim(), thread_id: card.thread_id }],
+              let rule = byMethod.get(mid);
+              if (!rule) {
+                rule = {
+                  method_id: mid,
+                  deleted: false,
+                  channels: [],
+                  on_created: false,
+                  on_completed: false,
+                  with_attachment: false,
+                };
+                byMethod.set(mid, rule);
+              }
+              rule.channels.push({
+                chat_id: chatId,
+                label: card.label.trim(),
+                thread_id: card.thread_id,
                 on_created: card.on_created,
                 on_completed: card.on_completed,
                 with_attachment: card.with_attachment,
               });
+              rule.on_created = rule.on_created || card.on_created;
+              rule.on_completed = rule.on_completed || card.on_completed;
+              rule.with_attachment = rule.with_attachment || card.with_attachment;
             }
           }
+          const rules: TelegramRule[] = [...byMethod.values()];
           for (const mid of excluded) {
-            if (used.has(mid)) continue;
+            if (byMethod.has(mid)) continue;
             rules.push({
               method_id: mid,
               deleted: true,
@@ -1175,8 +1200,7 @@ export class LimsView extends ItemView {
   private renderTelegramChannelCard(
     parent: HTMLElement,
     card: { chat_id: string; label: string; thread_id: number; on_created: boolean; on_completed: boolean; with_attachment: boolean; method_ids: number[] },
-    idx: number,
-    cards: { method_ids: number[] }[],
+    onDelete: () => void,
     redraw: () => void,
   ): void {
     const box = parent.createDiv({ cls: 'tn-lims-method tn-lims-mb8' });
@@ -1209,10 +1233,7 @@ export class LimsView extends ItemView {
       })();
     });
     const del = head.createEl('button', { cls: 'tn-btn tn-btn-ghost', text: '✖' });
-    del.addEventListener('click', () => {
-      cards.splice(idx, 1);
-      redraw();
-    });
+    del.addEventListener('click', onDelete);
 
     const trig = box.createDiv({ cls: 'tn-lims-flex tn-lims-mb8' });
     const mkCheck = (label: string, get: () => boolean, set: (v: boolean) => void): void => {
@@ -1233,19 +1254,17 @@ export class LimsView extends ItemView {
     }
     const grid = box.createDiv({ cls: 'tn-lims-tg-methods' });
     for (const m of this.plugin.methods) {
-      // У метода в проекте один канал — занятый в другом канале отмечен и
-      // недоступен здесь.
-      const usedElsewhere = cards.some((c, i) => i !== idx && c.method_ids.includes(m.id));
+      // Один и тот же метод можно отметить в нескольких каналах — события
+      // задаются на канал (напр. «Создана» в один, «Выполнена» в другой).
       const l = grid.createEl('label', { cls: 'tn-lims-flex' });
       const cb = l.createEl('input', { attr: { type: 'checkbox' } });
       cb.checked = card.method_ids.includes(m.id);
-      cb.disabled = usedElsewhere;
       cb.addEventListener('change', () => {
         const at = card.method_ids.indexOf(m.id);
         if (cb.checked && at < 0) card.method_ids.push(m.id);
         if (!cb.checked && at >= 0) card.method_ids.splice(at, 1);
       });
-      l.createSpan({ text: ` ${m.code}${m.name ? ' — ' + m.name : ''}${usedElsewhere ? ' (в другом канале)' : ''}` });
+      l.createSpan({ text: ` ${m.code}${m.name ? ' — ' + m.name : ''}` });
     }
   }
 
@@ -1259,31 +1278,41 @@ export class LimsView extends ItemView {
     redraw: () => void,
   ): void {
     const row = parent.createDiv({ cls: 'tn-lims-flex tn-lims-mb8' });
-    const ch = (inh.channels || [])[0];
-    const chanText = ch ? `${ch.label || ch.chat_id}${ch.thread_id ? ` · тема ${ch.thread_id}` : ''}` : '—';
-    const events = [inh.on_created ? 'создана' : '', inh.on_completed ? 'выполнена' : ''].filter(Boolean).join(', ');
+    const chList = inh.channels || [];
+    const chanText =
+      chList
+        .map((c) => {
+          const ev = [c.on_created ?? inh.on_created ? 'создана' : '', c.on_completed ?? inh.on_completed ? 'выполнена' : '']
+            .filter(Boolean)
+            .join('/');
+          return `${c.label || c.chat_id}${c.thread_id ? ` · тема ${c.thread_id}` : ''}${ev ? ` (${ev})` : ''}`;
+        })
+        .join(', ') || '—';
     row.createDiv({ cls: 'tn-lims-meta' }).setText(
-      `${this.methodName(inh.method_id)} → ${chanText} (${events || '—'}), унаследовано от «${inh.source_project_name || '#' + inh.source_project_id}»`,
+      `${this.methodName(inh.method_id)} → ${chanText}, унаследовано от «${inh.source_project_name || '#' + inh.source_project_id}»`,
     );
     const override = row.createEl('button', { cls: 'tn-btn tn-btn-ghost', text: 'Переопределить' });
     override.addEventListener('click', () => {
-      const chatId = ch?.chat_id ?? '';
-      const threadId = ch?.thread_id ?? 0;
-      const key = `${chatId}#${threadId}`;
-      let card = cards.find((c) => `${c.chat_id.trim()}#${c.thread_id}` === key);
-      if (!card) {
-        card = {
-          chat_id: chatId,
-          label: ch?.label ?? '',
-          thread_id: threadId,
-          on_created: inh.on_created,
-          on_completed: inh.on_completed,
-          with_attachment: inh.with_attachment,
-          method_ids: [],
-        };
-        cards.push(card);
+      // Переносим метод во все каналы унаследованного правила (у него их может
+      // быть несколько — события у каждого свои).
+      const chs = chList.length > 0 ? chList : [{ chat_id: '', label: '', thread_id: 0 }];
+      for (const c of chs) {
+        const key = `${c.chat_id.trim()}#${c.thread_id ?? 0}`;
+        let card = cards.find((x) => `${x.chat_id.trim()}#${x.thread_id}` === key);
+        if (!card) {
+          card = {
+            chat_id: c.chat_id,
+            label: c.label || '',
+            thread_id: c.thread_id ?? 0,
+            on_created: c.on_created ?? inh.on_created,
+            on_completed: c.on_completed ?? inh.on_completed,
+            with_attachment: c.with_attachment ?? inh.with_attachment,
+            method_ids: [],
+          };
+          cards.push(card);
+        }
+        if (!card.method_ids.includes(inh.method_id)) card.method_ids.push(inh.method_id);
       }
-      if (!card.method_ids.includes(inh.method_id)) card.method_ids.push(inh.method_id);
       excluded.delete(inh.method_id);
       redraw();
     });
