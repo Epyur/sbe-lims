@@ -1319,6 +1319,51 @@ docker compose exec lab wget -qO- http://localhost:3000/api/lab/health   # вн�
 
 ## История
 
+### 2026-10-18 — Telegram-уведомления по проектам (правила, очередь, мост)
+
+Дизайн — `docs/superpowers/specs/2026-10-18-sbe-lims-telegram-project-notifications-design.md`,
+план — одноимённый в `plans/`. Заявки оповещают в Telegram-каналы о создании и
+завершении (по завершении — вложением DOCX-отчёт). Настройка — в плагине ЛИМС
+(раздел «Уведомления» → «Telegram»), права admin/superadmin.
+
+- **Схема** (`main.go`, `stmts`): `telegram_notify_rules` (`project_id`,
+  `method_id`, `deleted`, `channels` JSONB, `on_created`, `on_completed`,
+  `with_attachment`; UNIQUE `(project_id, method_id)`) и `telegram_notify_outbox`
+  (очередь+журнал: `request_id`, `event`, `chat_id`, `text`, `with_attachment`,
+  `status`, `attempts`, `last_error`, `created_at`, `sent_at`; частичный
+  уникальный индекс `(request_id, event, chat_id) WHERE status <> 'failed'` —
+  дедуп повторных событий).
+- **Новый файл `telegram_notify.go`.** Правило = один метод; наследование по
+  дереву `projects.parent_id` с переопределением и исключением: нет своей
+  строки → правило ближайшего предка по методу; активная строка → своя;
+  `deleted` → тишина и выше не смотрим. Чистый `resolveTelegramRule` (обход
+  вверх, юнит-тесты без БД), реальный `s.telegramRuleLookup`.
+- **Ручки** (`requirePerm("admin")`, кроме журнала): `GET/PUT
+  /api/lab/projects/{id}/telegram-rules` (свои + вычисленные унаследованные с
+  проектом-источником), `POST /api/lab/telegram-rules/test` (проверочное
+  сообщение), `GET /api/lab/requests/{id}/telegram-log` (`requireLabRead`).
+- **Триггеры** `triggerTelegramCreated`/`triggerTelegramCompleted`
+  (best-effort, горутина, `context.WithoutCancel`): создание — `handleCreateRequest`,
+  `pushCreate` (`sync.go`), `applyApplicationEmail` (`email_ingest.go`);
+  завершение — `setRequestStatus` и `handleKanbanMove` рядом с
+  `triggerCompletionEmails` (только на реальном переходе). `pushUpdate`
+  (offline-правка) не трогали — как и письма, он завершение не уведомляет.
+- **Очередь** `startTelegramNotifyJob` (образец `upload_buffer.go`: тикер 30 c +
+  «толчок» `Server.notifyWake`), отправка через **portal-embed** (единственный
+  держатель SOCKS-туннеля к Telegram) — `POST /internal/telegram/send` и новая
+  `/internal/telegram/send-document` (base64 DOCX). Сбой → `attempts++`,
+  через 10 попыток `failed`; отчёт не собрался — шлём текстом.
+- **Env** (`sbe-core/docker`): у сервиса `lab` — `PORTAL_EMBED_INTERNAL_URL`
+  (default `http://portal-embed:3000`) и `TELEGRAM_BRIDGE_SECRET` (тот же, что
+  у auth-service/portal-embed).
+- **Проверки:** `go build`/`vet`/`test`/`gofmt -l` — чисто; `check_lab_openapi.mjs`
+  — 90 маршрутов, схема сходится. Тесты `telegram_notify_test.go`
+  (`resolveTelegramRule` — ближайший предок, переопределение, исключение в
+  середине, нет проекта, нет строк; `validateTelegramRules`; текст сообщения;
+  потолок попыток; решение о вложении).
+- **Не задеплоено** — контейнеры не пересобирались (по правилу проекта деплой
+  отдельной командой).
+
 ### 2026-10-17 — аналоги по материалу вместо ЕКН; разрез по толщинам
 
 Приложение ИИ-отчёта собирало аналоги точным равенством ЕКН, а ЕКН — артикул

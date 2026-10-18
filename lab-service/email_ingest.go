@@ -592,6 +592,8 @@ RETURNING id`,
 	log.Printf("email ingest: created request %d (external_id=%s, method=%s) from %s",
 		requestID, externalID, methodKey, folder)
 	s.recordProcessed(ctx, dedupKey, folder, "application", payload, requestID, "")
+	// Telegram-уведомление о создании (best-effort, после коммита).
+	go s.triggerTelegramCreated(context.WithoutCancel(ctx), requestID)
 }
 
 // mapEmailPriority переводит русский текст трекера в enum requests.priority.

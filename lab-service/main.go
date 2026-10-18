@@ -15,6 +15,9 @@ type Server struct {
 	pool        *pgxpool.Pool
 	s3          *S3Store
 	fileBaseURL string
+	// notifyWake — «толчок» фоновой очереди Telegram-уведомлений (2026-10-18):
+	// постановка события не ждёт тикера, а будит воркер. См. telegram_notify.go.
+	notifyWake chan struct{}
 }
 
 func main() {
@@ -48,7 +51,7 @@ func main() {
 		log.Fatalf("S3: %v", err)
 	}
 
-	s := &Server{pool: pool, s3: s3Store}
+	s := &Server{pool: pool, s3: s3Store, notifyWake: make(chan struct{}, 1)}
 	s.fileBaseURL = s3Store.publicBaseURL()
 
 	// Постоянный CLI-режим (не сервер): перенос исторических заявок LPITrack
@@ -117,6 +120,10 @@ func main() {
 	// upload_buffer.go) — живёт весь процесс, не привязан к стартовому ctx.
 	s.s3.startUploadFlushWorker(context.Background())
 
+	// Фоновая отправка Telegram-уведомлений (2026-10-18, telegram_notify.go) —
+	// к portal-embed, который один держит SOCKS-туннель к Telegram.
+	s.startTelegramNotifyJob()
+
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /api/lab/health", s.handleHealth)
@@ -144,6 +151,10 @@ func main() {
 	// Удаление проекта (2026-09-04) — владелец/admin, блокируется ссылающимися
 	// заявками/подпроектами (409), см. handleDeleteProject.
 	mux.HandleFunc("DELETE /api/lab/projects/{id}", s.requirePerm("editor")(s.handleDeleteProject))
+	mux.HandleFunc("GET /api/lab/projects/{id}/telegram-rules", s.requirePerm("admin")(s.handleGetTelegramRules))
+	mux.HandleFunc("PUT /api/lab/projects/{id}/telegram-rules", s.requirePerm("admin")(s.handlePutTelegramRules))
+	mux.HandleFunc("POST /api/lab/telegram-rules/test", s.requirePerm("admin")(s.handleTestTelegram))
+	mux.HandleFunc("GET /api/lab/requests/{id}/telegram-log", s.requirePerm("viewer")(s.handleListTelegramLog))
 
 	// Заявки
 	mux.HandleFunc("GET /api/lab/requests", s.requirePerm("viewer")(s.handleListRequests))
@@ -898,6 +909,39 @@ WHERE mr.request_id = r.id AND mr.is_statistical_row = false AND COALESCE(r.amb_
 			attempts INT NOT NULL DEFAULT 0,
 			last_error TEXT
 		)`,
+		// Telegram-уведомления по проектам (2026-10-18) - правила и очередь
+		// отправки. Ключ правила - (project_id, method_id): у проекта ровно одна
+		// строка на метод (активная либо исключение, deleted=true). См.
+		// telegram_notify.go.
+		`CREATE TABLE IF NOT EXISTS telegram_notify_rules (
+			id BIGSERIAL PRIMARY KEY,
+			project_id BIGINT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+			method_id BIGINT NOT NULL REFERENCES methods(id) ON DELETE CASCADE,
+			deleted BOOLEAN NOT NULL DEFAULT false,
+			channels JSONB NOT NULL DEFAULT '[]',
+			on_created BOOLEAN NOT NULL DEFAULT false,
+			on_completed BOOLEAN NOT NULL DEFAULT false,
+			with_attachment BOOLEAN NOT NULL DEFAULT false,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+			UNIQUE (project_id, method_id)
+		)`,
+		`CREATE TABLE IF NOT EXISTS telegram_notify_outbox (
+			id BIGSERIAL PRIMARY KEY,
+			request_id BIGINT NOT NULL REFERENCES requests(id) ON DELETE CASCADE,
+			event TEXT NOT NULL,
+			chat_id TEXT NOT NULL,
+			text TEXT NOT NULL,
+			with_attachment BOOLEAN NOT NULL DEFAULT false,
+			status TEXT NOT NULL DEFAULT 'pending',
+			attempts INT NOT NULL DEFAULT 0,
+			last_error TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+			sent_at TIMESTAMPTZ
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_tg_outbox_dedup
+			ON telegram_notify_outbox (request_id, event, chat_id)
+			WHERE status <> 'failed'`,
 	}
 	for _, q := range stmts {
 		if _, err := s.pool.Exec(ctx, q); err != nil {

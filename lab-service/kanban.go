@@ -182,6 +182,7 @@ WHERE id = $1`, id, newStatus, newAssignedTo)
 	// РЕАЛЬНОМ переходе в completed, не при повторном перемещении уже completed-заявки.
 	if newStatus == "completed" && existing.Status != "completed" {
 		go s.triggerCompletionEmails(context.WithoutCancel(r.Context()), id)
+		go s.triggerTelegramCompleted(context.WithoutCancel(r.Context()), id)
 	}
 	// WP2 (2026-08-29): та же автоотправка при переходе в processing (см.
 	// triggerProcessingEmail) — newAssignedTo, не existing.AssignedTo, т.к. кanban-move

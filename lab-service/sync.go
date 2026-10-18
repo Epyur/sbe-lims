@@ -326,6 +326,9 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 		created = append(created, CreatedPush{ClientID: p.ClientID, GroupKey: p.GroupKey, Request: full})
 		outcomes = append(outcomes, PushOutcome{ClientID: p.ClientID, RequestID: full.ID, Status: "created", Request: full})
 		inserted++
+		// Telegram-уведомление о создании (best-effort). pushUpdate (offline-правка
+		// уже существующей заявки) уведомлений о завершении не шлёт — как и письма.
+		go s.triggerTelegramCreated(context.WithoutCancel(r.Context()), full.ID)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"inserted": inserted, "updated": updated, "created": created, "outcomes": outcomes})

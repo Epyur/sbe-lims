@@ -322,6 +322,81 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
 
+  /api/lab/projects/{id}/telegram-rules:
+    get:
+      tags: [Проекты]
+      summary: Правила Telegram-уведомлений проекта
+      description: |
+        Роль admin. `own` — свои правила проекта (включая исключения,
+        `deleted: true`); `inherited` — правила, действующие на проект по
+        наследованию от ближайшего предка (с проектом-источником).
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        '200':
+          description: Свои и унаследованные правила
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  own: { type: array, items: { $ref: '#/components/schemas/TelegramRule' } }
+                  inherited:
+                    type: array
+                    items:
+                      allOf:
+                        - { $ref: '#/components/schemas/TelegramRule' }
+                        - type: object
+                          properties:
+                            source_project_id: { type: integer, format: int64 }
+                            source_project_name: { type: string }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    put:
+      tags: [Проекты]
+      summary: Заменить правила Telegram-уведомлений проекта
+      description: |
+        Роль admin. Набор СВОИХ правил проекта заменяется целиком. Один метод —
+        одна строка; исключение (`deleted: true`) каналов не несёт.
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                rules: { type: array, items: { $ref: '#/components/schemas/TelegramRule' } }
+      responses:
+        '200': { $ref: '#/components/responses/OK' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/lab/telegram-rules/test:
+    post:
+      tags: [Проекты]
+      summary: Проверочное сообщение в Telegram-канал
+      description: |
+        Роль admin. Шлёт тестовое сообщение в указанный канал через мост
+        `portal-embed`; ошибка доставки (например, бот не админ канала)
+        отдаётся текстом.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                chat_id: { type: string }
+      responses:
+        '200': { $ref: '#/components/responses/OK' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '502':
+          description: Telegram или portal-embed не принял сообщение
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
   # ---- Заявки ----
 
   /api/lab/requests:
@@ -559,6 +634,27 @@ paths:
                 type: object
                 properties:
                   entries: { type: array, items: { $ref: '#/components/schemas/AuditLogEntry' } }
+
+  /api/lab/requests/{id}/telegram-log:
+    get:
+      tags: [Заявки]
+      summary: Журнал Telegram-уведомлений по заявке
+      description: Роль viewer — при видимости заявки.
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        '200':
+          description: Записи журнала
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  notifications:
+                    type: array
+                    items:
+                      type: object
+                      description: Событие, канал, статус, число попыток и текст ошибки.
+        '403': { $ref: '#/components/responses/Forbidden' }
 
   # ---- Группы ----
 
@@ -2149,3 +2245,28 @@ components:
         lab_id: { type: integer, format: int64 }
         email: { type: string, format: email }
         role: { type: string, enum: [lab_operator, lab_admin] }
+
+
+    TelegramRule:
+      type: object
+      description: |
+        Правило Telegram-уведомлений проекта для одного метода. Один метод —
+        одна строка; наследуется по дереву проектов с переопределением и
+        исключением.
+      properties:
+        method_id: { type: integer, format: int64 }
+        deleted:
+          type: boolean
+          description: Исключение — по методу не применяется ничего, в т.ч. родительское правило.
+        channels:
+          type: array
+          items:
+            type: object
+            properties:
+              chat_id: { type: string }
+              label: { type: string }
+        on_created: { type: boolean }
+        on_completed: { type: boolean }
+        with_attachment:
+          type: boolean
+          description: По завершении приложить DOCX-отчёт.

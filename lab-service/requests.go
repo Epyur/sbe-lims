@@ -805,6 +805,12 @@ RETURNING id`,
 		return
 	}
 
+	// Telegram-уведомления о создании (2026-10-18) — best-effort, ответ не ждёт.
+	// Одна заявка на метод: на каждую созданную строку свои правила по методу.
+	for _, c := range created {
+		go s.triggerTelegramCreated(context.WithoutCancel(r.Context()), c.ID)
+	}
+
 	full := make([]*Request, 0, len(created))
 	for _, c := range created {
 		f, err := s.loadRequest(r.Context(), c.ID)
@@ -1035,6 +1041,7 @@ WHERE id = $1`, id, newStatus)
 	// Best-effort — не блокирует ответ, ошибки только в лог/журнал (см. outbound_email.go).
 	if newStatus == "completed" && existing.Status != "completed" {
 		go s.triggerCompletionEmails(context.WithoutCancel(ctx), id)
+		go s.triggerTelegramCompleted(context.WithoutCancel(ctx), id)
 	}
 	// WP2 (2026-08-29): та же автоотправка, только при РЕАЛЬНОМ переходе в processing —
 	// см. triggerProcessingEmail. assigned_to этот путь не меняет (только чистит на
