@@ -1359,7 +1359,9 @@ docker compose exec lab wget -qO- http://localhost:3000/api/lab/health   # вн�
   (поле `message_thread_id`), в тест канала (`{chat_id, thread_id}`) и в очередь
   (`telegram_notify_outbox.thread_id`, колонка добавлена идемпотентным `ALTER` —
   таблица уже была развёрнута). Валидация: `thread_id >= 0`. Схема БД правил не
-  менялась (`channels` — JSONB). **Не выпущено** — ждёт «Фиксируй».
+  менялась (`channels` — JSONB). **Задеплоено 2026-10-18** вместе с `lab` 1.1.0:
+  колонка `thread_id` подтверждена в живой БД, `portal-embed` пересобран с
+  `message_thread_id`; см. `sbe-lims/AGENTS.md` (коммиты и выкладка).
 - **Env** (`sbe-core/docker`): у сервиса `lab` — `PORTAL_EMBED_INTERNAL_URL`
   (default `http://portal-embed:3000`) и `TELEGRAM_BRIDGE_SECRET` (тот же, что
   у auth-service/portal-embed).
