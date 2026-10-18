@@ -165,6 +165,13 @@ func TestValidateTelegramRulesRejectsDeletedWithChannels(t *testing.T) {
 	}
 }
 
+func TestValidateTelegramRulesRejectsMultipleChannels(t *testing.T) {
+	rules := []telegramRule{{MethodID: 1, Channels: []telegramChannel{{ChatID: "-100"}, {ChatID: "-200"}}}}
+	if err := validateTelegramRules(rules); err == nil {
+		t.Fatal("more than one channel per method must be rejected")
+	}
+}
+
 func TestValidateTelegramRulesRejectsNegativeThread(t *testing.T) {
 	rules := []telegramRule{{MethodID: 1, Channels: []telegramChannel{{ChatID: "-100", ThreadID: -5}}}}
 	if err := validateTelegramRules(rules); err == nil {

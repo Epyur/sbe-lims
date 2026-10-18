@@ -1353,6 +1353,12 @@ docker compose exec lab wget -qO- http://localhost:3000/api/lab/health   # вн�
   держатель SOCKS-туннеля к Telegram) — `POST /internal/telegram/send` и новая
   `/internal/telegram/send-document` (base64 DOCX). Сбой → `attempts++`,
   через 10 попыток `failed`; отчёт не собрался — шлём текстом.
+- **Канал-центричная настройка (2026-10-18, дополнение).** Хранение осталось
+  построчным `(project_id, method_id)`, но у активного правила теперь **ровно
+  один канал**: `validateTelegramRules` требует `len(channels) == 1` (было
+  `>= 1`). Несколько каналов на метод не поддерживаются — так редактирование
+  «канал → методы» однозначно, а у метода в проекте один канал. Миграции нет
+  (`channels` — JSONB). **Не выпущено** — ждёт «Фиксируй».
 - **Темы форум-супергрупп (2026-10-18, дополнение).** У канала правила появилось
   `thread_id` (`message_thread_id`; 0/пусто — «General»: без него Telegram всегда
   кладёт сообщение в General). Протаскивается в `sendMessage`/`sendDocument`

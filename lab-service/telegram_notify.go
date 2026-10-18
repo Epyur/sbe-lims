@@ -214,8 +214,11 @@ func validateTelegramRules(rules []telegramRule) error {
 			}
 			continue
 		}
-		if len(r.Channels) == 0 {
-			return fmt.Errorf("rule for method %d must have at least one channel", r.MethodID)
+		// Канал-центричная модель (2026-10-18): у метода в проекте ровно один
+		// канал. Несколько каналов на метод не поддерживаем — так редактирование
+		// «канал → методы» однозначно.
+		if len(r.Channels) != 1 {
+			return fmt.Errorf("rule for method %d must have exactly one channel", r.MethodID)
 		}
 		for _, c := range r.Channels {
 			if strings.TrimSpace(c.ChatID) == "" {
