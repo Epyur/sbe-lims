@@ -289,8 +289,17 @@ lab_operator/lab_admin/владелец. Не трогали: эндпоинт �
   `TelegramInheritedRule`/`TelegramNotifyLogEntry` (`types/lims.ts`).
 - `help.ts` — раздел «Уведомления в Telegram»; текст новости ЦУП переписан.
 - **Проверки:** `npx tsc --noEmit` EXIT=0, `npm run build` OK. Версия 1.0.18 →
-  **1.0.19**. Не закоммичено и не выложено (по правилу проекта — отдельной
-  командой).
+  **1.0.19**. Серверная правка — `lab-service/AGENTS.md`, транспорт —
+  `web/portal-embed/AGENTS.md`, env — `sbe-core/docker/AGENTS.md`.
+- **Выложено 2026-10-18.** Коммиты: `backend` `d270345` (плагин) + `7a671b4`
+  (`lab-service`), `main` `43bdb23` (черри-пик плагин-части, `main.js`
+  побайтово совпал с `backend`); самораздача (`scripts/lims_selfhost.sh`,
+  `uploadedAt` 2026-10-18T12:06:42Z) — манифест отдаёт 1.0.19, три sha256
+  сверены локально, на сервере и по https (manifest `914acd4a…d25d2`, main
+  `c5b2e5a1…89b5f`, styles `31381175…f447254`); git-реестр
+  `Epyur/sbe-apstore-registry` — `3580f54`, базовый `registry.json` на сервере
+  обновлён. Контейнеры `lab` и `portal-embed` пересобраны (health ok, новые
+  ручки снаружи 401/405). Живой E2E отправки в канал — за пользователем.
 
 ### 2026-10-17 — аналоги в ИИ-отчёте: материал вместо ЕКН (серверная правка)
 
