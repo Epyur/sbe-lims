@@ -1353,6 +1353,13 @@ docker compose exec lab wget -qO- http://localhost:3000/api/lab/health   # вн�
   держатель SOCKS-туннеля к Telegram) — `POST /internal/telegram/send` и новая
   `/internal/telegram/send-document` (base64 DOCX). Сбой → `attempts++`,
   через 10 попыток `failed`; отчёт не собрался — шлём текстом.
+- **Темы форум-супергрупп (2026-10-18, дополнение).** У канала правила появилось
+  `thread_id` (`message_thread_id`; 0/пусто — «General»: без него Telegram всегда
+  кладёт сообщение в General). Протаскивается в `sendMessage`/`sendDocument`
+  (поле `message_thread_id`), в тест канала (`{chat_id, thread_id}`) и в очередь
+  (`telegram_notify_outbox.thread_id`, колонка добавлена идемпотентным `ALTER` —
+  таблица уже была развёрнута). Валидация: `thread_id >= 0`. Схема БД правил не
+  менялась (`channels` — JSONB). **Не выпущено** — ждёт «Фиксируй».
 - **Env** (`sbe-core/docker`): у сервиса `lab` — `PORTAL_EMBED_INTERNAL_URL`
   (default `http://portal-embed:3000`) и `TELEGRAM_BRIDGE_SECRET` (тот же, что
   у auth-service/portal-embed).

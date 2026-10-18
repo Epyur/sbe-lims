@@ -165,6 +165,13 @@ func TestValidateTelegramRulesRejectsDeletedWithChannels(t *testing.T) {
 	}
 }
 
+func TestValidateTelegramRulesRejectsNegativeThread(t *testing.T) {
+	rules := []telegramRule{{MethodID: 1, Channels: []telegramChannel{{ChatID: "-100", ThreadID: -5}}}}
+	if err := validateTelegramRules(rules); err == nil {
+		t.Fatal("negative thread_id must be rejected")
+	}
+}
+
 func TestValidateTelegramRulesRejectsEmptyChatID(t *testing.T) {
 	rules := []telegramRule{{MethodID: 1, Channels: []telegramChannel{{ChatID: "  "}}}}
 	if err := validateTelegramRules(rules); err == nil {

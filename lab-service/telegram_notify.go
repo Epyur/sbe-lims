@@ -27,10 +27,13 @@ import (
 // Отправляет фоновая очередь через portal-embed (единственный держатель
 // SOCKS-туннеля к Telegram).
 
-// telegramChannel — один канал правила (id + подпись для человека).
+// telegramChannel — один канал правила (id + подпись для человека). ThreadID —
+// тема форум-супергруппы (message_thread_id): 0 — не задана, сообщение уходит в
+// «General».
 type telegramChannel struct {
-	ChatID string `json:"chat_id"`
-	Label  string `json:"label"`
+	ChatID   string `json:"chat_id"`
+	Label    string `json:"label"`
+	ThreadID int64  `json:"thread_id"`
 }
 
 // telegramRule — правило проекта для одного метода.
@@ -134,9 +137,14 @@ func telegramBridgeSecret() string {
 	return strings.TrimSpace(os.Getenv("TELEGRAM_BRIDGE_SECRET"))
 }
 
-// sendTelegramText — POST /internal/telegram/send у portal-embed.
-func (s *Server) sendTelegramText(ctx context.Context, chatID, text string) error {
-	body, err := json.Marshal(map[string]string{"chat_id": chatID, "text": text})
+// sendTelegramText — POST /internal/telegram/send у portal-embed. threadID > 0 —
+// тема форум-супергруппы (message_thread_id).
+func (s *Server) sendTelegramText(ctx context.Context, chatID, text string, threadID int64) error {
+	payload := map[string]any{"chat_id": chatID, "text": text}
+	if threadID > 0 {
+		payload["message_thread_id"] = threadID
+	}
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
@@ -146,14 +154,18 @@ func (s *Server) sendTelegramText(ctx context.Context, chatID, text string) erro
 // sendTelegramDocument — POST /internal/telegram/send-document у portal-embed
 // (файл передаётся base64: JSON-канал не таскает бинарь). caption — короткая
 // подпись к файлу (тот же текст уведомления), уходит вместе с документом.
-func (s *Server) sendTelegramDocument(ctx context.Context, chatID, fileName string, content []byte, caption string) error {
-	payload := map[string]string{
+// threadID > 0 — тема форум-супергруппы.
+func (s *Server) sendTelegramDocument(ctx context.Context, chatID, fileName string, content []byte, caption string, threadID int64) error {
+	payload := map[string]any{
 		"chat_id":        chatID,
 		"filename":       fileName,
 		"content_base64": base64.StdEncoding.EncodeToString(content),
 	}
 	if strings.TrimSpace(caption) != "" {
 		payload["caption"] = caption
+	}
+	if threadID > 0 {
+		payload["message_thread_id"] = threadID
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -208,6 +220,9 @@ func validateTelegramRules(rules []telegramRule) error {
 		for _, c := range r.Channels {
 			if strings.TrimSpace(c.ChatID) == "" {
 				return fmt.Errorf("rule for method %d has empty chat_id", r.MethodID)
+			}
+			if c.ThreadID < 0 {
+				return fmt.Errorf("rule for method %d has negative thread_id", r.MethodID)
 			}
 		}
 	}
@@ -408,7 +423,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)`,
 // т.п. — частая причина, человеку нужно её увидеть).
 func (s *Server) handleTestTelegram(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		ChatID string `json:"chat_id"`
+		ChatID   string `json:"chat_id"`
+		ThreadID int64  `json:"thread_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json"})
@@ -419,7 +435,11 @@ func (s *Server) handleTestTelegram(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "chat_id is required"})
 		return
 	}
-	if err := s.sendTelegramText(r.Context(), chatID, "✅ Проверка уведомлений ЛИМС — канал настроен."); err != nil {
+	if body.ThreadID < 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "negative thread_id"})
+		return
+	}
+	if err := s.sendTelegramText(r.Context(), chatID, "✅ Проверка уведомлений ЛИМС — канал настроен.", body.ThreadID); err != nil {
 		log.Printf("telegram test: %v", err)
 		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
 		return
@@ -599,9 +619,9 @@ func (s *Server) triggerTelegramEvent(ctx context.Context, requestID int64, even
 			continue
 		}
 		if _, err := s.pool.Exec(ctx, `
-INSERT INTO telegram_notify_outbox (request_id, event, chat_id, text, with_attachment)
-VALUES ($1, $2, $3, $4, $5)
-ON CONFLICT DO NOTHING`, requestID, event, chatID, text, withAttachment); err != nil {
+INSERT INTO telegram_notify_outbox (request_id, event, chat_id, text, with_attachment, thread_id)
+VALUES ($1, $2, $3, $4, $5, $6)
+ON CONFLICT DO NOTHING`, requestID, event, chatID, text, withAttachment, ch.ThreadID); err != nil {
 			log.Printf("telegram notify: enqueue request %d chat %s: %v", requestID, chatID, err)
 			continue
 		}
@@ -659,11 +679,12 @@ type telegramOutboxRow struct {
 	chatID         string
 	text           string
 	withAttachment bool
+	threadID       int64
 }
 
 func (s *Server) runTelegramNotifyOnce(ctx context.Context) {
 	rows, err := s.pool.Query(ctx, `
-SELECT id, request_id, chat_id, text, with_attachment
+SELECT id, request_id, chat_id, text, with_attachment, thread_id
 FROM telegram_notify_outbox WHERE status = 'pending'
 ORDER BY id LIMIT $1`, telegramNotifyBatch)
 	if err != nil {
@@ -673,7 +694,7 @@ ORDER BY id LIMIT $1`, telegramNotifyBatch)
 	items := make([]telegramOutboxRow, 0, telegramNotifyBatch)
 	for rows.Next() {
 		var it telegramOutboxRow
-		if err := rows.Scan(&it.id, &it.requestID, &it.chatID, &it.text, &it.withAttachment); err == nil {
+		if err := rows.Scan(&it.id, &it.requestID, &it.chatID, &it.text, &it.withAttachment, &it.threadID); err == nil {
 			items = append(items, it)
 		}
 	}
@@ -698,11 +719,11 @@ func (s *Server) sendTelegramOutboxRow(ctx context.Context, it telegramOutboxRow
 			// Подпись к файлу — тот же текст уведомления (номер, проект, метод,
 			// объект, заказчик, результат/соответствие, ссылка), спека: «отчёт
 			// приходит документом с короткой подписью».
-			sendErr = s.sendTelegramDocument(ctx, it.chatID, reportFilename(it.requestID), res.DOCX, it.text)
+			sendErr = s.sendTelegramDocument(ctx, it.chatID, reportFilename(it.requestID), res.DOCX, it.text, it.threadID)
 		}
 	}
 	if !attachmentSent {
-		sendErr = s.sendTelegramText(ctx, it.chatID, it.text)
+		sendErr = s.sendTelegramText(ctx, it.chatID, it.text, it.threadID)
 	}
 	if sendErr == nil {
 		if _, err := s.pool.Exec(ctx, `

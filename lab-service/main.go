@@ -933,6 +933,7 @@ WHERE mr.request_id = r.id AND mr.is_statistical_row = false AND COALESCE(r.amb_
 			chat_id TEXT NOT NULL,
 			text TEXT NOT NULL,
 			with_attachment BOOLEAN NOT NULL DEFAULT false,
+			thread_id BIGINT NOT NULL DEFAULT 0,
 			status TEXT NOT NULL DEFAULT 'pending',
 			attempts INT NOT NULL DEFAULT 0,
 			last_error TEXT NOT NULL DEFAULT '',
@@ -942,6 +943,9 @@ WHERE mr.request_id = r.id AND mr.is_statistical_row = false AND COALESCE(r.amb_
 		`CREATE UNIQUE INDEX IF NOT EXISTS uq_tg_outbox_dedup
 			ON telegram_notify_outbox (request_id, event, chat_id)
 			WHERE status <> 'failed'`,
+		// Тема форум-супергруппы (2026-10-18) — колонка появилась после первого
+		// деплоя, для уже созданной таблицы добавляем идемпотентно.
+		`ALTER TABLE telegram_notify_outbox ADD COLUMN IF NOT EXISTS thread_id BIGINT NOT NULL DEFAULT 0`,
 	}
 	for _, q := range stmts {
 		if _, err := s.pool.Exec(ctx, q); err != nil {

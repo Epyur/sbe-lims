@@ -387,6 +387,10 @@ paths:
               type: object
               properties:
                 chat_id: { type: string }
+                thread_id:
+                  type: integer
+                  format: int64
+                  description: Тема форум-супергруппы (message_thread_id); 0 или не задано — «General».
       responses:
         '200': { $ref: '#/components/responses/OK' }
         '400': { $ref: '#/components/responses/BadRequest' }
@@ -2265,6 +2269,10 @@ components:
             properties:
               chat_id: { type: string }
               label: { type: string }
+              thread_id:
+                type: integer
+                format: int64
+                description: Тема форум-супергруппы (message_thread_id); 0 или не задано — «General».
         on_created: { type: boolean }
         on_completed: { type: boolean }
         with_attachment:
