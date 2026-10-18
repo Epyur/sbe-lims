@@ -1361,8 +1361,13 @@ docker compose exec lab wget -qO- http://localhost:3000/api/lab/health   # вн�
   (`resolveTelegramRule` — ближайший предок, переопределение, исключение в
   середине, нет проекта, нет строк; `validateTelegramRules`; текст сообщения;
   потолок попыток; решение о вложении).
-- **Не задеплоено** — контейнеры не пересобирались (по правилу проекта деплой
-  отдельной командой).
+- **Задеплоено 2026-10-18** (`scripts/lab_deploy.sh`): контейнер `lab`
+  пересобран, health `{"status":"ok"}`, `/sync/pull` без ключа 401; новые ручки
+  снаружи `telegram-rules`/`telegram-log` — 401, `telegram-rules/test` — 405 на
+  GET. Env `PORTAL_EMBED_INTERNAL_URL`/`TELEGRAM_BRIDGE_SECRET` вставлены точечно
+  в серверный `docker-compose.yml` (бэкап
+  `docker-compose.yml.bak-tg-notify-20261018`) и присутствуют в контейнере.
+  Backend- и plugin-коммиты — см. `sbe-lims/AGENTS.md` (выложено, `main` `43bdb23`).
 
 ### 2026-10-17 — аналоги по материалу вместо ЕКН; разрез по толщинам
 
