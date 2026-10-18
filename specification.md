@@ -70,8 +70,8 @@ SBE-плагин «ЛИМС» для сотрудников лаборатори
 | Метод | Путь | Роль | Тело / ответ |
 |---|---|---|---|
 | GET | `/projects/{id}/telegram-rules` | admin | `{own:[TelegramRule], inherited:[TelegramInheritedRule]}` — свои правила проекта и вычисленные унаследованные (с `source_project_id`/`source_project_name`) |
-| PUT | `/projects/{id}/telegram-rules` | admin | `{rules:[TelegramRule]}` → `{ok}` — заменяет СВОИ правила целиком; 400 при дубле метода, исключении с каналами, пустом `chat_id`; 404 если проекта нет |
-| POST | `/telegram-rules/test` | admin | `{chat_id}` → `{ok}` или 502 `{error}` (текст отказа Telegram/portal-embed) |
+| PUT | `/projects/{id}/telegram-rules` | admin | `{rules:[TelegramRule]}` → `{ok}` — заменяет СВОИ правила целиком; 400 при дубле метода, исключении с каналами, пустом `chat_id`, отрицательном `thread_id`; 404 если проекта нет. Канал: `{chat_id, label, thread_id?}` — `thread_id` задаёт тему форум-супергруппы (`message_thread_id`), 0/пусто — General |
+| POST | `/telegram-rules/test` | admin | `{chat_id, thread_id?}` → `{ok}` или 502 `{error}` (текст отказа Telegram/portal-embed) |
 | GET | `/requests/{id}/telegram-log` | viewer (видимость заявки) | `{notifications:[{event, chat_id, status, attempts, last_error, created_at, sent_at}]}` |
 
 Правило = один метод (`method_id`), наследуется по дереву `projects.parent_id`:

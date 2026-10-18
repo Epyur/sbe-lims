@@ -127,10 +127,12 @@ export interface LabProject {
   updated_at: string;
 }
 
-/** Telegram-канал правила уведомлений (2026-10-18). */
+/** Telegram-канал правила уведомлений (2026-10-18). `thread_id` — тема
+ * форум-супергруппы (message_thread_id): 0/нет — сообщение уходит в «General». */
 export interface TelegramChannel {
   chat_id: string;
   label: string;
+  thread_id?: number;
 }
 
 /** Правило Telegram-уведомлений проекта для одного метода: один метод — одна

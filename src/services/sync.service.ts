@@ -364,15 +364,15 @@ export class LimsSyncService {
     await this.putEntity(`/api/lab/projects/${projectId}/telegram-rules`, { rules });
   }
 
-  /** Проверочное сообщение в канал (admin). Ошибка доставки приходит текстом —
-   * assertOk пробросит её как Error. */
-  async testTelegramRule(chatId: string): Promise<void> {
+  /** Проверочное сообщение в канал (admin). `threadId` — тема форум-супергруппы
+   * (0 — General). Ошибка доставки приходит текстом — assertOk пробросит её. */
+  async testTelegramRule(chatId: string, threadId = 0): Promise<void> {
     const token = await this.getToken();
     const res = await this.request({
       url: `${this.baseUrl}/api/lab/telegram-rules/test`,
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ chat_id: chatId }),
+      body: JSON.stringify({ chat_id: chatId, thread_id: threadId }),
     });
     this.assertOk(res);
   }
