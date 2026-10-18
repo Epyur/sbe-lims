@@ -127,6 +127,41 @@ export interface LabProject {
   updated_at: string;
 }
 
+/** Telegram-канал правила уведомлений (2026-10-18). */
+export interface TelegramChannel {
+  chat_id: string;
+  label: string;
+}
+
+/** Правило Telegram-уведомлений проекта для одного метода: один метод — одна
+ * строка. Наследуется по дереву проектов с переопределением и исключением
+ * (`deleted`). Настройка — раздел «Telegram» в lims-view.ts. */
+export interface TelegramRule {
+  method_id: number;
+  deleted: boolean;
+  channels: TelegramChannel[];
+  on_created: boolean;
+  on_completed: boolean;
+  with_attachment: boolean;
+}
+
+/** Правило, действующее на проект по наследованию, с проектом-источником. */
+export interface TelegramInheritedRule extends TelegramRule {
+  source_project_id: number;
+  source_project_name: string;
+}
+
+/** Строка журнала отправок Telegram по заявке (карточка заявки). */
+export interface TelegramNotifyLogEntry {
+  event: string;
+  chat_id: string;
+  status: string;
+  attempts: number;
+  last_error: string;
+  created_at: string;
+  sent_at?: string;
+}
+
 /** Группа участников (видимость заявок группы; создание — в sbe-requests). */
 export interface LabGroup {
   id: number;

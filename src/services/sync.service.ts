@@ -23,6 +23,9 @@ import type {
   SentEmail,
   PresentationKind,
   ProtocolResponse,
+  TelegramInheritedRule,
+  TelegramNotifyLogEntry,
+  TelegramRule,
 } from '../types/lims';
 
 /** Клиент lab-service для ЛИМС через JWT из ЦУП. */
@@ -330,6 +333,64 @@ export class LimsSyncService {
       return Array.isArray(data.projects) ? data.projects : [];
     } catch (e: unknown) {
       console.warn('ЛИМС: не JSON в ответе projects:', errorMessage(e));
+      return [];
+    }
+  }
+
+  /** Правила Telegram-уведомлений проекта (admin): свои строки и вычисленные
+   * унаследованные. См. раздел «Telegram» в lims-view.ts. */
+  async getTelegramRules(projectId: number): Promise<{ own: TelegramRule[]; inherited: TelegramInheritedRule[] }> {
+    const token = await this.getToken();
+    const res = await this.request({
+      url: `${this.baseUrl}/api/lab/projects/${projectId}/telegram-rules`,
+      method: 'GET',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    this.assertOk(res);
+    try {
+      const data = JSON.parse(res.text) as { own?: TelegramRule[]; inherited?: TelegramInheritedRule[] };
+      return {
+        own: Array.isArray(data.own) ? data.own : [],
+        inherited: Array.isArray(data.inherited) ? data.inherited : [],
+      };
+    } catch (e: unknown) {
+      console.warn('ЛИМС: не JSON в ответе telegram-rules:', errorMessage(e));
+      return { own: [], inherited: [] };
+    }
+  }
+
+  /** Заменить СВОИ правила проекта целиком (admin). Наследование — на сервере. */
+  async saveTelegramRules(projectId: number, rules: TelegramRule[]): Promise<void> {
+    await this.putEntity(`/api/lab/projects/${projectId}/telegram-rules`, { rules });
+  }
+
+  /** Проверочное сообщение в канал (admin). Ошибка доставки приходит текстом —
+   * assertOk пробросит её как Error. */
+  async testTelegramRule(chatId: string): Promise<void> {
+    const token = await this.getToken();
+    const res = await this.request({
+      url: `${this.baseUrl}/api/lab/telegram-rules/test`,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ chat_id: chatId }),
+    });
+    this.assertOk(res);
+  }
+
+  /** Журнал Telegram-уведомлений по заявке (карточка заявки). */
+  async listTelegramLog(requestId: number): Promise<TelegramNotifyLogEntry[]> {
+    const token = await this.getToken();
+    const res = await this.request({
+      url: `${this.baseUrl}/api/lab/requests/${requestId}/telegram-log`,
+      method: 'GET',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    this.assertOk(res);
+    try {
+      const data = JSON.parse(res.text) as { notifications?: TelegramNotifyLogEntry[] };
+      return Array.isArray(data.notifications) ? data.notifications : [];
+    } catch (e: unknown) {
+      console.warn('ЛИМС: не JSON в ответе telegram-log:', errorMessage(e));
       return [];
     }
   }
@@ -879,6 +940,17 @@ export class LimsSyncService {
     const res = await this.request({
       url: `${this.baseUrl}${path}`,
       method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify(body),
+    });
+    this.assertOk(res);
+  }
+
+  private async putEntity(path: string, body: Record<string, unknown>): Promise<void> {
+    const token = await this.getToken();
+    const res = await this.request({
+      url: `${this.baseUrl}${path}`,
+      method: 'PUT',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
       body: JSON.stringify(body),
     });

@@ -65,6 +65,22 @@ SBE-плагин «ЛИМС» для сотрудников лаборатори
 | POST | `/requests/{id}/report` | editor+ | пересобрать отчёт заново → `{ok, has_ai}` (`has_ai=false` — ИИ-разделы не получены, отчёт без них). Автоматически собирается при завершении заявки и вкладывается в письмо заказчику |
 | GET | `/dashboard?period=week\|month\|quarter\|year` | viewer | `{by_status, by_method:[{method_id,count}], total, completed_in_period, period}` — ⚠️ **HЕ используется плагином** (дашборд вынесен, 2026-08-18), эндпоинт оставлен на сервере |
 
+### Telegram-уведомления (2026-10-18)
+
+| Метод | Путь | Роль | Тело / ответ |
+|---|---|---|---|
+| GET | `/projects/{id}/telegram-rules` | admin | `{own:[TelegramRule], inherited:[TelegramInheritedRule]}` — свои правила проекта и вычисленные унаследованные (с `source_project_id`/`source_project_name`) |
+| PUT | `/projects/{id}/telegram-rules` | admin | `{rules:[TelegramRule]}` → `{ok}` — заменяет СВОИ правила целиком; 400 при дубле метода, исключении с каналами, пустом `chat_id`; 404 если проекта нет |
+| POST | `/telegram-rules/test` | admin | `{chat_id}` → `{ok}` или 502 `{error}` (текст отказа Telegram/portal-embed) |
+| GET | `/requests/{id}/telegram-log` | viewer (видимость заявки) | `{notifications:[{event, chat_id, status, attempts, last_error, created_at, sent_at}]}` |
+
+Правило = один метод (`method_id`), наследуется по дереву `projects.parent_id`:
+нет своей строки → правило ближайшего предка по методу; своя активная строка →
+применяется только она; строка с `deleted:true` («исключение») → по методу не
+применяется ничего, в том числе родительское. Отправку выполняет серверная
+очередь через `portal-embed` (см. `lab-service/AGENTS.md`, `portal-embed/AGENTS.md`).
+Настройка — раздел «Уведомления» → «Telegram» в `lims-view.ts`.
+
 ### Общие (все плагины lab-service)
 
 `/health`, `/sync/pull`, `/sync/push`, `/file` (S3), `/permissions/me`, `/permissions`,
