@@ -143,7 +143,16 @@
   заявок этого объекта (`showRequestsForObject`), заменила кнопку «→ Заявки»
   от 2026-08-21.
 - **Новость ЦУП** (`main.ts`) переписана под этот выпуск.
-- **Проверки:** `npx tsc --noEmit` EXIT=0, `npm run build` OK.
+- **Проверки:** `npx tsc --noEmit` EXIT=0, `npm run build` OK. Версия 1.1.2 →
+  **1.1.3**.
+- **Выложено 2026-10-18.** Коммиты: `backend` `b0f3f5b` (плагин) → `main`
+  `03d55ae` (черри-пик). Серверная часть (`lab-service/`) в этой партии не
+  менялась. Самораздача 1.1.3 (`scripts/lims_selfhost.sh`, `uploadedAt`
+  2026-10-18T14:12:39Z): три sha256 совпали локально, на сервере и по https
+  (manifest `4d4bfd31…408df`, main `395e041c…d8475`, styles `664c2003…07a59`),
+  raw-путь GitHub — MATCH. Реестр `Epyur/sbe-apstore-registry` `6cf9663`
+  (обновлены `hashes`/`uploadedAt`), базовый `registry.json` на сервере
+  обновлён. Живой просмотр раздела «Объекты» в Obsidian — за пользователем.
 
 ### 2026-10-18 — v1.0.19 (раздел «Уведомления → Telegram»; журнал в карточке заявки)
 
