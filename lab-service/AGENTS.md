@@ -1358,7 +1358,9 @@ docker compose exec lab wget -qO- http://localhost:3000/api/lab/health   # вн�
   один канал**: `validateTelegramRules` требует `len(channels) == 1` (было
   `>= 1`). Несколько каналов на метод не поддерживаются — так редактирование
   «канал → методы» однозначно, а у метода в проекте один канал. Миграции нет
-  (`channels` — JSONB). **Не выпущено** — ждёт «Фиксируй».
+  (`channels` — JSONB). **Задеплоено 2026-10-18** вместе с `sbe-lims` 1.1.1:
+  контейнер `lab` пересобран, в бинаре есть `must have exactly one channel`,
+  health ok, `/sync/pull` 401.
 - **Темы форум-супергрупп (2026-10-18, дополнение).** У канала правила появилось
   `thread_id` (`message_thread_id`; 0/пусто — «General»: без него Telegram всегда
   кладёт сообщение в General). Протаскивается в `sendMessage`/`sendDocument`
