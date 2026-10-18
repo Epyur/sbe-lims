@@ -1363,8 +1363,10 @@ docker compose exec lab wget -qO- http://localhost:3000/api/lab/health   # вн�
   дублировать адрес `(chat, тема)` в правиле нельзя. Дедуп очереди — по
   конечному адресу: старый индекс `(request_id,event,chat_id)` заменён на
   `(request_id,event,chat_id,thread_id)` (`DROP` + `CREATE` в `main.go`), иначе
-  две темы одного чата блокировали бы друг друга. **Не выпущено** — ждёт
-  «Фиксируй».
+  две темы одного чата блокировали бы друг друга. **Задеплоено 2026-10-18**
+  вместе с `sbe-lims` 1.1.2: контейнер `lab` пересобран, health ok; в живой БД
+  индекс `uq_tg_outbox_dest` есть, старого `uq_tg_outbox_dedup` нет; строка
+  `has duplicate channel` присутствует в бинаре.
 - **Темы форум-супергрупп (2026-10-18, дополнение).** У канала правила появилось
   `thread_id` (`message_thread_id`; 0/пусто — «General»: без него Telegram всегда
   кладёт сообщение в General). Протаскивается в `sendMessage`/`sendDocument`
