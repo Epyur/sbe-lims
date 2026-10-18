@@ -1278,3 +1278,12 @@
   font-weight: 600;
   margin-bottom: 4px;
 }
+
+/* Сетка методов в карточке Telegram-канала (2026-10-18): чекбоксы в колонки,
+   чтобы длинный справочник методов не растягивал карточку. */
+.tn-lims-tg-methods {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 2px 12px;
+  margin-top: 4px;
+}
