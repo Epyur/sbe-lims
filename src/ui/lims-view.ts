@@ -4892,7 +4892,8 @@ export class LimsView extends ItemView {
     return null;
   }
 
-  /** Объекты исследования — только чтение (создание в sbe-requests). */
+  /** Объекты исследования — только чтение (создание в sbe-requests). Название
+   * объекта — активная ссылка на список связанных с ним заявок (2026-10-18). */
   private async renderObjects(): Promise<void> {
     this.bodyEl.createDiv({ cls: 'tn-lims-meta', text: 'Загрузка…' });
     try {
@@ -4902,23 +4903,34 @@ export class LimsView extends ItemView {
         this.bodyEl.createDiv({ cls: 'tn-lims-meta tn-lims-p24' }).setText('Объектов пока нет.');
         return;
       }
-      const table = this.bodyEl.createEl('table', { cls: 'tn-table' });
+      const table = this.bodyEl.createEl('table', { cls: 'tn-table tn-lims-objects-table' });
       const thead = table.createEl('thead').createEl('tr');
-      for (const h of ['Название', 'Описание', 'Характеристики', '']) thead.createEl('th').setText(h);
+      for (const h of ['Название', 'Описание', 'Характеристики']) thead.createEl('th').setText(h);
       const tbody = table.createEl('tbody');
       for (const o of objects) {
+        const label = o.name || `#${o.id}`;
         const tr = tbody.createEl('tr');
-        tr.createEl('td').setText(o.name || `#${o.id}`);
-        tr.createEl('td').setText(o.description || '—');
-        tr.createEl('td').setText(Object.keys(o.characteristics || {}).length > 0 ? JSON.stringify(o.characteristics) : '—');
-        const actions = tr.createEl('td');
-        const linkBtn = actions.createEl('button', { text: '→ Заявки', cls: 'tn-btn tn-btn-ghost' });
-        linkBtn.addEventListener('click', () => void this.showRequestsForObject(o.id, o.name || `#${o.id}`));
+        const nameTd = tr.createEl('td', { cls: 'tn-lims-objects-name' });
+        const link = nameTd.createEl('a', { cls: 'tn-lims-object-link', text: label });
+        link.addEventListener('click', (ev) => {
+          ev.preventDefault();
+          void this.showRequestsForObject(o.id, label);
+        });
+        tr.createEl('td', { cls: 'tn-lims-objects-desc' }).setText(o.description || '—');
+        tr.createEl('td', { cls: 'tn-lims-objects-char' }).setText(this.objectCharacteristicsText(o.characteristics));
       }
     } catch (e: unknown) {
       this.bodyEl.empty();
       this.bodyEl.createDiv({ cls: 'tn-lims-error' }).setText(`Ошибка: ${errorMessage(e)}`);
     }
+  }
+
+  /** Характеристики объекта — компактно, парами «ключ: значение» через «;»
+   * (вместо сырого JSON, растягивавшего колонку). */
+  private objectCharacteristicsText(characteristics: Record<string, unknown> | undefined): string {
+    const entries = Object.entries(characteristics || {});
+    if (entries.length === 0) return '—';
+    return entries.map(([k, v]) => `${k}: ${this.fmt(v)}`).join('; ');
   }
 
   /** Испытатели — список (viewer) + создание/правка/удаление (editor+). */

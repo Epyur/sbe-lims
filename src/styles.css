@@ -742,3 +742,35 @@
   gap: 2px 12px;
   margin-top: 4px;
 }
+
+/* Справочник «Объекты» (2026-10-18): компактная таблица — длинные описание и
+   характеристики переносятся, а не растягивают колонки (общий .tn-table задаёт
+   white-space: nowrap для всех ячеек). Название — активная ссылка на заявки. */
+.tn-lims-objects-table td,
+.tn-lims-objects-table th {
+  white-space: normal;
+  vertical-align: top;
+}
+
+.tn-lims-objects-table .tn-lims-objects-name {
+  width: 1%;
+  white-space: nowrap;
+}
+
+.tn-lims-objects-table .tn-lims-objects-desc,
+.tn-lims-objects-table .tn-lims-objects-char {
+  max-width: 360px;
+  color: var(--content-secondary-enabled);
+  font-size: var(--font-smaller);
+}
+
+.tn-lims-object-link {
+  color: var(--tn-brand);
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.tn-lims-object-link:hover {
+  text-decoration: underline;
+}
