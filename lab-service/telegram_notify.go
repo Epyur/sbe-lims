@@ -29,11 +29,40 @@ import (
 
 // telegramChannel — один канал правила (id + подпись для человека). ThreadID —
 // тема форум-супергруппы (message_thread_id): 0 — не задана, сообщение уходит в
-// «General».
+// «General». События — СВОИ у каждого канала (2026-10-18): один метод может
+// слать «Создана» в один канал, а «Выполнена» — в другой. Указатели нужны,
+// чтобы отличить «поле не задано» (старые записи) от явного false; тогда
+// действует запасное значение с уровня правила.
 type telegramChannel struct {
-	ChatID   string `json:"chat_id"`
-	Label    string `json:"label"`
-	ThreadID int64  `json:"thread_id"`
+	ChatID         string `json:"chat_id"`
+	Label          string `json:"label"`
+	ThreadID       int64  `json:"thread_id"`
+	OnCreated      *bool  `json:"on_created,omitempty"`
+	OnCompleted    *bool  `json:"on_completed,omitempty"`
+	WithAttachment *bool  `json:"with_attachment,omitempty"`
+}
+
+// boolOr — явно заданное значение канала, иначе запасное с уровня правила.
+func boolOr(v *bool, fallback bool) bool {
+	if v != nil {
+		return *v
+	}
+	return fallback
+}
+
+func (c telegramChannel) wantsCreated(fallback bool) bool   { return boolOr(c.OnCreated, fallback) }
+func (c telegramChannel) wantsCompleted(fallback bool) bool { return boolOr(c.OnCompleted, fallback) }
+func (c telegramChannel) wantsAttachment(fallback bool) bool {
+	return boolOr(c.WithAttachment, fallback)
+}
+func (c telegramChannel) wantsEvent(event string, rule *telegramRule) bool {
+	switch event {
+	case "created":
+		return c.wantsCreated(rule.OnCreated)
+	case "completed":
+		return c.wantsCompleted(rule.OnCompleted)
+	}
+	return false
 }
 
 // telegramRule — правило проекта для одного метода.
@@ -214,18 +243,28 @@ func validateTelegramRules(rules []telegramRule) error {
 			}
 			continue
 		}
-		// Канал-центричная модель (2026-10-18): у метода в проекте ровно один
-		// канал. Несколько каналов на метод не поддерживаем — так редактирование
-		// «канал → методы» однозначно.
-		if len(r.Channels) != 1 {
-			return fmt.Errorf("rule for method %d must have exactly one channel", r.MethodID)
+		// У метода может быть НЕСКОЛЬКО каналов (2026-10-18): события задаются
+		// на канал, поэтому один метод шлёт «Создана» в один канал, «Выполнена» —
+		// в другой. Дублировать один и тот же канал (chat + тема) нельзя.
+		if len(r.Channels) == 0 {
+			return fmt.Errorf("rule for method %d must have at least one channel", r.MethodID)
 		}
+		seenDest := map[string]bool{}
 		for _, c := range r.Channels {
-			if strings.TrimSpace(c.ChatID) == "" {
+			chatID := strings.TrimSpace(c.ChatID)
+			if chatID == "" {
 				return fmt.Errorf("rule for method %d has empty chat_id", r.MethodID)
 			}
 			if c.ThreadID < 0 {
 				return fmt.Errorf("rule for method %d has negative thread_id", r.MethodID)
+			}
+			dest := fmt.Sprintf("%s#%d", chatID, c.ThreadID)
+			if seenDest[dest] {
+				return fmt.Errorf("rule for method %d has duplicate channel %s", r.MethodID, chatID)
+			}
+			seenDest[dest] = true
+			if !c.wantsCreated(r.OnCreated) && !c.wantsCompleted(r.OnCompleted) {
+				return fmt.Errorf("channel %s of method %d has no events", chatID, r.MethodID)
 			}
 		}
 	}
@@ -603,7 +642,19 @@ func (s *Server) triggerTelegramEvent(ctx context.Context, requestID int64, even
 		log.Printf("telegram notify: resolve rule request %d: %v", requestID, err)
 		return
 	}
-	if rule == nil || !telegramRuleMatchesEvent(rule, event) || len(rule.Channels) == 0 {
+	if rule == nil || len(rule.Channels) == 0 {
+		return
+	}
+	// Событие — на уровне канала: если ни один канал этого события не ждёт,
+	// дальше не идём (не строим текст и не трогаем отчёт).
+	wanted := false
+	for _, ch := range rule.Channels {
+		if ch.wantsEvent(event, rule) {
+			wanted = true
+			break
+		}
+	}
+	if !wanted {
 		return
 	}
 	if event == "completed" {
@@ -614,13 +665,16 @@ func (s *Server) triggerTelegramEvent(ctx context.Context, requestID int64, even
 		*req = reqs[0]
 	}
 	text := buildTelegramText(req, event, s.loadTelegramNames(ctx, req))
-	withAttachment := rule.WithAttachment && event == "completed"
 	enqueued := false
 	for _, ch := range rule.Channels {
+		if !ch.wantsEvent(event, rule) {
+			continue
+		}
 		chatID := strings.TrimSpace(ch.ChatID)
 		if chatID == "" {
 			continue
 		}
+		withAttachment := event == "completed" && ch.wantsAttachment(rule.WithAttachment)
 		if _, err := s.pool.Exec(ctx, `
 INSERT INTO telegram_notify_outbox (request_id, event, chat_id, text, with_attachment, thread_id)
 VALUES ($1, $2, $3, $4, $5, $6)

@@ -165,10 +165,46 @@ func TestValidateTelegramRulesRejectsDeletedWithChannels(t *testing.T) {
 	}
 }
 
-func TestValidateTelegramRulesRejectsMultipleChannels(t *testing.T) {
-	rules := []telegramRule{{MethodID: 1, Channels: []telegramChannel{{ChatID: "-100"}, {ChatID: "-200"}}}}
+func boolPtr(v bool) *bool { return &v }
+
+func TestValidateTelegramRulesAllowsMultipleChannels(t *testing.T) {
+	rules := []telegramRule{{
+		MethodID:  1,
+		OnCreated: true,
+		Channels:  []telegramChannel{{ChatID: "-100"}, {ChatID: "-200"}},
+	}}
+	if err := validateTelegramRules(rules); err != nil {
+		t.Fatalf("multiple channels must be allowed: %v", err)
+	}
+}
+
+func TestValidateTelegramRulesRejectsDuplicateDestination(t *testing.T) {
+	rules := []telegramRule{{
+		MethodID:  1,
+		OnCreated: true,
+		Channels:  []telegramChannel{{ChatID: "-100", ThreadID: 5}, {ChatID: "-100", ThreadID: 5}},
+	}}
 	if err := validateTelegramRules(rules); err == nil {
-		t.Fatal("more than one channel per method must be rejected")
+		t.Fatal("duplicate channel destination must be rejected")
+	}
+}
+
+func TestValidateTelegramRulesRejectsChannelWithoutEvents(t *testing.T) {
+	rules := []telegramRule{{MethodID: 1, Channels: []telegramChannel{{ChatID: "-100"}}}}
+	if err := validateTelegramRules(rules); err == nil {
+		t.Fatal("channel without events must be rejected")
+	}
+}
+
+func TestTelegramChannelWantsEventPerChannel(t *testing.T) {
+	rule := &telegramRule{MethodID: 1}
+	createdOnly := telegramChannel{ChatID: "-100", OnCreated: boolPtr(true), OnCompleted: boolPtr(false)}
+	completedOnly := telegramChannel{ChatID: "-200", OnCreated: boolPtr(false), OnCompleted: boolPtr(true)}
+	if !createdOnly.wantsEvent("created", rule) || createdOnly.wantsEvent("completed", rule) {
+		t.Fatal("created-only channel must only want created")
+	}
+	if !completedOnly.wantsEvent("completed", rule) || completedOnly.wantsEvent("created", rule) {
+		t.Fatal("completed-only channel must only want completed")
 	}
 }
 

@@ -2273,6 +2273,15 @@ components:
                 type: integer
                 format: int64
                 description: Тема форум-супергруппы (message_thread_id); 0 или не задано — «General».
+              on_created:
+                type: boolean
+                description: Слать в этот канал событие «Создана». Не задано — действует флаг уровня правила.
+              on_completed:
+                type: boolean
+                description: Слать в этот канал событие «Выполнена». Не задано — флаг уровня правила.
+              with_attachment:
+                type: boolean
+                description: По завершении приложить DOCX-отчёт (только для этого канала). Не задано — флаг уровня правила.
         on_created: { type: boolean }
         on_completed: { type: boolean }
         with_attachment:

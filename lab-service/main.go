@@ -940,12 +940,16 @@ WHERE mr.request_id = r.id AND mr.is_statistical_row = false AND COALESCE(r.amb_
 			created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 			sent_at TIMESTAMPTZ
 		)`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS uq_tg_outbox_dedup
-			ON telegram_notify_outbox (request_id, event, chat_id)
-			WHERE status <> 'failed'`,
 		// Тема форум-супергруппы (2026-10-18) — колонка появилась после первого
 		// деплоя, для уже созданной таблицы добавляем идемпотентно.
 		`ALTER TABLE telegram_notify_outbox ADD COLUMN IF NOT EXISTS thread_id BIGINT NOT NULL DEFAULT 0`,
+		// Дедуп — по КОНЕЧНОМУ адресу (канал + тема), 2026-10-18: у метода может
+		// быть несколько каналов, в т.ч. разные темы одной группы. Старый индекс
+		// без темы удаляем: иначе две темы одного чата блокировали бы друг друга.
+		`DROP INDEX IF EXISTS uq_tg_outbox_dedup`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_tg_outbox_dest
+			ON telegram_notify_outbox (request_id, event, chat_id, thread_id)
+			WHERE status <> 'failed'`,
 	}
 	for _, q := range stmts {
 		if _, err := s.pool.Exec(ctx, q); err != nil {
