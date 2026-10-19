@@ -188,7 +188,7 @@ WHERE id = $1`, id, newStatus, newAssignedTo)
 	// triggerProcessingEmail) — newAssignedTo, не existing.AssignedTo, т.к. кanban-move
 	// может назначать испытателя и менять статус ОДНИМ действием.
 	if newStatus == "processing" && existing.Status != "processing" {
-		go s.triggerProcessingEmail(context.WithoutCancel(r.Context()), id, newAssignedTo)
+		go s.triggerProcessingEmail(context.WithoutCancel(r.Context()), id)
 	}
 	// WP8 (2026-08-29): журнал изменений (см. audit_log.go) — logStatusChange сама не
 	// пишет строку при old==new (напр. kanban-move менял только assigned_to).

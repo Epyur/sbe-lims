@@ -61,8 +61,8 @@ SBE-плагин «ЛИМС» для сотрудников лаборатори
 |---|---|---|---|
 | GET | `/requests/{id}/chart/{cfg_id}` | viewer | PNG (рендер по `methods.chart_configs`), используется в `<img src>` |
 | POST | `/requests/{id}/protocol?template=ui\|excerpt\|protocol&format=html\|full` | editor+ | `{html, docx_base64, generated_at}` (`template` по умолчанию `protocol`; `format=html`, 2026-08-23 — не тратить время на DOCX, `docx_base64` пустой) |
-| GET | `/requests/{id}/report.docx` | viewer (лабораторное чтение) | **ИИ-отчёт на бланке (2026-10-16)**: протокол + ИИ-разделы по `methods.report_instruction` + приложение со статистикой по аналогичным объектам (тот же ЕКН + метод). Если отчёта ещё нет — собирается на месте; иначе отдаётся сохранённый. `application/vnd...wordprocessingml.document` |
-| POST | `/requests/{id}/report` | editor+ | пересобрать отчёт заново → `{ok, has_ai}` (`has_ai=false` — ИИ-разделы не получены, отчёт без них). Автоматически собирается при завершении заявки и вкладывается в письмо заказчику |
+| GET | `/requests/{id}/report.docx` | viewer (лабораторное чтение) | **ИИ-отчёт на бланке (2026-10-16)**: протокол + ИИ-разделы по `methods.report_instruction` + приложение со статистикой по аналогичным объектам (тот же ЕКН + метод). Сохранённый отчёт переиспользуется, если собран после последней правки заявки/результатов и `ai_state` = `ok`/`none`; отчёт с провалившимся ИИ (`failed`) не считается готовым и пересобирается при следующем обращении. `application/vnd...wordprocessingml.document` |
+| POST | `/requests/{id}/report` | editor+ | принудительно пересобрать отчёт заново (кэш игнорируется) → `{ok, has_ai}` (`has_ai=false` — ИИ-разделы не получены, отчёт без них). Автоматически собирается при завершении заявки и вкладывается в письмо заказчику |
 | GET | `/dashboard?period=week\|month\|quarter\|year` | viewer | `{by_status, by_method:[{method_id,count}], total, completed_in_period, period}` — ⚠️ **HЕ используется плагином** (дашборд вынесен, 2026-08-18), эндпоинт оставлен на сервере |
 
 ### Telegram-уведомления (2026-10-18)
@@ -80,6 +80,18 @@ SBE-плагин «ЛИМС» для сотрудников лаборатори
 применяется ничего, в том числе родительское. Отправку выполняет серверная
 очередь через `portal-embed` (см. `lab-service/AGENTS.md`, `portal-embed/AGENTS.md`).
 Настройка — раздел «Уведомления» → «Telegram» в `lims-view.ts`.
+
+### Почта заявки (2026-08-28, очередь — 2026-10-19)
+
+| Метод | Путь | Роль | Тело / ответ |
+|---|---|---|---|
+| POST | `/requests/{id}/send-email` | editor | только ставит отправку в очередь (отчёт собирает и письмо шлёт фоновый воркер) → `{ok, queued, already_queued}`. Письмо заказчику — при непустом `owner_email`; дубль в LPITrack — при непустом `external_id` и служебном адресе лабы |
+| GET | `/requests/{id}/sent-emails` | viewer (видимость заявки) | `{emails:[{id, recipient_type, recipient_address, status, attempts, last_error, with_attachment, success, sent_at, triggered_by}]}` — `status`: `pending` (в очереди) / `sent` / `failed` (попытки исчерпаны, 5) |
+
+Автоотправка при завершении заявки (`labs.auto_send_email`) и уведомление о
+взятии в работу идут через эту же очередь. Пока строка `pending`, повторный
+`POST` не создаёт вторую (частичный уникальный индекс по `(request_id,
+recipient_type) WHERE status='pending'`).
 
 ### Общие (все плагины lab-service)
 

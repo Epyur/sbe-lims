@@ -28,6 +28,12 @@ func llmServiceURL() string {
 	return "http://llm:3000"
 }
 
+// reportAITimeout — сколько ждём ИИ-разделы. Потолок шлюза провайдера — 60 с
+// (дальше 504), поэтому ждать 180 с бессмысленно: 90 с покрывают любой ответ,
+// который вообще может прийти с запасом. Живой случай 2026-10-19: при 180 с
+// каждая отправка письма зря висела минуту после 504.
+const reportAITimeout = 90 * time.Second
+
 // generateReportSections возвращает разделы, написанные ИИ по report_instruction
 // метода. Инструкция пуста → (nil, nil). Ошибка (нет ключа/секрета, таймаут,
 // неразобранный ответ) → вызывающий делает фолбэк без ИИ-разделов.
@@ -49,7 +55,7 @@ func (s *Server) generateReportSections(ctx context.Context, rc *reportContext) 
 		return nil, err
 	}
 
-	reqCtx, cancel := context.WithTimeout(ctx, 180*time.Second)
+	reqCtx, cancel := context.WithTimeout(ctx, reportAITimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, llmServiceURL()+"/internal/llm/complete", bytes.NewReader(payload))
 	if err != nil {
@@ -58,7 +64,7 @@ func (s *Server) generateReportSections(ctx context.Context, rc *reportContext) 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Service-Secret", secret)
 
-	resp, err := (&http.Client{Timeout: 190 * time.Second}).Do(req)
+	resp, err := (&http.Client{Timeout: reportAITimeout + 10*time.Second}).Do(req)
 	if err != nil {
 		return nil, err
 	}

@@ -974,6 +974,10 @@ func (reg *docxPhotoRegistry) register(rawURL string) string {
 	if strings.HasSuffix(strings.ToLower(key), ".png") {
 		ext, contentType = "png", "image/png"
 	}
+	// Уменьшаем ТОЛЬКО фото из серий (2026-10-19, docx_image_scale.go). Графики
+	// идут через registerImageBytes напрямую и не трогаются: они и так мелкие, а
+	// пережатие в JPEG теряло бы тонкие линии.
+	data, ext, contentType = prepareDocxImage(data, ext, contentType)
 	return reg.registerImageBytes(data, ext, contentType)
 }
 

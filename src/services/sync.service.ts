@@ -21,6 +21,7 @@ import type {
   MethodConfig,
   MethodEquipmentLink,
   SentEmail,
+  SendEmailResult,
   PresentationKind,
   ProtocolResponse,
   TelegramInheritedRule,
@@ -252,8 +253,9 @@ export class LimsSyncService {
   }
 
   /** Ручная отправка письма заказчику (+ дубль в LPITrack, если есть external_id) —
-   * кнопка «✉ Отправить письмо» в карточке заявки (2026-08-28, WP2). */
-  async sendRequestEmail(requestId: number): Promise<void> {
+   * кнопка «✉ Отправить письмо» в карточке заявки (2026-08-28, WP2). С 2026-10-19
+   * сервер только ставит отправку в очередь и отвечает сразу. */
+  async sendRequestEmail(requestId: number): Promise<SendEmailResult> {
     const token = await this.getToken();
     const res = await this.request({
       url: `${this.baseUrl}/api/lab/requests/${requestId}/send-email`,
@@ -261,6 +263,17 @@ export class LimsSyncService {
       headers: { Authorization: `Bearer ${token}` },
     });
     this.assertOk(res);
+    try {
+      const data = JSON.parse(res.text) as Partial<SendEmailResult>;
+      return {
+        ok: data.ok !== false,
+        queued: data.queued === true,
+        already_queued: data.already_queued === true,
+      };
+    } catch (e: unknown) {
+      console.warn('ЛИМС: не JSON в ответе send-email:', errorMessage(e));
+      throw new Error('Сервер принял запрос, но ответ не разобран — проверьте журнал отправок');
+    }
   }
 
   /** Журнал отправленных писем заявки (2026-08-28, WP2). */

@@ -1984,41 +1984,81 @@ export class LimsView extends ItemView {
       });
     }
 
-    // Письмо заказчику + журнал отправок (2026-08-28, WP2). Кнопка доступна всегда
-    // (ручная отправка — явное действие, не завязана на автонастройку лабы/статус
-    // заявки), см. lab-service outbound_email.go handleSendRequestEmail.
+    // Письмо заказчику + журнал отправок (2026-08-28, WP2; очередь — 2026-10-19).
+    // Кнопка только ставит отправку в очередь, письмо уходит в фоновом воркере;
+    // пока строка pending — кнопка неактивна, журнал опрашивается раз в 3 с.
+    // См. lab-service outbound_email.go handleSendRequestEmail.
     if (this.canEdit) {
       const emailDiv = this.bodyEl.createDiv({ cls: 'tn-lims-mb12' });
       const sendEmailBtn = emailDiv.createEl('button', { text: '✉ Отправить письмо', cls: 'tn-btn tn-btn-ghost' });
       const emailStatus = emailDiv.createDiv({ cls: 'tn-lims-meta' });
       const journalEl = emailDiv.createDiv();
-      const redrawJournal = (): void => {
+      let pollTimer: number | undefined;
+      const stopPolling = (): void => {
+        if (pollTimer !== undefined) {
+          window.clearInterval(pollTimer);
+          pollTimer = undefined;
+        }
+      };
+      /** Перерисовывает журнал; true — какая-то отправка ещё в очереди. */
+      const redrawJournal = async (): Promise<boolean> => {
         journalEl.empty();
-        this.plugin.syncService.listSentEmails(req.id).then(emails => {
-          if (emails.length === 0) return;
+        try {
+          const emails = await this.plugin.syncService.listSentEmails(req.id);
+          const pending = emails.some(e => e.status === 'pending');
+          sendEmailBtn.disabled = pending;
+          if (emails.length === 0) return pending;
           const list = journalEl.createDiv({ cls: 'tn-lims-meta' });
           for (const e of emails) {
-            const kind = e.recipient_type === 'customer' ? 'заказчику' : 'в LPITrack';
+            const kind = e.recipient_type === 'customer'
+              ? 'заказчику'
+              : e.recipient_type === 'lpitrack_processing' ? 'в LPITrack (в работу)' : 'в LPITrack';
             const via = e.triggered_by === 'auto' ? 'авто' : 'вручную';
-            const status = e.success ? '✅' : `❌ ${e.error}`;
-            list.createDiv({ text: `${status} ${kind} (${e.recipient_address}) — ${via}, ${new Date(e.sent_at).toLocaleString('ru-RU')}` });
+            const st = e.status ?? (e.success ? 'sent' : 'failed');
+            const status = st === 'pending'
+              ? '⏳ в очереди'
+              : st === 'failed'
+                ? `❌ ${e.last_error || e.error} (попыток: ${e.attempts})`
+                : '✅';
+            const when = st === 'pending' ? '' : ` — ${via}, ${new Date(e.sent_at).toLocaleString('ru-RU')}`;
+            list.createDiv({ text: `${status} ${kind} (${e.recipient_address})${when}` });
           }
-        }).catch(() => {});
+          return pending;
+        } catch {
+          return false;
+        }
       };
-      redrawJournal();
+      /** Опрос журнала, пока есть pending: не дольше 2 минут и только пока
+       * карточка (её элемент) ещё в документе. */
+      const startPolling = (): void => {
+        stopPolling();
+        const started = Date.now();
+        pollTimer = window.setInterval(() => {
+          if (!emailStatus.isConnected || Date.now() - started > 120_000) {
+            stopPolling();
+            return;
+          }
+          void redrawJournal().then(pending => {
+            if (!pending) stopPolling();
+          });
+        }, 3000);
+      };
+      void redrawJournal();
       sendEmailBtn.addEventListener('click', async () => {
-        sendEmailBtn.setAttr('disabled', 'true');
+        sendEmailBtn.disabled = true;
         emailStatus.setText('Отправка…');
         try {
-          await this.plugin.syncService.sendRequestEmail(req.id);
+          const res = await this.plugin.syncService.sendRequestEmail(req.id);
           emailStatus.setText('');
-          new Notice('Письмо отправлено');
-          redrawJournal();
+          if (res.already_queued) new Notice('Эта отправка уже в очереди');
+          else if (res.queued) new Notice('Отправка поставлена в очередь');
+          else new Notice('Письма отправлять некуда: не задан адрес заказчика или служебный адрес');
+          const pending = await redrawJournal();
+          if (res.queued || res.already_queued || pending) startPolling();
         } catch (e: unknown) {
           emailStatus.setText('');
           new Notice(`Ошибка: ${errorMessage(e)}`);
-        } finally {
-          sendEmailBtn.removeAttribute('disabled');
+          await redrawJournal();
         }
       });
     }

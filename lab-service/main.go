@@ -18,6 +18,9 @@ type Server struct {
 	// notifyWake — «толчок» фоновой очереди Telegram-уведомлений (2026-10-18):
 	// постановка события не ждёт тикера, а будит воркер. См. telegram_notify.go.
 	notifyWake chan struct{}
+	// outboundWake — то же для очереди писем заявки (2026-10-19, см.
+	// outbound_email_worker.go): кнопка/автотриггер будят воркер сразу.
+	outboundWake chan struct{}
 }
 
 func main() {
@@ -51,7 +54,7 @@ func main() {
 		log.Fatalf("S3: %v", err)
 	}
 
-	s := &Server{pool: pool, s3: s3Store, notifyWake: make(chan struct{}, 1)}
+	s := &Server{pool: pool, s3: s3Store, notifyWake: make(chan struct{}, 1), outboundWake: make(chan struct{}, 1)}
 	s.fileBaseURL = s3Store.publicBaseURL()
 
 	// Постоянный CLI-режим (не сервер): перенос исторических заявок LPITrack
@@ -123,6 +126,11 @@ func main() {
 	// Фоновая отправка Telegram-уведомлений (2026-10-18, telegram_notify.go) —
 	// к portal-embed, который один держит SOCKS-туннель к Telegram.
 	s.startTelegramNotifyJob()
+
+	// Фоновая отправка писем заявки (2026-10-19, outbound_email_worker.go):
+	// кнопка и автотриггеры только ставят строки в очередь, сборка отчёта и SMTP
+	// идут здесь — иначе клиент обрывал ожидание на 30-й секунде.
+	s.startOutboundEmailJob()
 
 	mux := http.NewServeMux()
 
@@ -775,6 +783,19 @@ func (s *Server) migrate(ctx context.Context) error {
 			error TEXT NOT NULL DEFAULT '',
 			triggered_by TEXT NOT NULL
 		)`,
+		// Очередь отправки писем (2026-10-19, см. docs/superpowers/specs/
+		// 2026-10-19-sbe-lims-outbound-email-queue-design.md): строка журнала
+		// стала заданием отправки. status='sent' по умолчанию — все существующие
+		// строки терминальные, миграция их не переписывает. with_attachment
+		// отличает письмо с отчётом от уведомления о взятии в работу. Частичный
+		// уникальный индекс — защита от дублей, пока отправка ещё в очереди
+		// (терминальные строки новой отправке не мешают).
+		`ALTER TABLE sent_emails ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'sent'`,
+		`ALTER TABLE sent_emails ADD COLUMN IF NOT EXISTS attempts INT NOT NULL DEFAULT 0`,
+		`ALTER TABLE sent_emails ADD COLUMN IF NOT EXISTS last_error TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE sent_emails ADD COLUMN IF NOT EXISTS with_attachment BOOLEAN NOT NULL DEFAULT true`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_sent_emails_pending
+			ON sent_emails (request_id, recipient_type) WHERE status = 'pending'`,
 		// request_reports (2026-10-16) — ИИ-отчёт по испытанию на бланке: где
 		// лежит готовый DOCX (S3), был ли ИИ-раздел, когда собран. Генерация —
 		// при завершении заявки (report_store.go ensureReport) и по кнопке;
@@ -787,6 +808,16 @@ func (s *Server) migrate(ctx context.Context) error {
 			generated_at TIMESTAMPTZ,
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 		)`,
+		// ai_state (2026-10-19) — полный ли отчёт: 'ok' (ИИ-разделы есть),
+		// 'failed' (ИИ пробовали, не вышло — такой отчёт не переиспользуем,
+		// при следующем обращении ИИ пробуется снова), 'none' (у метода нет
+		// report_instruction). См. report_store.go ensureReport.
+		`ALTER TABLE request_reports ADD COLUMN IF NOT EXISTS ai_state TEXT NOT NULL DEFAULT 'none'`,
+		`UPDATE request_reports SET ai_state = CASE
+			WHEN has_ai THEN 'ok'
+			WHEN ai_error <> '' THEN 'failed'
+			ELSE 'none' END
+		 WHERE ai_state = 'none'`,
 		// ekn_material_features (2026-10-17) — разобранные признаки материала по
 		// ЕКН: тип/линейка/модификатор/толщина/габарит/цвет. Отбор аналогов для
 		// приложения отчёта идёт по ключу (тип, линейка, модификатор), а не по

@@ -1319,6 +1319,54 @@ docker compose exec lab wget -qO- http://localhost:3000/api/lab/health   # вн�
 
 ## История
 
+### 2026-10-19 — очередь отправки писем заявки; переиспользование отчёта; фото в DOCX
+
+Живой случай: заявка 494 (`requests.id=1641`) — отчёт 11,9 МБ (6 полноразмерных
+фото), каждая отправка собирала его заново, ИИ ждал до 180 с (дважды пришёл
+504). Кнопка обрывалась на 30-й секунде, но сервер доводил отправку до конца;
+испытатель нажал ещё четыре раза — заказчик получил 5 писем. Дизайн:
+`docs/superpowers/specs/2026-10-19-sbe-lims-outbound-email-queue-design.md`,
+планы — одноимённые в `plans/`.
+
+- **Очередь.** `sent_emails` стала журналом-очередью: `status`
+  (`pending`/`sent`/`failed`, default `sent`), `attempts`, `last_error`,
+  `with_attachment`; частичный уникальный индекс
+  `(request_id, recipient_type) WHERE status='pending'` — повторный клик не
+  плодит строки. `handleSendRequestEmail` только ставит строки и сразу
+  отвечает `{ok, queued, already_queued}`. Автоотправка при завершении и
+  уведомление о взятии в работу тоже идут через очередь
+  (`triggerCompletionEmails`/`triggerProcessingEmail`). `triggerProcessingEmail`
+  больше не принимает `assignedTo` — воркер берёт `requests.assigned_to` на
+  момент отправки. Удалены `sendCompletionEmails`/`sendAndLog`.
+- **Воркер** — новый `outbound_email_worker.go` (тикер 30 с + `outboundWake`,
+  поле `Server.outboundWake`): пачка `pending`, группировка по заявке, вложение
+  собирается ОДИН раз на заявку, 5 попыток затем `failed`
+  (`nextOutboundStatus`). Неудача сборки вложения тоже считается попыткой.
+- **Предел SMTP-сессии** — `net.DialTimeout` (30 с) + `conn.SetDeadline` (5 минут)
+  вместо `smtp.Dial`: письмо отправляет один воркер, подвисшее соединение не
+  должно останавливать всю очередь.
+- **Отчёт.** `ensureReport(ctx, id, force)` переиспользует файл из S3, если
+  `reportIsFresh`: `generated_at` не старше `MAX(requests.updated_at,
+  measurement_results.updated_at, aggregated_results.updated_at)` и
+  `ai_state IN ('ok','none')`. `handleGetReport` больше не читает ключ сам;
+  `handleRegenerateReport` передаёт `force=true`.
+- **`request_reports.ai_state`** (`ok`/`failed`/`none`) + идемпотентный бэкфилл
+  (`has_ai` → `ok`, `ai_error<>''` → `failed`, иначе `none`). Отчёт с
+  провалившимся ИИ письмом уходит, но готовым не считается — при следующем
+  обращении ИИ пробуется снова.
+- **Предел ИИ** — 90 с вместо 180 (`reportAITimeout` в `report_ai.go`): потолок
+  шлюза провайдера 60 с, ждать дольше нечего.
+- **Фото в DOCX** — `prepareDocxImage` (`docx_image_scale.go`), вызов из
+  `docxPhotoRegistry.register` (только фото серий): крупнее 250 КБ или сторона
+  > 1600 px → 1600 px и JPEG q80 на белом фоне. Графики идут через
+  `registerImageBytes` напрямую и НЕ пережимаются — они и так мелкие, а JPEG
+  терял бы тонкие линии. Для 494 — ожидаемо ~2–3 МБ вместо 11,9.
+- **Проверки:** `go build/vet/test`, `gofmt -l` — чисто; новые юнит-тесты
+  (`outbound_email_queue_test.go`, `docx_image_scale_test.go`,
+  `report_store_test.go`); `node scripts/check_lab_openapi.mjs` — 90 маршрутов,
+  схема сходится; `npx tsc --noEmit`/`npm run build` плагина. **Не задеплоено**
+  на момент записи (выкладка — отдельной командой).
+
 ### 2026-10-18 — Telegram-уведомления по проектам (правила, очередь, мост)
 
 Дизайн — `docs/superpowers/specs/2026-10-18-sbe-lims-telegram-project-notifications-design.md`,

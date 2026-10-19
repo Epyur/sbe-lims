@@ -1047,7 +1047,7 @@ WHERE id = $1`, id, newStatus)
 	// см. triggerProcessingEmail. assigned_to этот путь не меняет (только чистит на
 	// "new") — существующее значение уже актуально к моменту вызова.
 	if newStatus == "processing" && existing.Status != "processing" {
-		go s.triggerProcessingEmail(context.WithoutCancel(ctx), id, existing.AssignedTo)
+		go s.triggerProcessingEmail(context.WithoutCancel(ctx), id)
 	}
 	// WP8 (2026-08-29): журнал изменений — та же best-effort дисциплина, что и письма
 	// выше (см. audit_log.go). logStatusChange сама не пишет строку при old==new.

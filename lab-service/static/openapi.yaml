@@ -585,10 +585,13 @@ paths:
   /api/lab/requests/{id}/send-email:
     post:
       tags: [Заявки]
-      summary: Отправить письмо по заявке
+      summary: Поставить письмо по заявке в очередь отправки
       description: |
-        Роль editor. Письмо заказчику с результатами; при наличии `external_id`
-        уходит дубль в легаси-трекер. Повторы глушатся журналом отправок.
+        Роль editor. Только ставит отправку в очередь и отвечает сразу (с
+        2026-10-19): отчёт собирает и письмо отправляет фоновый воркер.
+        Письмо заказчику — всегда; дубль в легаси-трекер — при наличии
+        `external_id`. Пока такая отправка уже в очереди, новая строка не
+        создаётся (`already_queued=true`).
       parameters: [{ $ref: '#/components/parameters/Id' }]
       requestBody:
         required: false
@@ -598,14 +601,27 @@ paths:
               type: object
               description: Параметры отправки; форма зависит от вида письма.
       responses:
-        '200': { $ref: '#/components/responses/OK' }
+        '200':
+          description: Отправка поставлена в очередь (или уже была в ней)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  queued: { type: boolean }
+                  already_queued: { type: boolean }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
 
   /api/lab/requests/{id}/sent-emails:
     get:
       tags: [Заявки]
       summary: Журнал отправленных писем по заявке
-      description: Роль viewer.
+      description: |
+        Роль viewer. Запись с `status=pending` — письмо ещё в очереди
+        (отправляет фоновый воркер), `sent` — отправлено, `failed` — попытки
+        исчерпаны. `last_error` — текст последней неудачи.
       parameters: [{ $ref: '#/components/parameters/Id' }]
       responses:
         '200':
@@ -619,7 +635,18 @@ paths:
                     type: array
                     items:
                       type: object
-                      description: Кому, когда, какого вида письмо и чем закончилось.
+                      properties:
+                        id: { type: integer, format: int64 }
+                        request_id: { type: integer, format: int64 }
+                        recipient_type: { type: string, enum: [customer, lpitrack, lpitrack_processing] }
+                        recipient_address: { type: string }
+                        status: { type: string, enum: [pending, sent, failed] }
+                        attempts: { type: integer }
+                        last_error: { type: string }
+                        with_attachment: { type: boolean }
+                        success: { type: boolean }
+                        sent_at: { type: string, description: Пусто, пока строка в очереди }
+                        triggered_by: { type: string, enum: [auto, manual] }
 
   /api/lab/requests/{id}/audit-log:
     get:

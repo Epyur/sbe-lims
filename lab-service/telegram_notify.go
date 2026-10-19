@@ -765,7 +765,7 @@ func (s *Server) sendTelegramOutboxRow(ctx context.Context, it telegramOutboxRow
 	var sendErr error
 	attachmentSent := false
 	if it.withAttachment {
-		res, err := s.ensureReport(ctx, it.requestID)
+		res, err := s.ensureReport(ctx, it.requestID, false)
 		switch {
 		case err != nil:
 			log.Printf("telegram notify worker: report request %d: %v", it.requestID, err)

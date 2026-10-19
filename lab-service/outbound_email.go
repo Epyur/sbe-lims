@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"mime"
+	"net"
 	"net/http"
 	"net/smtp"
 	"os"
@@ -30,16 +31,20 @@ type emailAttachment struct {
 	Data []byte
 }
 
-// SentEmail — одна строка журнала sent_emails.
+// SentEmail — одна строка журнала sent_emails (она же задание очереди, 2026-10-19).
 type SentEmail struct {
 	ID               int64  `json:"id"`
 	RequestID        int64  `json:"request_id"`
-	RecipientType    string `json:"recipient_type"` // "customer" | "lpitrack"
+	RecipientType    string `json:"recipient_type"` // "customer" | "lpitrack" | "lpitrack_processing"
 	RecipientAddress string `json:"recipient_address"`
-	SentAt           string `json:"sent_at"`
+	SentAt           string `json:"sent_at"` // "" пока строка в очереди
 	Success          bool   `json:"success"`
 	Error            string `json:"error"`
 	TriggeredBy      string `json:"triggered_by"` // "auto" | "manual"
+	Status           string `json:"status"`       // "pending" | "sent" | "failed"
+	Attempts         int    `json:"attempts"`
+	LastError        string `json:"last_error"`
+	WithAttachment   bool   `json:"with_attachment"`
 }
 
 // shouldAutoSend — чистая функция (без БД/сети, юнит-тестируется отдельно в
@@ -78,7 +83,12 @@ func (s *Server) triggerCompletionEmails(ctx context.Context, requestID int64) {
 	}
 	sendCustomer, sendLpitrack := shouldAutoSend(labAutoSend, req.ExternalID != "",
 		s.hasSentEmail(ctx, requestID, "customer"), s.hasSentEmail(ctx, requestID, "lpitrack"))
-	s.sendCompletionEmails(ctx, *req, sendCustomer, sendLpitrack, "auto")
+	targets := filterCompletionTargets(
+		completionTargets(*req, s.serviceEmailFor(ctx, req.LabID)),
+		sendCustomer, sendLpitrack)
+	if _, _, err := s.enqueueOutboundEmails(ctx, requestID, targets, "auto"); err != nil {
+		log.Printf("triggerCompletionEmails: enqueue request %d: %v", requestID, err)
+	}
 }
 
 func (s *Server) hasSentEmail(ctx context.Context, requestID int64, recipientType string) bool {
@@ -102,11 +112,12 @@ func shouldAutoSendProcessing(labAutoSend, hasExternalID, alreadySent bool) bool
 // статуса), гейтится тем же labs.auto_send_email — это то же самое автописьмо,
 // расширенное на ещё один переход статуса, не отдельный переключатель. Только в
 // LPITrack (заказчику на этом этапе сообщать нечего — результатов ещё нет) — с именем
-// назначенного испытателя (assignedTo). Дедуп через тот же журнал sent_emails
+// назначенного испытателя, которое воркер берёт из requests.assigned_to НА МОМЕНТ
+// отправки. Дедуп через тот же журнал sent_emails
 // (recipient_type="lpitrack_processing") — повторный переход в processing (например,
 // туда-обратно через received) не шлёт письмо ещё раз (2026-08-29, прямой запрос
 // пользователя).
-func (s *Server) triggerProcessingEmail(ctx context.Context, requestID int64, assignedTo string) {
+func (s *Server) triggerProcessingEmail(ctx context.Context, requestID int64) {
 	req, err := s.loadRequest(ctx, requestID)
 	if err != nil {
 		log.Printf("triggerProcessingEmail: load request %d: %v", requestID, err)
@@ -128,19 +139,11 @@ func (s *Server) triggerProcessingEmail(ctx context.Context, requestID int64, as
 		log.Printf("triggerProcessingEmail: no service_email/LAB_LPITRACK_EMAIL configured, skip for request %d", requestID)
 		return
 	}
-	tester := assignedTo
-	if tester == "" {
-		tester = "не назначен"
+	if _, _, err := s.enqueueOutboundEmails(ctx, requestID, processingTarget(*req, lpitrackAddr), "auto"); err != nil {
+		log.Printf("triggerProcessingEmail: enqueue request %d: %v", requestID, err)
 	}
-	s.sendAndLog(ctx, requestID, "lpitrack_processing", lpitrackAddr, "auto", nil,
-		legacyExternalKey(req.ExternalID),
-		fmt.Sprintf("В работу. Заявка №%s (external_id=%s) взята в работу испытателем %s.",
-			req.CustomerNumber, req.ExternalID, tester))
 }
 
-// sendCompletionEmails строит протокол ОДИН раз (даже если шлём оба письма), затем шлёт
-// то, что запрошено, и пишет каждую попытку в журнал (успех и неудачу одинаково —
-// видимость важнее, см. спеку).
 // customerEmailContent — тема/тело письма заказчику. Живая жалоба пользователя
 // (2026-08-28, после первого реального теста): если у заявки есть external_id
 // (заявка переходного периода, пришедшая через легаси LPITrack), заказчик узнаёт её
@@ -177,42 +180,12 @@ func (s *Server) serviceEmailFor(ctx context.Context, labID int64) string {
 	return strings.TrimSpace(os.Getenv("LAB_LPITRACK_EMAIL"))
 }
 
-func (s *Server) sendCompletionEmails(ctx context.Context, req Request, sendCustomer, sendLpitrack bool, triggeredBy string) {
-	if !sendCustomer && !sendLpitrack {
-		return
-	}
-	attachment := s.completionAttachment(ctx, req.ID)
-	if attachment == nil {
-		log.Printf("sendCompletionEmails: no attachment for request %d", req.ID)
-		return
-	}
-
-	if sendCustomer {
-		if req.OwnerEmail == "" {
-			log.Printf("sendCompletionEmails: request %d has no owner_email, skip customer", req.ID)
-		} else {
-			subject, body := customerEmailContent(req)
-			s.sendAndLog(ctx, req.ID, "customer", req.OwnerEmail, triggeredBy, attachment, subject, body)
-		}
-	}
-	if sendLpitrack {
-		lpitrackAddr := s.serviceEmailFor(ctx, req.LabID)
-		if lpitrackAddr == "" {
-			log.Printf("sendCompletionEmails: no service_email/LAB_LPITRACK_EMAIL configured, skip lpitrack dup for request %d", req.ID)
-		} else {
-			s.sendAndLog(ctx, req.ID, "lpitrack", lpitrackAddr, triggeredBy, attachment,
-				legacyExternalKey(req.ExternalID),
-				fmt.Sprintf("Заявка №%s (external_id=%s) завершена.", req.CustomerNumber, req.ExternalID))
-		}
-	}
-}
-
 // completionAttachment — вложение письма о завершении заявки (2026-10-16):
 // ИИ-отчёт на бланке; при полном сбое его сборки — обычный протокол (как было
 // до этой правки). nil — не удалось собрать ни то, ни другое (без вложения
 // письмо не шлём).
 func (s *Server) completionAttachment(ctx context.Context, requestID int64) *emailAttachment {
-	if res, err := s.ensureReport(ctx, requestID); err == nil {
+	if res, err := s.ensureReport(ctx, requestID, false); err == nil {
 		if len(res.DOCX) > 0 {
 			return &emailAttachment{Name: reportFilename(requestID), Data: res.DOCX}
 		}
@@ -244,27 +217,51 @@ func legacyExternalKey(externalID string) string {
 	return "LPIZAYAVKINAPRO-" + externalID
 }
 
-func (s *Server) sendAndLog(ctx context.Context, requestID int64, recipientType, to, triggeredBy string,
-	attachment *emailAttachment, subject, body string) {
-	err := sendMailWithAttachment(to, subject, body, attachment)
-	success := err == nil
-	errMsg := ""
-	if err != nil {
-		errMsg = err.Error()
-		log.Printf("sendAndLog: request=%d type=%s to=%s: %v", requestID, recipientType, to, err)
+// enqueueOutboundEmails — ставит письма в очередь (2026-10-19). Строка журнала
+// sent_emails одновременно является заданием; частичный уникальный индекс не
+// даёт завести вторую строку на тот же адресат, пока первая ещё в очереди
+// (повторное нажатие кнопки — no-op, а не второе письмо).
+func (s *Server) enqueueOutboundEmails(ctx context.Context, requestID int64, targets []outboundTarget, triggeredBy string) (queued, already int, err error) {
+	for _, t := range targets {
+		tag, execErr := s.pool.Exec(ctx, `
+INSERT INTO sent_emails
+  (request_id, recipient_type, recipient_address, success, error, triggered_by, status, with_attachment)
+VALUES ($1, $2, $3, false, '', $4, 'pending', $5)
+ON CONFLICT (request_id, recipient_type) WHERE status = 'pending' DO NOTHING`,
+			requestID, t.RecipientType, t.Address, triggeredBy, t.WithAttachment)
+		if execErr != nil {
+			return queued, already, execErr
+		}
+		if tag.RowsAffected() > 0 {
+			queued++
+		} else {
+			already++
+		}
 	}
-	if _, dbErr := s.pool.Exec(ctx, `
-INSERT INTO sent_emails (request_id, recipient_type, recipient_address, success, error, triggered_by)
-VALUES ($1, $2, $3, $4, $5, $6)`,
-		requestID, recipientType, to, success, errMsg, triggeredBy); dbErr != nil {
-		log.Printf("sendAndLog: journal insert: %v", dbErr)
+	if queued > 0 {
+		s.nudgeOutboundEmail()
+	}
+	return queued, already, nil
+}
+
+// nudgeOutboundEmail будит воркер очереди (неблокирующе) — копия
+// nudgeTelegramNotify, у письма свой канал.
+func (s *Server) nudgeOutboundEmail() {
+	if s.outboundWake == nil {
+		return
+	}
+	select {
+	case s.outboundWake <- struct{}{}:
+	default:
 	}
 }
 
 // handleSendRequestEmail — POST /requests/{id}/send-email (ручная кнопка в карточке
-// заявки). В отличие от triggerCompletionEmails — БЕЗ проверки labs.auto_send_email и
-// БЕЗ проверки журнала на дубли (явное действие пользователя): шлёт заказчику всегда,
-// дубль в LPITrack — если есть external_id.
+// заявки). С 2026-10-19 только ставит письма в очередь и отвечает сразу — сборка
+// отчёта и SMTP идут в фоновом воркере (иначе клиент обрывал ожидание на 30-й
+// секунде, а сервер всё равно доводил отправку до конца — и человек слал повторно).
+// БЕЗ проверки labs.auto_send_email и БЕЗ проверки журнала на дубли: это явное
+// действие пользователя; от дублей защищает только «пока строка в очереди».
 func (s *Server) handleSendRequestEmail(w http.ResponseWriter, r *http.Request) {
 	requestID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
@@ -280,8 +277,16 @@ func (s *Server) handleSendRequestEmail(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "request not found"})
 		return
 	}
-	s.sendCompletionEmails(r.Context(), *req, true, req.ExternalID != "", "manual")
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	targets := completionTargets(*req, s.serviceEmailFor(r.Context(), req.LabID))
+	queued, already, err := s.enqueueOutboundEmails(r.Context(), requestID, targets, "manual")
+	if err != nil {
+		log.Printf("send-email: enqueue request %d: %v", requestID, err)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "queued": queued > 0, "already_queued": already > 0,
+	})
 }
 
 // handleListSentEmails — GET /requests/{id}/sent-emails: журнал заявки для отображения
@@ -296,9 +301,12 @@ func (s *Server) handleListSentEmails(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, map[string]any{"error": "forbidden: not lab member"})
 		return
 	}
+	// id DESC (2026-10-19): у строки в очереди sent_at ещё NULL, а порядок «id» —
+	// это порядок постановки; так «только что отправлено/в очереди» всегда сверху.
 	rows, err := s.pool.Query(r.Context(), `
-SELECT id, request_id, recipient_type, recipient_address, sent_at, success, error, triggered_by
-FROM sent_emails WHERE request_id = $1 ORDER BY sent_at DESC`, requestID)
+SELECT id, request_id, recipient_type, recipient_address, sent_at, success, error, triggered_by,
+       status, attempts, last_error, with_attachment
+FROM sent_emails WHERE request_id = $1 ORDER BY id DESC`, requestID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "db error"})
 		return
@@ -307,12 +315,15 @@ FROM sent_emails WHERE request_id = $1 ORDER BY sent_at DESC`, requestID)
 	out := make([]SentEmail, 0, 8)
 	for rows.Next() {
 		var it SentEmail
-		var sentAt time.Time
+		var sentAt *time.Time
 		if err := rows.Scan(&it.ID, &it.RequestID, &it.RecipientType, &it.RecipientAddress,
-			&sentAt, &it.Success, &it.Error, &it.TriggeredBy); err != nil {
+			&sentAt, &it.Success, &it.Error, &it.TriggeredBy,
+			&it.Status, &it.Attempts, &it.LastError, &it.WithAttachment); err != nil {
 			continue
 		}
-		it.SentAt = sentAt.Format(time.RFC3339)
+		if sentAt != nil {
+			it.SentAt = sentAt.Format(time.RFC3339)
+		}
 		out = append(out, it)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"emails": out})
@@ -364,9 +375,22 @@ func sendMailWithAttachment(to, subject, body string, attachment *emailAttachmen
 		fmt.Fprintf(&msg, "--%s--\r\n", boundary)
 	}
 
-	addr := fmt.Sprintf("%s:%s", host, port)
-	c, err := smtp.Dial(addr)
+	addr := net.JoinHostPort(host, port)
+	// Жёсткий предел на всю SMTP-сессию (2026-10-19): письмо отправляет ОДИН
+	// фоновый воркер, и подвисшее соединение остановило бы всю очередь. 5 минут
+	// с запасом покрывают загрузку вложения; зависание превращается в ошибку
+	// попытки, которую воркер повторит.
+	conn, err := net.DialTimeout("tcp", addr, 30*time.Second)
 	if err != nil {
+		return err
+	}
+	if err := conn.SetDeadline(time.Now().Add(5 * time.Minute)); err != nil {
+		_ = conn.Close()
+		return err
+	}
+	c, err := smtp.NewClient(conn, host)
+	if err != nil {
+		_ = conn.Close()
 		return err
 	}
 	defer c.Close()
