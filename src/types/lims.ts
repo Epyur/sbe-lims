@@ -24,12 +24,26 @@ export interface Lab {
 export interface SentEmail {
   id: number;
   request_id: number;
-  recipient_type: 'customer' | 'lpitrack';
+  recipient_type: 'customer' | 'lpitrack' | 'lpitrack_processing';
   recipient_address: string;
   sent_at: string;
   success: boolean;
   error: string;
   triggered_by: 'auto' | 'manual';
+  /** Состояние отправки (2026-10-19): pending — в очереди, отправляет воркер;
+   * sent — ушло; failed — попытки исчерпаны (см. last_error). */
+  status: 'pending' | 'sent' | 'failed';
+  attempts: number;
+  last_error: string;
+  with_attachment: boolean;
+}
+
+/** Ответ POST /requests/{id}/send-email (2026-10-19): ручка только ставит
+ * письма в очередь. already_queued — такая отправка уже ждёт воркера. */
+export interface SendEmailResult {
+  ok: boolean;
+  queued: boolean;
+  already_queued: boolean;
 }
 
 /** Одна строка журнала изменений заявки/результатов (2026-08-29, WP8) — узкий
