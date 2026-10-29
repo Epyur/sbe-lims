@@ -12,3 +12,6 @@ data.json
 *.crt
 *.p12
 **/rclone.conf
+
+# артефакты инструментов навыка ub-mode (crapper/dryer/mutator)
+.metrics/
