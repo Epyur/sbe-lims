@@ -194,13 +194,26 @@ lab_operator/lab_admin/владелец. Не трогали: эндпоинт �
    - Manual full run 2026-10-29 09:27: 12/12 dumps passed the gate, 2/2 copies landed,
      both buckets match the local set byte for byte; `lab.dump` = 188 945 776 B, disk 71 %
      used (23 GB free).
-   - **Still to do, off-hours, on a separate command:** the restore rehearsal
-     (`backup-verify.sh` — restore `lab.dump` into a scratch database, compare
-     `SELECT count(*) FROM requests` with the live 691, drop the scratch database, then put
-     it on its own cron), the cleanup of `email_ingest_pending_results` (item 2, only after
-     the rehearsal is green), and the `lab-service/email_ingest.go` fix (item 2 source,
-     branch `backend`). Plan — `docs/superpowers/plans/2026-10-28-lims-backup-remediation-plan.md`,
-     steps 4–6.
+   - **Restore rehearsal done 2026-10-29 (evening):** `backup-verify.sh` restores the
+     newest `lab.dump` into a throwaway database on the same container, compares
+     `SELECT count(*) FROM requests`, and drops the scratch database via `trap`. First run:
+     `restored lab: 691 requests, live: 699, 15s`, `restore OK`. It runs on its own cron at
+     `0 5 * * *`. The script also passes a negative test — a truncated dump is rejected with
+     `verify FAILED: pg_restore rejected the dump` and leaves no scratch database behind.
+   - **`email_ingest_pending_results` cleaned 2026-10-29** (item 2), only after the
+     rehearsal was green: all 172 rows exported to `pending_results_archive.jsonl`
+     (metadata) and `pending_results_archive.attachments.jsonl` (247 MB), uploaded to both
+     buckets, then deleted and `VACUUM FULL`-ed. Database 273 MB → 24 MB, table 16 KB.
+     A dump taken after the cleanup restores 699 = 699.
+   - **Root cause fixed and deployed 2026-10-29** (item 2 source, `lab-service`, branch
+     `backend`, commit `fdca239`): one row per `external_id` (unique index +
+     `ON CONFLICT DO UPDATE`), age-based archival to
+     `email_ingest_pending_results_archive` after `pendingResultMaxAge` (30 days), pure
+     `pendingRowDecision(age)` covered by a test, and a migration that collapses existing
+     duplicates **before** creating the unique index. Plugin version stays 1.1.4 — no TS
+     changed. Deployed by rebuilding the `lab` container; health `ok`, migration applied
+     (both `email_ingest_pending_results_pkey` and `uq_email_ingest_pending_external`
+     present), backup and restore rehearsal re-run afterwards and green.
    - **Code review of the shipped script, 2026-10-29 (read-only, nothing fixed on the spot).**
      Ten findings, table and the evening batch in the plan, section
      "Review of the shipped `backup.sh`". Two of them can still yield a false `Backup OK`:

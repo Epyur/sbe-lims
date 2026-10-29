@@ -345,6 +345,10 @@ COALESCE($6, description), ...` (не перетирает, если поле н
     таблице. Остаётся самая свежая строка каждого номера; старые копии при этом
     удаляются без переноса в архив — на 2026-10-29 их содержимое уже было выгружено
     в каталог бэкапов на хосте (`pending_results_archive*.jsonl`) и в оба бакета.
+  - **Задеплоено 2026-10-29** (`docker compose up -d --build lab`, коммит `fdca239`
+    на `backend`): health `ok`, в живой БД есть и старый первичный ключ, и новый
+    `uq_email_ingest_pending_external`, таблица архива создана. Версия плагина не
+    поднималась — TS не менялся.
 - `results.go`: `handleCreateResult` разбит — тело вынесено в переиспользуемую
   `saveResultSeries(ctx, requestID, methodID, inventorID, seriesNum, values,
   photoBefore, photoAfter)`, вызывается и HTTP-хендлером, и воркером напрямую (без HTTP).
