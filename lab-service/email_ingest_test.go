@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"strings"
 	"testing"
+	"time"
 )
 
 // buildMimeMessage — собирает сырое RFC822-сообщение из строк (CRLF, как в реальной
@@ -495,5 +496,30 @@ func TestLegacyMethodKeyFromAimIndicator(t *testing.T) {
 		if got := legacyMethodKeyFromAimIndicator(c.in); got != c.want {
 			t.Errorf("legacyMethodKeyFromAimIndicator(%q) = %q, want %q", c.in, got, c.want)
 		}
+	}
+}
+
+// pendingRowDecision - что делать с ожидающей результат записью, когда заявки
+// с её external_id ещё нет. Отдельная чистая функция, чтобы поведение после
+// порога попыток было видно в одном месте и проверялось без БД.
+func TestPendingRowDecisionKeepsYoungAndMovesOldToArchive(t *testing.T) {
+	cases := []struct {
+		name string
+		age  time.Duration
+		want pendingAction
+	}{
+		{"только что пришла", 0, pendingKeep},
+		{"час ожидания", time.Hour, pendingKeep},
+		{"сутки ожидания", 24 * time.Hour, pendingKeep},
+		{"меньше порога", pendingResultMaxAge - time.Minute, pendingKeep},
+		{"порог достигнут", pendingResultMaxAge, pendingArchive},
+		{"много старше порога", pendingResultMaxAge * 3, pendingArchive},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := pendingRowDecision(c.age); got != c.want {
+				t.Errorf("pendingRowDecision(%v) = %v, want %v", c.age, got, c.want)
+			}
+		})
 	}
 }

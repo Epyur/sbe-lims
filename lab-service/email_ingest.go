@@ -909,20 +909,31 @@ func (s *Server) enqueuePendingResult(ctx context.Context, externalID string, me
 		log.Printf("email ingest: marshal pending attachments: %v", err)
 		attachmentsJSON = []byte("[]")
 	}
+	// Одна запись на внешний номер: повторное письмо с тем же external_id обновляет
+	// буфер, а не добавляет строку. Без этого пятьдесят пять повторно пришедших
+	// писем превращались в сто семьдесят две строки с копиями вложений (2026-10-29).
 	if _, err := s.pool.Exec(ctx, `
 INSERT INTO email_ingest_pending_results (external_id, method_id, payload, attachments)
-VALUES ($1, $2, $3::jsonb, $4::jsonb)`, externalID, methodID, string(payloadJSON), string(attachmentsJSON)); err != nil {
+VALUES ($1, $2, $3::jsonb, $4::jsonb)
+ON CONFLICT (external_id) DO UPDATE SET
+  method_id = EXCLUDED.method_id,
+  payload = EXCLUDED.payload,
+  attachments = EXCLUDED.attachments,
+  attempts = 0,
+  created_at = now()`, externalID, methodID, string(payloadJSON), string(attachmentsJSON)); err != nil {
 		log.Printf("email ingest: enqueue pending result: %v", err)
 	}
 }
 
 // retryPendingResults пробует привязать результаты, буферизованные до появления заявки.
-// attempts растёт при каждой неудаче; после pendingResultMaxAttempts строка не удаляется
-// (данные не теряются), но предупреждение логируется только на переходе через порог —
-// не на каждом цикле.
+// attempts растёт при каждой неудаче и остаётся в строке как история; судьбу записи
+// решает возраст (pendingRowDecision): постарше pendingResultMaxAge она уходит в
+// email_ingest_pending_results_archive, а не крутится в очереди вечно. Архив, а не
+// DELETE, потому что это данные письма, которое ещё может понадобиться человеку;
+// чистить архив — отдельная ручная операция.
 func (s *Server) retryPendingResults(ctx context.Context, cfg *emailIngestConfig) {
 	rows, err := s.pool.Query(ctx, `
-SELECT id, external_id, method_id, payload, attachments, attempts FROM email_ingest_pending_results ORDER BY id`)
+SELECT id, external_id, method_id, payload, attachments, attempts, created_at FROM email_ingest_pending_results ORDER BY id`)
 	if err != nil {
 		log.Printf("email ingest: load pending: %v", err)
 		return
@@ -934,12 +945,13 @@ SELECT id, external_id, method_id, payload, attachments, attempts FROM email_ing
 		payload     map[string]any
 		attachments []mailAttachment
 		attempts    int
+		createdAt   time.Time
 	}
 	var pending []pendingRow
 	for rows.Next() {
 		var p pendingRow
 		var raw, attRaw []byte
-		if err := rows.Scan(&p.id, &p.externalID, &p.methodID, &raw, &attRaw, &p.attempts); err != nil {
+		if err := rows.Scan(&p.id, &p.externalID, &p.methodID, &raw, &attRaw, &p.attempts, &p.createdAt); err != nil {
 			log.Printf("email ingest: pending scan: %v", err)
 			continue
 		}
@@ -962,13 +974,18 @@ SELECT id, external_id, method_id, payload, attachments, attempts FROM email_ing
 		var requestID int64
 		err := s.pool.QueryRow(ctx, `SELECT id FROM requests WHERE external_id = $1`, p.externalID).Scan(&requestID)
 		if errors.Is(err, pgx.ErrNoRows) {
-			attempts := p.attempts + 1
-			if attempts == pendingResultMaxAttempts+1 {
-				log.Printf("email ingest: pending result external_id=%s exceeded %d attempts, still waiting",
-					p.externalID, pendingResultMaxAttempts)
+			age := time.Since(p.createdAt)
+			if pendingRowDecision(age) == pendingArchive {
+				if err := s.archivePendingResult(ctx, p.id); err != nil {
+					log.Printf("email ingest: archive pending external_id=%s: %v", p.externalID, err)
+					continue
+				}
+				log.Printf("email ingest: pending result external_id=%s archived after %s (%d attempts)",
+					p.externalID, age.Round(time.Hour), p.attempts)
+				continue
 			}
 			if _, err := s.pool.Exec(ctx,
-				`UPDATE email_ingest_pending_results SET attempts = $2 WHERE id = $1`, p.id, attempts); err != nil {
+				`UPDATE email_ingest_pending_results SET attempts = $2 WHERE id = $1`, p.id, p.attempts+1); err != nil {
 				log.Printf("email ingest: update pending attempts: %v", err)
 			}
 			continue
@@ -987,6 +1004,28 @@ SELECT id, external_id, method_id, payload, attachments, attempts FROM email_ing
 		}
 		log.Printf("email ingest: applied pending result external_id=%s -> request %d", p.externalID, requestID)
 	}
+}
+
+// archivePendingResult переносит запись из живой очереди в архив одной транзакцией:
+// удаление и вставка идут вместе, иначе сбой между ними терял бы данные письма.
+func (s *Server) archivePendingResult(ctx context.Context, id int64) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(ctx, `
+INSERT INTO email_ingest_pending_results_archive (id, external_id, method_id, payload, attachments, attempts, created_at)
+SELECT id, external_id, method_id, payload, attachments, attempts, created_at
+FROM email_ingest_pending_results WHERE id = $1
+ON CONFLICT (id) DO NOTHING`, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM email_ingest_pending_results WHERE id = $1`, id); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // ---- Разбор письма: MIME + кодировки + извлечение JSON ----

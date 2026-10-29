@@ -524,6 +524,24 @@ func (s *Server) migrate(ctx context.Context) error {
 		// этой колонки retryPendingResults применял бы такое письмо уже без фото (см.
 		// AGENTS.md "фото в протоколе"). '[]' — письма, буферизованные до этого фикса.
 		`ALTER TABLE email_ingest_pending_results ADD COLUMN IF NOT EXISTS attachments JSONB NOT NULL DEFAULT '[]'`,
+		// Одна запись на внешний номер (2026-10-29): повторно пришедшее письмо обновляет
+		// буфер вместо новой строки. Индекс заводится ПОСЛЕ схлопывания дублей, иначе
+		// CREATE UNIQUE INDEX упал бы на старой таблице (172 строки, 55 номеров).
+		`CREATE TABLE IF NOT EXISTS email_ingest_pending_results_archive (
+			id BIGINT PRIMARY KEY,
+			external_id TEXT NOT NULL,
+			method_id BIGINT NOT NULL,
+			payload JSONB NOT NULL,
+			attachments JSONB NOT NULL DEFAULT '[]',
+			attempts INT NOT NULL DEFAULT 0,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+			archived_at TIMESTAMPTZ NOT NULL DEFAULT now()
+		)`,
+		`DELETE FROM email_ingest_pending_results a
+			USING email_ingest_pending_results b
+			WHERE a.external_id = b.external_id AND a.id < b.id`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_email_ingest_pending_external
+			ON email_ingest_pending_results (external_id)`,
 		// Метод теперь может принадлежать НЕСКОЛЬКИМ лабораториям (по требованию
 		// пользователя, 2026-08-19) — старая колонка methods.lab_id (1:1) больше не
 		// пишется новым кодом, но НЕ удаляется (как request_methods в декомпозиции

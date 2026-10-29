@@ -160,6 +160,126 @@ lab_operator/lab_admin/владелец. Не трогали: эндпоинт �
 работ по версиям (с 2026-08-18) — в [архиве плагина](agents_arhiv.md). Текущие
 номера версий и правила синхронизации — в корневом `plugins/AGENTS.md`.
 
+## Найденное при разборе настроек методов ГВ и РП (2026-10-27) — к исполнению
+
+Разбор делался для передачи настроек методов другому разработчику. Полное описание
+алгоритмов ГГ / ГВ / РП (формулы, границы классификации, формы, протокол) и снимок
+базы `lab` на 2026-10-27 лежат **вне проекта**: `C:\Obsidian\mailers\lab_db_dump\`
+(`lab-2026-10-27.dump`, `methods-2026-10-27.tsv`, `methods_json/*.json`,
+`ОПИСАНИЕ-метод-ГГ.md`, `ОПИСАНИЕ-методы-ГВ-и-РП.md`). Ниже — что по итогам
+найдено и требует правок. **Правки согласованы «в ближайшее время», но НЕ
+выполнены.**
+
+1. ~~**Бэкап базы `lab` фактически отсутствует (самое срочное).**~~ —
+   **infrastructure part closed 2026-10-29; restore rehearsal still pending** (off-hours).
+   Before 2026-10-29: the host backup script dumped **only** `mailers`, `lab` was not in
+   the script; the S3 push had been failing since late August (`s3.firstvds.ru` did not
+   resolve, and the `rclone.conf` key pair got `403 AccessDenied` on `firsts3.ru`); no
+   `Backup OK` line in `/var/log/mailers_backup.log`. The only `lab` snapshot was
+   `lab-2026-10-27.dump`.
+   - **Done 2026-10-29, working hours, without stopping or restarting any container**
+     (`pg_dump` does not pause a service): backups run from the host script (`backup.sh`)
+     (host file, never in git; old copy — `backup.sh.bak-20261029`), `rclone.conf` rewritten
+     to `https://firsts3.ru` with the application storage keys from the stack environment file
+     (old copy — `rclone.conf.bak-20261029`).
+   - Script shape: a `container|db` table (12 entries — `mailers`, `lab`, `auth`,
+     `documents`, `offers`, `ekn`, `contacts`, `agent`, `photo`, `kb`, `presentations`,
+     `llm`), `pg_dump -Fc` (no gzip pipe: the exit code is no longer lost), a
+     `pg_restore -l` integrity gate plus a 1 KB floor (below it a dump is rejected; the
+     `presentations` database is legitimately 3.2 KB — one table, 11 rows), an honest
+     `Backup OK (12/12 dbs, off-site copies ok: 2/2)` / `Backup FAILED ...` line with a
+     non-zero exit, rotation that always runs, and a single-instance lock.
+   - Two destinations on the same keys: `mailers-backup` and the new `mailers-backup2`.
+     Cron stays `30 2 * * *`, now wrapped in `flock -n /var/lock/mailers_backup.cron`.
+   - Manual full run 2026-10-29 09:27: 12/12 dumps passed the gate, 2/2 copies landed,
+     both buckets match the local set byte for byte; `lab.dump` = 188 945 776 B, disk 71 %
+     used (23 GB free).
+   - **Still to do, off-hours, on a separate command:** the restore rehearsal
+     (`backup-verify.sh` — restore `lab.dump` into a scratch database, compare
+     `SELECT count(*) FROM requests` with the live 691, drop the scratch database, then put
+     it on its own cron), the cleanup of `email_ingest_pending_results` (item 2, only after
+     the rehearsal is green), and the `lab-service/email_ingest.go` fix (item 2 source,
+     branch `backend`). Plan — `docs/superpowers/plans/2026-10-28-lims-backup-remediation-plan.md`,
+     steps 4–6.
+   - **Code review of the shipped script, 2026-10-29 (read-only, nothing fixed on the spot).**
+     Ten findings, table and the evening batch in the plan, section
+     "Review of the shipped `backup.sh`". Two of them can still yield a false `Backup OK`:
+     (a) `docker exec printenv` / `pg_dump` run outside a `set +e` window, so a failing
+     `docker exec` kills the script through `set -e` with no `Backup FAILED` line and no
+     rotation; (b) push success is judged by the number of objects, not by their size, so a
+     truncated copy under a correct name passes. Also: hardcoded container names with no
+     cross-check against `docker compose ps`, a rotation line logged even when nothing was
+     deleted, a `-name '20*'` local sweep wider than the date folders, two different locks
+     (script plus cron) and the destination list duplicated across push and rotation.
+     `shellcheck` is available neither locally nor on the host, and `crapper`/`dryer` do not
+     parse bash — the review is a manual reading, not a tool run.
+2. **`email_ingest_pending_results` раздулась до 250 МБ из ~266 МБ всей базы**
+   (172 строки, все — с фото в base64, до 6,7 МБ на строку; 236 МБ в
+   `attachments`). Причины: (а) повторы — 55 уникальных `external_id` из 172 строк;
+   (б) `attempts` у них **34 800+** при `pendingResultMaxAttempts = 20`
+   (`email_ingest.go`) — по коду после порога строка не удаляется, а воркер
+   продолжает крутить её каждые ~2 мин уже полтора месяца; (в) ни у одного
+   `external_id` нет пары в `requests.external_id` (0 из 172) — данные протухли в
+   августе. Правка: прекращать повтор (удалять или уводить в архив) по возрасту/
+   попыткам; разово вычистить накопленное — **только после починки бэкапа п. 1**.
+3. **Метод РП: в форме испытателя длина подписана «см», а в БД и в калибровочной
+   кривой — миллиметры** (`operator_form.fields`, label у `length_of_distraction`;
+   в `input_parameters` аккуратно написано «мм»). Если введут 20 (см), сервер
+   посчитает 20 мм.
+4. **Метод РП: длина повреждения пишется текстом в `additional_info`, а в
+   `length_of_distraction` стоит 0** — так в 138 из 220 серий (сентябрь—октябрь
+   2026). Следствие: почти все заявки РП этого периода дают
+   `average_damage_length = 0` → `agg_flam_flow_density = 12` (значение кривой в
+   x = 0) → `РП1` и «Соответствует» независимо от реального результата. Старые
+   заявки 2025 г. (100–240 в поле) считаются нормально. Правка: разобраться, откуда
+   идёт такое заполнение (форма/разбор письма), после исправления — пересчёт
+   затронутых заявок.
+5. **Выбор калибровки РП зависит от `requests.exp_date`, который почти нигде не
+   заполнен**: у ГВ пусто 209 из 209, у РП — 1 из 71 (и та в формате `07.08.2026`,
+   который сервер не разбирает — ждёт `YYYY-MM-DD`). Пока калибровка одна
+   (28.08.2026) это безвредно, но вторая калибровка начнёт применяться и к старым
+   испытаниям при пересчёте. Правка: заполнять дату испытания на заявке в
+   `YYYY-MM-DD` (или передавать дату серии).
+6. **Метод ГГ: пустая итоговая группа горючести при непустом остальном расчёте.**
+   Заявка 1443 (28.09.2026): в единственной серии `temp_of_smog = ""` (каналы
+   `tp1…tp4_smog` тоже пустые, `smoke_temp_curve` нет). Цепочка
+   `avg(temp_of_smog)` → подгруппа по дыму → `min_grade(...)` рвётся на первом
+   звене: `avg_temp_of_smog` не считается, `smoke_temp_combustibility_group` нет,
+   `combustibility_group` нет, `target_group_compliance` нет — в протоколе пусто
+   в группе и в заключении, остальные подгруппы и их соответствия на месте. В
+   логах ГГ за 30 дней 25 пропусков `combustibility_group` и 6 —
+   `avg_temp_of_smog` (затронуто 6 заявок). Правка: не давать сохранять серию без
+   температуры (или считать `temp_of_smog` из `smoke_temp_curve`, если прибор её
+   прислал — такой формулы СЕЙЧАС НЕТ), после — пересчёт заявок.
+7. **Метод ГГ: `average_comb_length` назван «Степень повреждения по длине, %», а
+   фактически это среднее четырёх длин В САНТИМЕТРАХ** (формула
+   `avg(comb_length_1..4)`, пороги классификации 65/85 — тоже в см, расчёт верный).
+   Название вводит в заблуждение и уходит в протокол — поправить `input_parameters.name`.
+8. **Метод ГГ: подложка «Без подложки» (подсказка формы) против «Без основания»
+   (реальные данные).** Условие видимости поля «Способ крепления» —
+   `substrate != "Без подложки"`; при значении «Без основание/Без основания» поле
+   ошибочно показывается. Правка: добавить вариант в подсказки и в условие либо
+   ограничить ввод.
+9. **Метод ГГ: единицы давления расходятся** — в форме «мм рт. ст.», в блоке
+   протокола «кПа»; в данных и 101 (кПа), и 745/755/757 (мм рт. ст.). Выбрать одну
+   единицу, привести форму, протокол и данные.
+10. **Метод ГГ: подгруппы сравниваются с ОБЩЕЙ целевой группой, а не с целью по
+    своему параметру.** Одно правило классификации пишет 6 выходов (итог + пять
+    подгрупп) по схеме `>= цели`; в модели нет отдельной цели на параметр, поэтому
+    «по длине — не соответствует» означает «подгруппа по длине ниже ОБЩЕЙ цели», а
+    не «ниже колонки таблицы ГОСТа для своей подгруппы». Менять — только по
+    решению заказчика (нужна новая модель цели).
+11. **Метод ГГ: таблицы «Критерии оценивания» и «Итоговая оценка» в протоколе —
+    статические, введены вручную.** При правке порогов классификации их надо
+    править отдельно, иначе в протоколе останется старый ГОСТовский текст с
+    прежними числами. Там же живут все плейсхолдеры подгрупп: добавили/убрали
+    подгруппу — правьте и формулу `min_grade`, и эти две таблицы.
+12. **Метод ГГ: `fill_method` у агрегированных показателей стоит `manual` при
+    заданной `aggregation`** (`avg_temp_of_smog`, `average_mass_loss`,
+    `agg_comb_length`, `agg_burning_drops`, `average_combustion_time`). Это не
+    ошибка — значения пишет формула, которую сервер строит из `aggregation`;
+    менять на `calculated` не нужно (иначе формула не построится).
+
 ## Статистика ошибок и отступлений
 
 - Нарушений правил нет: 0 `any`, 0 `fetch` (только `requestUrl`), 0 инлайн-стилей,
