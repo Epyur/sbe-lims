@@ -2125,8 +2125,15 @@ export class LimsView extends ItemView {
       const tgList = tgWrap.createDiv();
       let tgLoaded = false;
       const eventLabel = (ev: string): string => (ev === 'completed' ? 'выполнена' : 'создана');
+      // superseded — архивная строка: отправка того закрытия состоялась, но
+      // заявку закрыли повторно, и сообщение о нынешнем закрытии её заменило.
+      // Раньше такой статус не распознавался и показывался как «в очереди»,
+      // хотя ничего в очереди не ждало (живой разбор 2026-11-06, заявка 504).
       const statusLabel = (s: string): string =>
-        s === 'sent' ? 'отправлено' : s === 'failed' ? 'не отправлено' : 'в очереди';
+        s === 'sent' ? 'отправлено'
+          : s === 'failed' ? 'не отправлено'
+            : s === 'superseded' ? 'отправлено (заменено повторным закрытием)'
+              : 'в очереди';
       tgToggle.addEventListener('click', () => {
         if (tgLoaded) {
           tgList.style.display = tgList.style.display === 'none' ? '' : 'none';
