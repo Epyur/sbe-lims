@@ -675,18 +675,60 @@ func (s *Server) triggerTelegramEvent(ctx context.Context, requestID int64, even
 			continue
 		}
 		withAttachment := event == "completed" && ch.wantsAttachment(rule.WithAttachment)
-		if _, err := s.pool.Exec(ctx, `
+		if err := s.supersedePreviousCompleted(ctx, requestID, event, chatID, ch.ThreadID); err != nil {
+			log.Printf("telegram notify: supersede previous request %d chat %s: %v", requestID, chatID, err)
+			continue
+		}
+		res, err := s.pool.Exec(ctx, `
 INSERT INTO telegram_notify_outbox (request_id, event, chat_id, text, with_attachment, thread_id)
 VALUES ($1, $2, $3, $4, $5, $6)
-ON CONFLICT DO NOTHING`, requestID, event, chatID, text, withAttachment, ch.ThreadID); err != nil {
+ON CONFLICT DO NOTHING`, requestID, event, chatID, text, withAttachment, ch.ThreadID)
+		if err != nil {
 			log.Printf("telegram notify: enqueue request %d chat %s: %v", requestID, chatID, err)
 			continue
 		}
-		enqueued = true
+		if res.RowsAffected() > 0 {
+			enqueued = true
+		}
 	}
 	if enqueued {
 		s.nudgeTelegramNotify()
 	}
+}
+
+// completedSupersedeStatus — статус прошлой отправки «Выполнена», которую
+// заменило повторное закрытие заявки. Строка остаётся в журнале (её видели),
+// но выходит из частичного уникального индекса uq_tg_outbox_dest
+// (… WHERE status <> 'failed') и больше не гасит новую вставку.
+const completedSupersedeStatus = "superseded"
+
+// completedRedeliverEvent (2026-11-06, живая жалоба: «закрыли — вернули на
+// доработку — закрыли снова, а сообщения нет»). Дедуп в
+// telegram_notify_outbox (request_id, event, chat_id, thread_id) существует,
+// чтобы одно закрытие не ушло дважды в один канал, но он же молча съедал
+// ВТОРОЕ, отдельное закрытие той же заявки. Повторным считается только
+// событие "completed" — «Создана» у заявки бывает ровно одна, и её отправка
+// по-прежнему дедуплицируется навсегда.
+func completedRedeliverEvent(event string) bool {
+	return event == "completed"
+}
+
+// supersedePreviousCompleted освобождает адрес в дедупе под повторное
+// закрытие: уже отправленные строки прошлого закрытия помечаются
+// completedSupersedeStatus. Недописанные (pending) не трогаем — они ещё не
+// ушли, и новая постановка дождётся их сама через уникальный индекс.
+// Идемпотентно: без оправданных строк — no-op. Ошибка отдаётся вызывающему:
+// без неё вставка ниже молча вернёт ноль строк, и человек снова ничего не
+// получит — молчать об этом нельзя.
+func (s *Server) supersedePreviousCompleted(ctx context.Context, requestID int64, event, chatID string, threadID int64) error {
+	if !completedRedeliverEvent(event) {
+		return nil
+	}
+	_, err := s.pool.Exec(ctx, `
+UPDATE telegram_notify_outbox SET status = $5
+WHERE request_id = $1 AND event = $2 AND chat_id = $3 AND thread_id = $4
+  AND status = 'sent'`, requestID, event, chatID, threadID, completedSupersedeStatus)
+	return err
 }
 
 // ---- очередь отправки ----

@@ -232,6 +232,21 @@ func TestValidateTelegramRulesAcceptsValidSet(t *testing.T) {
 	}
 }
 
+// Повторное закрытие заявки (2026-11-06): «Создана» бывает ровно одна и
+// остаётся под дедупом навсегда; «Выполнена» может повториться после возврата
+// на доработку — прошлую отправку заменяет новая.
+func TestCompletedRedeliverEventOnlyForCompleted(t *testing.T) {
+	if !completedRedeliverEvent("completed") {
+		t.Fatal("repeated completion must be redelivered")
+	}
+	if completedRedeliverEvent("created") {
+		t.Fatal("created must stay deduplicated — a request is created once")
+	}
+	if completedRedeliverEvent("") {
+		t.Fatal("unknown event must not be redelivered")
+	}
+}
+
 func TestTelegramNotifyAttemptsCap(t *testing.T) {
 	if got := nextAttemptStatus(0); got != "pending" {
 		t.Fatalf("first failure must stay pending, got %q", got)

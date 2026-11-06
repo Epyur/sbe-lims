@@ -152,6 +152,54 @@ lab_operator/lab_admin/владелец. Не трогали: эндпоинт �
   `min_grade`/`max_grade` (не `worst_grade`/`best_grade`), агрегация правил
   классификации `none`/`avg`/`min`/`max` (не `best`/`worst`).
 
+## 1.1.5 — Telegram-уведомление о повторном закрытии заявки (2026-11-06)
+
+Live complaint: a request is closed, the Telegram channel gets «✅ Выполнена»; the
+request is sent back for rework and closed again — **the second message never comes**.
+
+- **Root cause (server, `lab-service/telegram_notify.go`).** The trigger fired both
+  times (`handleSetRequestStatus` / `handleKanbanMove` / `refresh` paths all call
+  `triggerTelegramCompleted` only on a real `→ completed` transition), but the
+  enqueue was swallowed by the outbox dedup: partial unique index
+  `uq_tg_outbox_dest (request_id, event, chat_id, thread_id) WHERE status <> 'failed'`
+  plus `ON CONFLICT DO NOTHING`. The first `completed` row stays `sent` forever, so
+  the second insert affected zero rows — silently, with no log line.
+- **Fix.** New `supersedePreviousCompleted` runs before every `completed` insert:
+  already **sent** rows for the same destination become `status='superseded'`
+  (they stay in the request's journal, they already reached the channel) and leave
+  the partial index, so the dedup now only collapses repeats *within one closure*.
+  The decision is the pure function `completedRedeliverEvent(event)` — redelivery is
+  enabled for `completed` only: «Создана» happens once per request and stays
+  deduplicated forever. An error in the supersede step now logs and skips the
+  channel (before, the silent zero-row insert was the whole failure).
+- `enqueued` is now derived from `RowsAffected() > 0`, not from "the query did not
+  fail" — no pointless worker nudge on a zero-row insert.
+- **Why this stayed invisible for a month.** Exactly **seven** requests were closed
+  more than once (`1657` three times, `1518/1519/1385/1535/1656/1522` twice), all
+  before the fix, and each has exactly **one** `completed` outbox row — the second
+  rows were never inserted, so nothing in the journal hinted at a problem. `1657`
+  was reopened and closed three times on 2026-11-06 alone (06:36→09:06,
+  09:17:46→09:17:52) and still shows one row.
+- `1656`/`1657` belong to project `24` (`PVC SAMPLES`), whose own rule covers
+  `completed` into `(chat -1002668536527, thread 10)` — so the missing message is
+  indeed the dedup, not a rule mismatch. Anything enqueued after the deploy sends
+  normally.
+- Tests: `TestCompletedRedeliverEventOnlyForCompleted` (completed yes, created and
+  unknown no). `go vet`, `go test ./...`, `gofmt -l` — clean.
+- **Deployed 2026-11-06 12:26 MSK**: source tar (`lab-service`, `git archive` of
+  `backend` + the two edited files) → `/opt/mailers`, backup `lab-service.bak-lab-20261106`,
+  `md5sum` of `telegram_notify.go` matched on both sides
+  (`b8245424d566924a401734744a8922df`), `docker compose build lab` OK,
+  `up -d --force-recreate --no-deps lab`, `CREATED 09:26:57Z`, health `{"status":"ok"}`,
+  `sync/pull` without a key `401`, marker strings `superseded` /
+  `completedRedeliverEvent` present in the binary, bridge
+  `http://portal-embed:3000/internal/telegram/send` answers `403` to a bad secret
+  (reachable, not 404). Live closure after the fix not yet observed.
+- Plugin version 1.1.4 → **1.1.5** only because the ЦУП news text changed (the
+  `announceUpdate` call is version-gated); the TS logic itself is untouched.
+  `tsc --noEmit` EXIT=0, `npm run build` OK, the news string is present in `main.js`
+  in its escaped (`\uXXXX`) form.
+
 ## Статус
 
 Дорожная карта MVP (WP1–WP9) закрыта 2026-08-29: весь план

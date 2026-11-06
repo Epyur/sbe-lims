@@ -1346,6 +1346,51 @@ docker compose exec lab wget -qO- http://localhost:3000/api/lab/health   # вн�
 
 ## История
 
+### 2026-11-06 — повторное закрытие заявки снова уведомляет Telegram
+
+Live complaint: close the request → the channel gets «✅ Выполнена» → send it back
+for rework → close again → **no second message**.
+
+- **The trigger was fine; the outbox dedup ate the message.** `triggerTelegramCompleted`
+  is called only on a real `→ completed` transition (three paths:
+  `setRequestStatus`, `handleKanbanMove`, and the same two used by the plugin/portal),
+  so the second closure did reach `triggerTelegramEvent`. What dropped it was
+  `uq_tg_outbox_dest (request_id, event, chat_id, thread_id) WHERE status <> 'failed'`
+  + `ON CONFLICT DO NOTHING`: the first `completed` row is `sent` forever and blocks
+  every later closure of the same request to the same destination. Zero rows
+  inserted, no error, no log — the failure was completely silent.
+- **Fix in `telegram_notify.go`.** `supersedePreviousCompleted` runs before each
+  `completed` insert and moves already **sent** rows of that destination to the new
+  status `superseded` (journal keeps them, the channel already got them, the partial
+  index ignores them). The dedup now collapses repeats only *within one closure*,
+  so a double click or a repeated event still cannot produce duplicates.
+  `completedRedeliverEvent(event)` is the pure gate: redelivery for `completed` only —
+  «Создана» stays deduplicated forever. A supersede error is logged and skips the
+  channel (the previous silent zero-row insert is exactly what hid this bug).
+- `enqueued` now comes from `RowsAffected() > 0` — a zero-row insert no longer
+  nudges the worker for nothing.
+- **Why this was invisible for a month.** Exactly **seven** requests were closed
+  more than once (`1657` ×3, `1518`, `1519`, `1385`, `1535`, `1656`, `1522` ×2), all
+  before the fix, and each has exactly **one** `completed` outbox row — the second
+  rows were never inserted. `1657` was reopened and closed three times on 2026-11-06
+  (06:36→09:06, 09:17:46→09:17:52) and still shows one row.
+- **Not a defect, checked and left alone.** Rules live on projects `23`
+  (`PVC MEMBRANE`) and `24` (`PVC SAMPLES`); `1656`/`1657` belong to 24 and use its
+  own rule, so the closure really should have produced a message. The 09:17:52 one
+  is explained by timing: the reopen and the close were 6 seconds apart and the
+  destination `(chat -1002668536527, thread 10)` already had a `sent` row from
+  11:12 — this is exactly the dedup the fix removes.
+- Tests: `TestCompletedRedeliverEventOnlyForCompleted`. `go vet`, `go test ./...`,
+  `gofmt -l` — clean. No migration needed: no `CHECK` constraint on `status`, the
+  partial index is `status <> 'failed'` and `superseded` falls under it.
+- **Deployed 2026-11-06 12:26 MSK** (`/opt/mailers`): source `tar` → backup
+  `lab-service.bak-lab-20261106` → `md5sum` match on both sides
+  (`b8245424d566924a401734744a8922df`) → `docker compose build lab` →
+  `up -d --force-recreate --no-deps lab` → `CREATED 09:26:57Z`, health
+  `{"status":"ok"}`, `sync/pull` without a key `401`, marker strings in the binary,
+  `/internal/telegram/send` reachable from `lab` (`403` on a bad secret).
+  **No live closure observed after the deploy yet** — the first real one closes it.
+
 ### 2026-10-19 — очередь отправки писем заявки; переиспользование отчёта; фото в DOCX
 
 Живой случай: заявка 494 (`requests.id=1641`) — отчёт 11,9 МБ (6 полноразмерных
