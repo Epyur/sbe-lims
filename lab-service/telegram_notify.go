@@ -628,21 +628,40 @@ func (s *Server) triggerTelegramCompleted(ctx context.Context, requestID int64) 
 	s.triggerTelegramEvent(ctx, requestID, "completed")
 }
 
+// telegramSkip — причина, по которой событие не попало в очередь. Отдельный тип
+// и обязательный лог на КАЖДЫЙ путь (2026-11-06): раньше triggerTelegramEvent
+// молча выходил на четырёх проверках подряд, и пропажу уведомления по заявке
+// 504 нельзя было объяснить вообще — в логе не было ни строки.
+type telegramSkip struct{ reason string }
+
+const (
+	telegramSkipNoProject  = "request has no project/method"
+	telegramSkipNoRule     = "no telegram rule for method"
+	telegramSkipNoEvent    = "no channel wants this event"
+	telegramSkipEmptyChat  = "channel has empty chat_id"
+	telegramSkipSupersede  = "supersede previous completed failed"
+	telegramSkipInsertFail = "enqueue insert failed"
+)
+
 func (s *Server) triggerTelegramEvent(ctx context.Context, requestID int64, event string) {
 	req, err := s.loadRequest(ctx, requestID)
 	if err != nil || req == nil {
-		log.Printf("telegram notify: load request %d: %v", requestID, err)
+		log.Printf("telegram notify: skip request %d event=%s: load request: %v", requestID, event, err)
 		return
 	}
 	if req.ProjectID <= 0 || req.MethodID <= 0 {
+		log.Printf("telegram notify: skip request %d event=%s: %s (project=%d method=%d)",
+			requestID, event, telegramSkipNoProject, req.ProjectID, req.MethodID)
 		return
 	}
-	rule, _, err := resolveTelegramRule(req.MethodID, req.ProjectID, s.telegramRuleLookup(ctx))
+	rule, srcID, err := resolveTelegramRule(req.MethodID, req.ProjectID, s.telegramRuleLookup(ctx))
 	if err != nil {
-		log.Printf("telegram notify: resolve rule request %d: %v", requestID, err)
+		log.Printf("telegram notify: skip request %d event=%s: resolve rule: %v", requestID, event, err)
 		return
 	}
 	if rule == nil || len(rule.Channels) == 0 {
+		log.Printf("telegram notify: skip request %d event=%s: %s (project=%d method=%d)",
+			requestID, event, telegramSkipNoRule, req.ProjectID, req.MethodID)
 		return
 	}
 	// Событие — на уровне канала: если ни один канал этого события не ждёт,
@@ -655,6 +674,8 @@ func (s *Server) triggerTelegramEvent(ctx context.Context, requestID int64, even
 		}
 	}
 	if !wanted {
+		log.Printf("telegram notify: skip request %d event=%s: %s (rule from project=%d, method=%d, on_created=%t on_completed=%t, channels=%d)",
+			requestID, event, telegramSkipNoEvent, srcID, rule.MethodID, rule.OnCreated, rule.OnCompleted, len(rule.Channels))
 		return
 	}
 	if event == "completed" {
@@ -672,11 +693,13 @@ func (s *Server) triggerTelegramEvent(ctx context.Context, requestID int64, even
 		}
 		chatID := strings.TrimSpace(ch.ChatID)
 		if chatID == "" {
+			log.Printf("telegram notify: skip request %d event=%s: %s (thread=%d)", requestID, event, telegramSkipEmptyChat, ch.ThreadID)
 			continue
 		}
 		withAttachment := event == "completed" && ch.wantsAttachment(rule.WithAttachment)
 		if err := s.supersedePreviousCompleted(ctx, requestID, event, chatID, ch.ThreadID); err != nil {
-			log.Printf("telegram notify: supersede previous request %d chat %s: %v", requestID, chatID, err)
+			log.Printf("telegram notify: skip request %d event=%s chat %s: %s: %v",
+				requestID, event, chatID, telegramSkipSupersede, err)
 			continue
 		}
 		res, err := s.pool.Exec(ctx, `
@@ -684,22 +707,31 @@ INSERT INTO telegram_notify_outbox (request_id, event, chat_id, text, with_attac
 VALUES ($1, $2, $3, $4, $5, $6)
 ON CONFLICT DO NOTHING`, requestID, event, chatID, text, withAttachment, ch.ThreadID)
 		if err != nil {
-			log.Printf("telegram notify: enqueue request %d chat %s: %v", requestID, chatID, err)
+			log.Printf("telegram notify: skip request %d event=%s chat %s: %s: %v",
+				requestID, event, chatID, telegramSkipInsertFail, err)
 			continue
 		}
-		if res.RowsAffected() > 0 {
+		affected := res.RowsAffected()
+		if affected > 0 {
 			enqueued = true
 		}
+		// Ноль строк при успешном запросе — это ON CONFLICT, то есть в очереди уже
+		// есть строка того же адреса. Печатаем явно: раньше этот случай вообще не
+		// оставлял следа и выглядел как «уведомление не отправилось».
+		log.Printf("telegram notify: request %d event=%s chat %s thread %d: rows=%d attachment=%t",
+			requestID, event, chatID, ch.ThreadID, affected, withAttachment)
 	}
 	if enqueued {
 		s.nudgeTelegramNotify()
+	} else {
+		log.Printf("telegram notify: request %d event=%s: nothing enqueued", requestID, event)
 	}
 }
 
 // completedSupersedeStatus — статус прошлой отправки «Выполнена», которую
 // заменило повторное закрытие заявки. Строка остаётся в журнале (её видели),
-// но выходит из частичного уникального индекса uq_tg_outbox_dest
-// (… WHERE status <> 'failed') и больше не гасит новую вставку.
+// но выходит из частичного уникального индекса uq_tg_outbox_live
+// (… WHERE status IN ('pending','sent')) и больше не гасит новую вставку.
 const completedSupersedeStatus = "superseded"
 
 // completedRedeliverEvent (2026-11-06, живая жалоба: «закрыли — вернули на
@@ -729,6 +761,19 @@ UPDATE telegram_notify_outbox SET status = $5
 WHERE request_id = $1 AND event = $2 AND chat_id = $3 AND thread_id = $4
   AND status = 'sent'`, requestID, event, chatID, threadID, completedSupersedeStatus)
 	return err
+}
+
+// clearSupersededHistory (2026-11-06, после живого разбора заявки 504-ГГ).
+// Старый индекс `WHERE status <> 'failed'` держал слот и для архивной строки:
+// первая замена перевела её в `superseded`, и КАЖДОЕ следующее закрытие
+// упиралось в неё — rows=0, ни одного сообщения, ни одной ошибки. Теперь
+// архивные строки в индекс не входят (uq_tg_outbox_live), а оставшиеся от
+// прежней схемы `superseded` ничего не блокируют.
+//
+// «Живые» статусы очереди — единственное место, где это правило записано;
+// индекс в main.go повторяет ровно этот список.
+func liveOutboxStatus(status string) bool {
+	return status == "pending" || status == "sent"
 }
 
 // ---- очередь отправки ----

@@ -247,6 +247,21 @@ func TestCompletedRedeliverEventOnlyForCompleted(t *testing.T) {
 	}
 }
 
+// Архивные статусы не должны занимать адрес в дедупе (живой случай 504-ГГ:
+// вторая замена получала rows=0, потому что слот держала строка `superseded`).
+func TestLiveOutboxStatus(t *testing.T) {
+	for _, s := range []string{"pending", "sent"} {
+		if !liveOutboxStatus(s) {
+			t.Fatalf("%q must hold the dedup slot", s)
+		}
+	}
+	for _, s := range []string{"superseded", "failed", ""} {
+		if liveOutboxStatus(s) {
+			t.Fatalf("%q must NOT hold the dedup slot", s)
+		}
+	}
+}
+
 func TestTelegramNotifyAttemptsCap(t *testing.T) {
 	if got := nextAttemptStatus(0); got != "pending" {
 		t.Fatalf("first failure must stay pending, got %q", got)

@@ -996,9 +996,18 @@ WHERE mr.request_id = r.id AND mr.is_statistical_row = false AND COALESCE(r.amb_
 		// быть несколько каналов, в т.ч. разные темы одной группы. Старый индекс
 		// без темы удаляем: иначе две темы одного чата блокировали бы друг друга.
 		`DROP INDEX IF EXISTS uq_tg_outbox_dedup`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS uq_tg_outbox_dest
+		// Дедуп существует ровно для того, чтобы не было двух ЖИВЫХ отправок по
+		// одному адресу. 2026-11-06: условие было `status <> 'failed'`, и любой
+		// архивный статус продолжал держать слот вечно — сначала `sent` (первое
+		// закрытие блокировало повторное), а после правки замены — `superseded`
+		// точно так же (живой случай: заявка 504-ГГ, повторное закрытие давало
+		// rows=0 и ни одного сообщения). Теперь в индексе только рабочие статусы:
+		// pending не даёт двойному клику поставить две строки, sent — повторно
+		// отправить уже поставленное в очередь без замены.
+		`DROP INDEX IF EXISTS uq_tg_outbox_dest`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_tg_outbox_live
 			ON telegram_notify_outbox (request_id, event, chat_id, thread_id)
-			WHERE status <> 'failed'`,
+			WHERE status IN ('pending', 'sent')`,
 	}
 	for _, q := range stmts {
 		if _, err := s.pool.Exec(ctx, q); err != nil {

@@ -152,6 +152,19 @@ lab_operator/lab_admin/владелец. Не трогали: эндпоинт �
   `min_grade`/`max_grade` (не `worst_grade`/`best_grade`), агрегация правил
   классификации `none`/`avg`/`min`/`max` (не `best`/`worst`).
 
+## 1.1.6 — журнал Telegram: «заменено повторным закрытием» (2026-11-06)
+
+Follow-up to 1.1.5 on the live case (request 504-ГГ). The message arrives now, but
+the journal in the request card showed the previous closure's row as «в очереди».
+
+- The row is `superseded` — the closure it belongs to really was delivered, and its
+  message was replaced by the message about the later closure. The plugin mapped
+  only `sent`/`failed` and sent everything else to «в очереди», so an archived row
+  looked like a stuck one.
+- `statusLabel` in `lims-view.ts` now says «отправлено (заменено повторным
+  закрытием)». `superseded` is an archived state, never a queue state — only
+  `pending` means "waiting".
+
 ## 1.1.5 — Telegram-уведомление о повторном закрытии заявки (2026-11-06)
 
 Live complaint: a request is closed, the Telegram channel gets «✅ Выполнена»; the
