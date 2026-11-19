@@ -542,6 +542,17 @@ func (s *Server) migrate(ctx context.Context) error {
 			WHERE a.external_id = b.external_id AND a.id < b.id`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS uq_email_ingest_pending_external
 			ON email_ingest_pending_results (external_id)`,
+		// Курсор чтения папки (2026-11-19): воркер забирает только UID больше
+		// последнего прочитанного. Без него каждый цикл запрашивал ENVELOPE всей
+		// папки, не укладывался в жизнь IMAP-сессии (Яндекс рвёт её примерно через
+		// 2 минуты), и папки в конце списка не разбирались вовсе. Пустая строка —
+		// нормальное первое состояние (читаем с UID 1, лишнее отсеет дедуп).
+		`CREATE TABLE IF NOT EXISTS email_ingest_cursor (
+			folder TEXT PRIMARY KEY,
+			uid_validity BIGINT NOT NULL DEFAULT 0,
+			last_uid BIGINT NOT NULL DEFAULT 0,
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+		)`,
 		// Метод теперь может принадлежать НЕСКОЛЬКИМ лабораториям (по требованию
 		// пользователя, 2026-08-19) — старая колонка methods.lab_id (1:1) больше не
 		// пишется новым кодом, но НЕ удаляется (как request_methods в декомпозиции

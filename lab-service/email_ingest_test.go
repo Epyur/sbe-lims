@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/emersion/go-imap"
 )
 
 // buildMimeMessage — собирает сырое RFC822-сообщение из строк (CRLF, как в реальной
@@ -519,6 +521,204 @@ func TestPendingRowDecisionKeepsYoungAndMovesOldToArchive(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			if got := pendingRowDecision(c.age); got != c.want {
 				t.Errorf("pendingRowDecision(%v) = %v, want %v", c.age, got, c.want)
+			}
+		})
+	}
+}
+
+// Воркер опрашивает ровно одну папку: результаты по почте больше не принимаются
+// (2026-11-19). Это поведенческий тест — если кто-то вернёт папки обратно, цикл
+// снова начнёт упираться в предел IMAP-сессии, и упасть должно здесь, а не в проде.
+func TestEmailIngestPollsOnlyLPITrack(t *testing.T) {
+	if len(emailIngestFolders) != 1 || emailIngestFolders[0] != "LPITrack" {
+		t.Fatalf("emailIngestFolders = %v, want [LPITrack]", emailIngestFolders)
+	}
+}
+
+// dedupKeyFor — ключ дедупа: Message-ID, а без него — стабильный uid-ключ.
+// Ошибка здесь тихая: неверный ключ либо задублирует заявку, либо пропустит письмо.
+func TestDedupKeyFor(t *testing.T) {
+	cases := []struct {
+		name          string
+		msg           *imap.Message
+		wantKey       string
+		wantMissingID bool
+	}{
+		{
+			name:    "Message-ID с пробелами обрезается",
+			msg:     &imap.Message{Uid: 7, Envelope: &imap.Envelope{MessageId: "  <abc@example>  "}},
+			wantKey: "<abc@example>",
+		},
+		{
+			name:          "пустой Message-ID — фолбэк на UID",
+			msg:           &imap.Message{Uid: 41, Envelope: &imap.Envelope{MessageId: "   "}},
+			wantKey:       "uid:LPITrack:41",
+			wantMissingID: true,
+		},
+		{
+			name:          "нет конверта — фолбэк на UID",
+			msg:           &imap.Message{Uid: 42},
+			wantKey:       "uid:LPITrack:42",
+			wantMissingID: true,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			key, missing := dedupKeyFor("LPITrack", c.msg)
+			if key != c.wantKey || missing != c.wantMissingID {
+				t.Errorf("dedupKeyFor() = (%q, %v), want (%q, %v)", key, missing, c.wantKey, c.wantMissingID)
+			}
+		})
+	}
+}
+
+// settledFromRecorded — для каждого UID диапазона [from,to] отвечает, доведено
+// ли письмо до записи в дедуп. Отсутствующее в папке письмо считается
+// урегулированным: в диапазоне UID бывают дыры после удаления писем, и курсор
+// не должен застревать на них навсегда. Чистая — проверяется без БД.
+func TestSettledFromRecorded(t *testing.T) {
+	keys := map[uint32]string{10: "a@x", 12: "c@x"}
+	recorded := map[string]bool{"a@x": true}
+
+	got := settledFromRecorded(10, 13, keys, recorded)
+	want := []bool{true, true, false, true} // 10 есть, 11 — дыра, 12 не записан, 13 — дыра
+	if len(got) != len(want) {
+		t.Fatalf("длина = %d, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("settled[%d] (uid %d) = %v, want %v", i, 10+i, got[i], want[i])
+		}
+	}
+
+	empty := settledFromRecorded(201, 203, nil, nil)
+	for i, v := range empty {
+		if !v {
+			t.Errorf("пустая пачка: settled[%d] = false, want true", i)
+		}
+	}
+}
+
+// nextIngestBatch — какой диапазон UID забирать в этом цикле. Чистая функция:
+// вся арифметика курсора проверяется без БД и без IMAP.
+func TestNextIngestBatch(t *testing.T) {
+	cases := []struct {
+		name           string
+		uidValidity    uint32
+		uidNext        uint32
+		storedValidity uint32
+		lastUID        uint32
+		batchSize      uint32
+		wantFrom       uint32
+		wantTo         uint32
+		wantOK         bool
+	}{
+		{
+			name:        "пустая папка: UIDNEXT=1",
+			uidValidity: 5, uidNext: 1, storedValidity: 5, lastUID: 0, batchSize: 200,
+			wantOK: false,
+		},
+		{
+			name:        "первый батч с нуля",
+			uidValidity: 5, uidNext: 671, storedValidity: 5, lastUID: 0, batchSize: 200,
+			wantFrom: 1, wantTo: 200, wantOK: true,
+		},
+		{
+			name:        "следующий батч",
+			uidValidity: 5, uidNext: 671, storedValidity: 5, lastUID: 200, batchSize: 200,
+			wantFrom: 201, wantTo: 400, wantOK: true,
+		},
+		{
+			name:        "хвост короче пачки",
+			uidValidity: 5, uidNext: 450, storedValidity: 5, lastUID: 400, batchSize: 200,
+			wantFrom: 401, wantTo: 449, wantOK: true,
+		},
+		{
+			name:        "догнали папку",
+			uidValidity: 5, uidNext: 450, storedValidity: 5, lastUID: 449, batchSize: 200,
+			wantOK: false,
+		},
+		{
+			name:        "ровно на границе пачки",
+			uidValidity: 5, uidNext: 201, storedValidity: 5, lastUID: 200, batchSize: 200,
+			wantOK: false,
+		},
+		{
+			name:        "сервер не отдал UIDNEXT",
+			uidValidity: 5, uidNext: 0, storedValidity: 5, lastUID: 0, batchSize: 200,
+			wantOK: false,
+		},
+		{
+			name:        "курсор впереди папки",
+			uidValidity: 5, uidNext: 450, storedValidity: 5, lastUID: 500, batchSize: 200,
+			wantOK: false,
+		},
+		{
+			name:        "UIDVALIDITY сменился: читаем заново с 1",
+			uidValidity: 20, uidNext: 671, storedValidity: 10, lastUID: 400, batchSize: 200,
+			wantFrom: 1, wantTo: 200, wantOK: true,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			from, to, ok := nextIngestBatch(c.uidValidity, c.uidNext, c.storedValidity, c.lastUID, c.batchSize)
+			if ok != c.wantOK {
+				t.Fatalf("ok = %v, want %v (from=%d to=%d)", ok, c.wantOK, from, to)
+			}
+			if !ok {
+				return
+			}
+			if from != c.wantFrom || to != c.wantTo {
+				t.Errorf("диапазон = %d..%d, want %d..%d", from, to, c.wantFrom, c.wantTo)
+			}
+		})
+	}
+}
+
+// advanceCursor — до какого UID двигать курсор по непрерывному префиксу писем,
+// доведённых до записи в дедуп. Непрерывность важна: письмо, которое не удалось
+// записать, обязано остаться за курсором и повториться на следующем цикле.
+func TestAdvanceCursor(t *testing.T) {
+	cases := []struct {
+		name    string
+		from    uint32
+		to      uint32
+		settled []bool
+		want    uint32
+	}{
+		{
+			name: "пустой батч (в диапазоне UID ничего нет) — двигаемся до to",
+			from: 201, to: 400, settled: nil, want: 400,
+		},
+		{
+			name: "все письма урегулированы",
+			from: 1, to: 3, settled: []bool{true, true, true}, want: 3,
+		},
+		{
+			name: "сбой в середине — стоим перед ним",
+			from: 1, to: 3, settled: []bool{true, false, true}, want: 1,
+		},
+		{
+			name: "сбой в начале — курсор не двигается",
+			from: 201, to: 203, settled: []bool{false, true, true}, want: 200,
+		},
+		{
+			name: "единственное письмо не урегулировано",
+			from: 201, to: 201, settled: []bool{false}, want: 200,
+		},
+		{
+			name: "первое письмо папки не урегулировано — курсор на нуле",
+			from: 1, to: 1, settled: []bool{false}, want: 0,
+		},
+		{
+			name: "хвост не урегулирован — курсор перед ним",
+			from: 1, to: 3, settled: []bool{true, true, false}, want: 2,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := advanceCursor(c.from, c.to, c.settled); got != c.want {
+				t.Errorf("advanceCursor(%d, %d, %v) = %d, want %d", c.from, c.to, c.settled, got, c.want)
 			}
 		})
 	}

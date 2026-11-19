@@ -29,11 +29,30 @@ import (
 )
 
 // Дизайн: docs/superpowers/specs/2026-08-19-lab-email-ingestion-design.md
-// Приём заявок (папка LPITrack) и результатов (Comb/Flam/FlamProp) из почтового
-// ящика лаборатории — заменяет часть функциональности десктопной ЛИМС LIMS_LPI.
-// Без переноса исторических писем (backfill) — только новые письма с момента включения.
+// Приём заявок (папка LPITrack) из почтового ящика лаборатории — заменяет часть
+// функциональности десктопной ЛИМС LIMS_LPI. Без переноса исторических писем
+// (backfill) — только новые письма с момента включения.
+//
+// 2026-11-19: опрос результатов (Comb/Flam/FlamProp) прекращён — решение
+// пользователя, результаты вводятся формой ЛИМС/мобильным. Код их разбора
+// (applyResultEmail и ниже) остался: это единственный путь точечного
+// восстановления через `fetch-mail` (mail_fetch_by_id.go).
 
-var emailIngestFolders = []string{"LPITrack", "Comb", "Flam", "FlamProp"}
+// emailIngestFolders — единственная папка, которую опрашивает воркер.
+// Каждая лишняя папка — это ещё один полный ENVELOPE-обход на цикл; на
+// четырёх папках цикл не укладывался в жизнь IMAP-сессии (Яндекс рвёт её
+// примерно через 2 минуты), и папки в конце списка не разбирались вовсе.
+var emailIngestFolders = []string{"LPITrack"}
+
+// emailIngestBatchSize — сколько UID папки разбирает один цикл. Пачка нужна не
+// ради экономии трафика, а чтобы новый цикл не повторял ENVELOPE всей папки:
+// на 670 письмах это ~37 с, а папка растёт.
+const emailIngestBatchSize = 200
+
+// emailIngestCommandTimeout — потолок на одну IMAP-команду. Без него
+// полумёртвый TCP (сервер не прислал FIN) вешает воркер до таймаута ОС: цикл
+// последовательный, тикер в это время не срабатывает.
+const emailIngestCommandTimeout = 120 * time.Second
 
 // legacyFolderMethodKey — папка → ключ LAB_MAIL_METHOD_MAP для писем-результатов
 // БЕЗ поля "type" (2026-08-29, см. processMessage) — папка жёстко привязана к
@@ -72,8 +91,6 @@ func legacyMethodKeyFromAimIndicator(aimIndicator string) string {
 		return ""
 	}
 }
-
-const pendingResultMaxAttempts = 20
 
 // resultMetaFields — поля письма-результата, не относящиеся к values серии
 // (маршрутизация/метаданные); всё остальное передаётся в values (при условии,
@@ -258,11 +275,23 @@ func (s *Server) runIngestCycleSafe(ctx context.Context, cfg *emailIngestConfig)
 }
 
 func (s *Server) runIngestCycle(ctx context.Context, cfg *emailIngestConfig) error {
+	// Буфер «результат раньше заявки» не зависит от IMAP: разбираем его до
+	// диалога, чтобы недоступность ящика не копила строки впустую.
+	s.retryPendingResults(ctx, cfg)
+
 	c, err := client.DialTLS(cfg.imapServer+":993", nil)
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
 	}
-	defer c.Logout()
+	// Terminate, а не Logout: закрывает сокет даже когда сессия уже мертва
+	// (Logout на мёртвом соединении сам ждёт ответа). Замыкание — чтобы
+	// закрылась именно та переменная, которая реально работает.
+	defer func() {
+		if c != nil {
+			c.Terminate()
+		}
+	}()
+	c.Timeout = emailIngestCommandTimeout
 	if err := c.Login(cfg.login, cfg.password); err != nil {
 		return fmt.Errorf("login: %w", err)
 	}
@@ -271,75 +300,263 @@ func (s *Server) runIngestCycle(ctx context.Context, cfg *emailIngestConfig) err
 			log.Printf("email ingest: folder %s: %v", folder, err)
 		}
 	}
-	s.retryPendingResults(ctx, cfg)
 	return nil
 }
 
-// processFolder обходит папку в read-only режиме (SELECT readOnly=true, BODY.PEEK[] —
-// письма не помечаются прочитанными). Дедуп по Message-ID: тело скачивается только
-// для писем, которых ещё нет в email_ingest_processed.
+// emailIngestCursor — докуда папка уже прочитана. uidValidity сравнивается с
+// текущим: при пересоздании папки сервер меняет UIDVALIDITY, и нумерация
+// начинается заново — тогда читаем с UID 1 (дедуп по Message-ID отсеет уже
+// разобранное).
+type emailIngestCursor struct {
+	uidValidity uint32
+	lastUID     uint32
+}
+
+// nextIngestBatch — чистый расчёт диапазона UID на один цикл. Вынесен из
+// processFolder ради юнит-тестов (у проекта нет инфраструктуры для мока IMAP).
+// Курсор намеренно не двигается за пределы папки: from..to всегда непрерывен,
+// поэтому всё, что в нём есть, будет запрошено.
+func nextIngestBatch(uidValidity, uidNext, storedValidity, lastUID, batchSize uint32) (from, to uint32, ok bool) {
+	if uidNext == 0 || batchSize == 0 {
+		return 0, 0, false
+	}
+	if storedValidity != uidValidity {
+		lastUID = 0
+	}
+	maxUID := uidNext - 1 // UIDNEXT — следующий свободный UID
+	if lastUID >= maxUID {
+		return 0, 0, false
+	}
+	from = lastUID + 1
+	to = from + batchSize - 1
+	if to < from || to > maxUID {
+		to = maxUID
+	}
+	return from, to, true
+}
+
+// advanceCursor — до какого UID двигать курсор. Двигаемся только по
+// непрерывному префиксу писем, доведённых до записи в email_ingest_processed:
+// письмо, которое не удалось записать (сбой БД, оборванная сессия), остаётся
+// за курсором и повторяется на следующем цикле. Пустой батч (в диапазоне нет
+// писем — дыры после удаления) считается прочитанным, иначе курсор застрял бы
+// навсегда.
+func advanceCursor(from, to uint32, settled []bool) uint32 {
+	if len(settled) == 0 {
+		return to
+	}
+	for i := 0; i < len(settled) && uint32(i) <= to-from; i++ {
+		if !settled[i] {
+			if i == 0 {
+				return from - 1 // from всегда >= 1 (lastUID+1)
+			}
+			return from + uint32(i) - 1
+		}
+	}
+	return to
+}
+
+func (s *Server) loadIngestCursor(ctx context.Context, folder string) (emailIngestCursor, bool) {
+	var cur emailIngestCursor
+	var validity, last int64
+	err := s.pool.QueryRow(ctx,
+		`SELECT uid_validity, last_uid FROM email_ingest_cursor WHERE folder = $1`, folder).
+		Scan(&validity, &last)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			log.Printf("email ingest: load cursor %s: %v", folder, err)
+		}
+		return cur, false
+	}
+	cur.uidValidity = uint32(validity)
+	cur.lastUID = uint32(last)
+	return cur, true
+}
+
+// saveIngestCursor пишет курсор всегда, даже когда двигать нечего: смена
+// UIDVALIDITY обязана быть зафиксирована тем же запросом, иначе следующий цикл
+// снова сочтёт папку пересозданной и будет вечно читать её с UID 1.
+func (s *Server) saveIngestCursor(ctx context.Context, folder string, uidValidity, lastUID uint32) error {
+	if _, err := s.pool.Exec(ctx, `
+INSERT INTO email_ingest_cursor (folder, uid_validity, last_uid, updated_at)
+VALUES ($1, $2, $3, now())
+ON CONFLICT (folder) DO UPDATE SET
+	uid_validity = EXCLUDED.uid_validity,
+	last_uid = EXCLUDED.last_uid,
+	updated_at = now()`, folder, int64(uidValidity), int64(lastUID)); err != nil {
+		log.Printf("email ingest: save cursor %s: %v", folder, err)
+		return err
+	}
+	return nil
+}
+
+// processFolder обходит ОДНУ пачку папки в read-only режиме: письма не
+// помечаются прочитанными (SELECT readOnly=true, BODY.PEEK[]). Диапазон берётся
+// с сохранённого UID, а не с начала папки: ENVELOPE стоит ~17–37 с на 600
+// писем, и полный обход не укладывался в жизнь IMAP-сессии (Яндекс рвёт её
+// примерно через 2 минуты). Дедуп по Message-ID остаётся вторым рубежом: тело
+// скачивается только для писем, которых ещё нет в email_ingest_processed.
 func (s *Server) processFolder(ctx context.Context, c *client.Client, cfg *emailIngestConfig, folder string) error {
 	mbox, err := c.Select(folder, true)
 	if err != nil {
 		return err
 	}
-	if mbox.Messages == 0 {
+	if mbox.UidNext == 0 {
+		log.Printf("email ingest: WARNING %s: сервер не сообщил UIDNEXT, цикл пропущен", folder)
 		return nil
 	}
-	allSeqset := new(imap.SeqSet)
-	allSeqset.AddRange(1, mbox.Messages)
+	cur, hasCursor := s.loadIngestCursor(ctx, folder)
+	var storedValidity, lastUID uint32
+	if hasCursor {
+		storedValidity, lastUID = cur.uidValidity, cur.lastUID
+	}
+	from, to, ok := nextIngestBatch(mbox.UidValidity, mbox.UidNext, storedValidity, lastUID, emailIngestBatchSize)
+	if !ok {
+		return s.saveIngestCursor(ctx, folder, mbox.UidValidity, lastUID)
+	}
 
-	envelopes := make(chan *imap.Message, int(mbox.Messages))
+	dedupKeyByUID, newUIDs, err := s.fetchBatch(ctx, c, folder, from, to)
+	if err != nil {
+		// Курсор не двигаем: пачка повторится, записанное отсеет дедуп.
+		_ = s.saveIngestCursor(ctx, folder, mbox.UidValidity, lastUID)
+		return err
+	}
+	if err := s.applyBatch(ctx, c, cfg, folder, newUIDs, dedupKeyByUID); err != nil {
+		_ = s.saveIngestCursor(ctx, folder, mbox.UidValidity, lastUID)
+		return err
+	}
+
+	settled, err := s.settledBatch(ctx, from, to, dedupKeyByUID)
+	if err != nil {
+		_ = s.saveIngestCursor(ctx, folder, mbox.UidValidity, lastUID)
+		return err
+	}
+	newLastUID := advanceCursor(from, to, settled)
+	if newLastUID != lastUID {
+		log.Printf("email ingest: %s uid %d→%d (диапазон %d..%d, писем %d, новых %d)",
+			folder, lastUID, newLastUID, from, to, len(dedupKeyByUID), len(newUIDs))
+	}
+	if newLastUID < to {
+		log.Printf("email ingest: WARNING %s: пачка %d..%d не дочитана, курсор %d — повтор на следующем цикле",
+			folder, from, to, newLastUID)
+	}
+	return s.saveIngestCursor(ctx, folder, mbox.UidValidity, newLastUID)
+}
+
+// fetchBatch — конверты пачки и список UID, которых ещё нет в дедупе.
+func (s *Server) fetchBatch(ctx context.Context, c *client.Client, folder string, from, to uint32) (map[uint32]string, []uint32, error) {
+	uidSet := new(imap.SeqSet)
+	uidSet.AddRange(from, to)
+	envelopes := make(chan *imap.Message, int(to-from)+1)
 	done := make(chan error, 1)
 	go func() {
-		done <- c.Fetch(allSeqset, []imap.FetchItem{imap.FetchEnvelope, imap.FetchUid}, envelopes)
+		done <- c.UidFetch(uidSet, []imap.FetchItem{imap.FetchEnvelope, imap.FetchUid}, envelopes)
 	}()
 
-	var newSeqNums []uint32
-	dedupKeyBySeq := map[uint32]string{}
+	dedupKeyByUID := map[uint32]string{}
+	var newUIDs []uint32
 	for msg := range envelopes {
-		dedupKey := ""
-		if msg.Envelope != nil {
-			dedupKey = strings.TrimSpace(msg.Envelope.MessageId)
+		key, missingID := dedupKeyFor(folder, msg)
+		if missingID {
+			log.Printf("email ingest: %s: uid=%d without Message-ID, using %s", folder, msg.Uid, key)
 		}
-		if dedupKey == "" {
-			// Message-ID отсутствует (редкий случай) — дедупим по UID, письмо стабильно
-			// адресуемо, пока остаётся в папке (см. спеку, «Обработка ошибок и дублей»).
-			dedupKey = fmt.Sprintf("uid:%s:%d", folder, msg.Uid)
-			log.Printf("email ingest: %s: seq=%d without Message-ID, using %s", folder, msg.SeqNum, dedupKey)
-		}
-		dedupKeyBySeq[msg.SeqNum] = dedupKey
+		dedupKeyByUID[msg.Uid] = key
 		var exists bool
 		if err := s.pool.QueryRow(ctx,
 			`SELECT EXISTS(SELECT 1 FROM email_ingest_processed WHERE message_id = $1)`,
-			dedupKey).Scan(&exists); err != nil {
+			key).Scan(&exists); err != nil {
+			// Не записали — письмо останется за курсором (см. settledBatch).
 			log.Printf("email ingest: dedup check: %v", err)
 			continue
 		}
 		if !exists {
-			newSeqNums = append(newSeqNums, msg.SeqNum)
+			newUIDs = append(newUIDs, msg.Uid)
 		}
 	}
 	if err := <-done; err != nil {
-		return err
+		return nil, nil, err
 	}
-	if len(newSeqNums) == 0 {
+	return dedupKeyByUID, newUIDs, nil
+}
+
+// dedupKeyFor — ключ дедупа письма: Message-ID, а при его отсутствии UID
+// (редкий случай; письмо стабильно адресуемо, пока остаётся в папке).
+func dedupKeyFor(folder string, msg *imap.Message) (key string, missingID bool) {
+	if msg.Envelope != nil {
+		if id := strings.TrimSpace(msg.Envelope.MessageId); id != "" {
+			return id, false
+		}
+	}
+	return fmt.Sprintf("uid:%s:%d", folder, msg.Uid), true
+}
+
+// applyBatch — скачивает тела новых писем и разбирает их.
+func (s *Server) applyBatch(ctx context.Context, c *client.Client, cfg *emailIngestConfig,
+	folder string, newUIDs []uint32, dedupKeyByUID map[uint32]string) error {
+	if len(newUIDs) == 0 {
 		return nil
 	}
-
-	bodySeqset := new(imap.SeqSet)
-	bodySeqset.AddNum(newSeqNums...)
+	bodySet := new(imap.SeqSet)
+	bodySet.AddNum(newUIDs...)
 	section := &imap.BodySectionName{Peek: true}
 	items := []imap.FetchItem{imap.FetchEnvelope, section.FetchItem()}
-	bodies := make(chan *imap.Message, len(newSeqNums))
-	done2 := make(chan error, 1)
+	// Буфер на всю пачку обязателен: UidFetch пишет в канал из обработчика
+	// ответов, и нечитающий канал подвесил бы весь клиент. Для LPITrack тела
+	// мелкие; если сюда когда-нибудь вернутся письма с фото, дробить надо
+	// пачку по телам, а не увеличивать буфер.
+	bodies := make(chan *imap.Message, len(newUIDs))
+	done := make(chan error, 1)
 	go func() {
-		done2 <- c.Fetch(bodySeqset, items, bodies)
+		done <- c.UidFetch(bodySet, items, bodies)
 	}()
 	for msg := range bodies {
-		s.processMessage(ctx, folder, cfg, msg, section, dedupKeyBySeq[msg.SeqNum])
+		s.processMessage(ctx, folder, cfg, msg, section, dedupKeyByUID[msg.Uid])
 	}
-	return <-done2
+	return <-done
+}
+
+// settledBatch — для каждого UID диапазона [from,to] отвечает, доведено ли
+// письмо до записи в email_ingest_processed. Отсутствующее в папке письмо
+// считается урегулированным: в диапазоне UID бывают дыры после удаления писем,
+// и курсор не должен застревать на них навсегда.
+func (s *Server) settledBatch(ctx context.Context, from, to uint32, dedupKeyByUID map[uint32]string) ([]bool, error) {
+	keys := make([]string, 0, len(dedupKeyByUID))
+	for _, key := range dedupKeyByUID {
+		keys = append(keys, key)
+	}
+	recorded := map[string]bool{}
+	if len(keys) > 0 {
+		rows, err := s.pool.Query(ctx,
+			`SELECT message_id FROM email_ingest_processed WHERE message_id = ANY($1)`, keys)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				return nil, err
+			}
+			recorded[id] = true
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+	}
+	settled := settledFromRecorded(from, to, dedupKeyByUID, recorded)
+	return settled, nil
+}
+
+// settledFromRecorded — чистая часть settledBatch: применяет к диапазону уже
+// прочитанный набор записанных ключей. Отдельно, чтобы правила «дыра в UID —
+// урегулирована» и «письмо не записано — стоп» проверялись без БД.
+func settledFromRecorded(from, to uint32, dedupKeyByUID map[uint32]string, recorded map[string]bool) []bool {
+	settled := make([]bool, int(to-from)+1)
+	for i := 0; i <= int(to-from); i++ {
+		key, present := dedupKeyByUID[from+uint32(i)]
+		settled[i] = !present || recorded[key]
+	}
+	return settled
 }
 
 func (s *Server) processMessage(ctx context.Context, folder string, cfg *emailIngestConfig,
