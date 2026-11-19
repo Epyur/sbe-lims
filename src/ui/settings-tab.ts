@@ -4,9 +4,10 @@ import { getService } from '../../../sbe-core/src/bridge';
 import { errorMessage } from '../../../sbe-core/src/utils/errors';
 import type { SbeLlmModel } from '../../../sbe-core/src/types';
 
-/** Ключи env почтового приёма lab-service, управляемые через ЦУП (auth-service
- * /auth/apps/env, белый список — на сервере, env_admin.go). Пароль сюда НЕ входит —
- * он рендерится/собирается отдельно (никогда не подтягивается с сервера обратно). */
+/** Ключи env почтового приёма lab-service (заявки из LPITrack), управляемые
+ * через ЦУП (auth-service /auth/apps/env, белый список — на сервере,
+ * env_admin.go). Пароль сюда НЕ входит — он рендерится/собирается отдельно
+ * (никогда не подтягивается с сервера обратно). */
 const LAB_MAIL_ENV_KEYS = [
   'LAB_MAIL_ENABLED',
   'LAB_MAIL_IMAP_SERVER',
@@ -61,7 +62,7 @@ export class LimsSettingsTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setHeading()
-      .setName('Приём результатов по email (администратор)');
+      .setName('Приём заявок по email (администратор)');
 
     const mailDiv = containerEl.createDiv({ cls: 'tn-lims-meta' });
     mailDiv.setText('Загрузка…');
@@ -105,12 +106,13 @@ export class LimsSettingsTab extends PluginSettingTab {
     });
   }
 
-  /** Учётка почты (IMAP), с которой lab-service принимает письма-результаты —
-   * значения уходят на сервер в .env через общий admin-механизм ЦУП
+  /** Учётка почты (IMAP), с которой lab-service принимает заявки из папки
+   * LPITrack — значения уходят на сервер в .env через общий admin-механизм ЦУП
    * (auth-service /auth/apps/env → очередь → хост-скрипт secret-applier.sh
    * пишет .env и пересоздаёт контейнер lab), не хранятся ни в вольте, ни в
    * data.json плагина, ни где-либо в клиенте после отправки. Раздел виден
-   * только admin/superadmin (тот же гейт, что «Права доступа» выше). */
+   * только admin/superadmin (тот же гейт, что «Права доступа» выше).
+   * Письма-результаты (Comb/Flam/FlamProp) с 2026-11-19 не принимаются. */
   private async renderMailSettings(container: HTMLElement): Promise<void> {
     try {
       const me = await this.plugin.syncService.getMyPermission();
@@ -148,7 +150,7 @@ export class LimsSettingsTab extends PluginSettingTab {
 
       new Setting(container)
         .setName('Включить приём почты')
-        .setDesc('Постоянный опрос почтового ящика — сервис пересоздаётся после сохранения.')
+        .setDesc('Постоянный опрос папки LPITrack (заявки) — результаты по почте не принимаются. Сервис пересоздаётся после сохранения.')
         .addToggle(t => t.setValue(enabled).onChange(v => { enabled = v; }));
 
       new Setting(container)
@@ -174,7 +176,7 @@ export class LimsSettingsTab extends PluginSettingTab {
 
       new Setting(container)
         .setName('Карта методов (JSON)')
-        .setDesc('Код метода из письма → id метода, например {"method1":1}. Оставьте пустым, чтобы не менять.')
+        .setDesc('Код метода из письма-заявки (aim_indicator) → id метода, например {"method1":1,"method2":2,"method3":3}. Нужны все три ключа, иначе заявки на ГВ/РП не разберутся. Оставьте пустым, чтобы не менять.')
         .addTextArea(t => {
           t.setPlaceholder('{"method1":1}').onChange(v => { methodMap = v.trim(); });
           t.inputEl.rows = 3;

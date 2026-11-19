@@ -57,7 +57,9 @@ Comb/Flam/FlamProp (`json_attr.md`, `mail_records.jsonl`) — метод ГВ п
 `created_at`/`customer_number`/`lab_number`/`target_indicator`/`batch_number`/
 `sample_id`/`thickness` (заявка/объект, известны сразу) + `inventor`/`report_date`/
 `samples_in_date`/`exp_date`/`amb_temp`/`amb_pres`/`amb_moist` (испытатель/даты/
-условия среды — заполняются автоматически из письма-результата, `requests.*`).
+условия среды — заполняются формой испытателя; до 2026-11-19 их подставлял
+приём писем-результатов, теперь письма-результаты не принимаются, см.
+lab-service `AGENTS.md`).
 
 **Что автоматически получает новое системное поле** (три поверхности, каталог
 дублирован вручную в трёх местах — синхронизировать при добавлении):

@@ -94,9 +94,9 @@ export interface LimsRequest {
   /** Номер лаборатории: {NNN}/{yyyy}-{methodCode}. */
   lab_number: string;
   /** Системные атрибуты (2026-08-23) — испытатель/даты/условия среды, общие для
-   * ЛЮБОГО метода; заполняются автоматически из письма-результата, не через
-   * MethodAttribute per-method (см. AGENTS.md, «Системные атрибуты»). Пусто/0,
-   * пока не пришли из email-импорта. */
+   * ЛЮБОГО метода; заполняются формой испытателя, не через MethodAttribute
+   * per-method (см. AGENTS.md, «Системные атрибуты»). Пусто/0, пока их не
+   * ввели (автоматический приём результатов по почте отключён 2026-11-19). */
   inventor_id: number;
   report_date: string;
   samples_in_date: string;
@@ -256,8 +256,9 @@ export interface MethodAttribute {
   aggregation?: AttributeAggregation;
   /** Альтернативные raw-имена этого атрибута (2026-08-21) — позволяет назвать
    * атрибут как удобно в конфигураторе без оглядки на то, как поле называется в
-   * legacy-источниках (email-импорт от десктопной ЛИМС); при приёме результатов
-   * из письма synonyms сопоставляются с id (см. email_ingest.go resolveResultKey). */
+   * legacy-источниках (email-импорт от десктопной ЛИМС); при разборе писем
+   * synonyms сопоставляются с id (см. email_ingest.go resolveResultKey) — теперь
+   * это путь ручного fetch-mail. */
   synonyms?: string[];
   /** Варианты выбора (2026-08-28, WP3c) — значимо только при data_type="select";
    * рендерится как <select> в форме результатов испытания (renderFormField/
@@ -636,8 +637,9 @@ export interface MeasurementResult {
   source_series_count: number;
   source_series_range: string;
   /** Кто создал/последний раз изменил серию (2026-08-29, WP4) — email или
-   * "email-ingest" для автоматических сохранений из письма; '' у серий,
-   * созданных ДО этой доработки. Только для отображения — прав на основе
+   * "email-ingest" для серий, сохранённых разбором письма (архивные и ручной
+   * fetch-mail; автоматический приём результатов отключён 2026-11-19); '' у
+   * серий, созданных ДО этой доработки. Только для отображения — прав на основе
    * этого поля нет (см. renderSeriesList). */
   created_by: string;
   updated_by: string;
