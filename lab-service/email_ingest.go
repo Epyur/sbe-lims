@@ -246,7 +246,10 @@ func (s *Server) startEmailIngest(ctx context.Context) {
 		log.Printf("email ingest: disabled")
 		return
 	}
-	log.Printf("email ingest: enabled, polling %s every %s", cfg.imapServer, cfg.pollInterval)
+	// Список папок печатается явно: после отказа от результатов проверка «Comb
+	// больше не опрашивается» должна быть положительным утверждением, а не
+	// отсутствием строк об ошибке.
+	log.Printf("email ingest: enabled, polling %s every %s, folders=%v", cfg.imapServer, cfg.pollInterval, emailIngestFolders)
 	go func() {
 		s.runIngestCycleSafe(ctx, cfg)
 		ticker := time.NewTicker(cfg.pollInterval)
