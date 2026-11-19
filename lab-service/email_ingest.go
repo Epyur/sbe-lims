@@ -286,11 +286,16 @@ func (s *Server) runIngestCycle(ctx context.Context, cfg *emailIngestConfig) err
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
 	}
-	// Terminate, а не Logout: закрывает сокет даже когда сессия уже мертва
-	// (Logout на мёртвом соединении сам ждёт ответа). Замыкание — чтобы
-	// закрылась именно та переменная, которая реально работает.
+	// Штатно закрываемся через Logout с коротким потолком, а Terminate — только
+	// когда сессия уже мертва. Иначе Terminate на живой сессии печатает
+	// «use of closed network connection» каждый цикл, и это ровно та строка, по
+	// которой ищется настоящий обрыв сессии (2026-11-19: на ней держался разбор).
 	defer func() {
-		if c != nil {
+		if c == nil {
+			return
+		}
+		c.Timeout = 5 * time.Second
+		if err := c.Logout(); err != nil {
 			c.Terminate()
 		}
 	}()
