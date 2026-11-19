@@ -1415,9 +1415,34 @@ docker compose exec lab wget -qO- http://localhost:3000/api/lab/health   # вн�
 - **Проверки:** `gofmt -l` пуст, `go build`/`go vet`/`go test` — 0; новые чистые
   функции покрыты на 100% (`nextIngestBatch`, `advanceCursor`, `dedupKeyFor`,
   `settledFromRecorded`), CRAP ≤ 7; `dryer --changed` — новых дублей нет.
-  Выкладка — отдельным шагом; после неё проверяются курсор `0→200→…`, отсутствие
-  `connection closed`, отсутствие новых строк по result-папкам и одна живая
-  заявка из LPITrack.
+- **Выложено 2026-11-20 00:12 MSK** (`scripts/lab_deploy.sh`, EXIT=0):
+  - бэкап `lab` перед выкладкой — `backups/2026-11-20-pre-cursor/lab-pre-cursor.dump`
+    (1 482 541 B, sha256 `42f59168…`), проверен восстановлением в одноразовую БД:
+    `restored lab: 744 requests, live: 744`, `restore OK`;
+  - текущий образ сохранён тегом `mailers-lab:pre-cursor-20261120` (ID
+    `a18a232a3d2f`) — откат без пересборки;
+  - источники на сервер: 79 файлов, **md5 совпал** с локальными; сборка
+    `golang:1.24-alpine` — `BUILD/VET/TEST=0`, точечный прогон новых тестов — `ok`;
+  - в бинаре `email_ingest_cursor`, `advanceCursor`, `settledFromRecorded`,
+    `folders=%v`; новый образ `a44d90ea39b0`, `RESTARTS=0`, health
+    `{"status":"ok"}`, `sync/pull` без ключа 401, `/docs/` 200, схема отдаётся;
+  - после старта: `email ingest: enabled, polling imap.yandex.ru every 2m0s,
+    folders=[LPITrack]`; `connection closed` — **0** (за предыдущие 24 ч было
+    912); новые строки `email_ingest_processed` — только `LPITrack`;
+  - **второй деплой в тот же час** (`2199ba6`, образ `924c5953f034`, старт
+    00:18 MSK): `Terminate()` на живой сессии печатал `imap/client: … use of
+    closed network connection` каждый цикл — это ровно та строка, по которой
+    ищется настоящий обрыв, поэтому закрытие переведено на `Logout` с потолком
+    5 с (`Terminate` — только если `Logout` вернул ошибку). После второго деплоя
+    таких строк **0**;
+  - курсор прошёл бэклог за первые циклы и **сохранился через перезапуск**:
+    `0→200→400→600→677` (`UIDNEXT-1`), «новых 0» на каждом шаге — все 670 писем
+    уже были в дедупе, счётчики не сдвинулись (`requests` 744, `with external_id`
+    587, pending 0), строк по `Comb`/`Flam`/`FlamProp` после выкладки — 0.
+    Дальше циклы молчат — это норма (новых писем нет);
+  - откат: `docker tag mailers-lab:pre-cursor-20261120 mailers-lab` +
+    `docker compose up -d --force-recreate --no-deps lab` (таблицу курсора
+    удалять не нужно — старый код её не читает).
 
 ### 2026-11-06 (part 2) — дедуп очереди Telegram: архивный статус держал адрес
 
