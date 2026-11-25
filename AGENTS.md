@@ -94,8 +94,8 @@ raw-имя письма — системное. `additional_info`/`substrate`/`m
 
 | Файл | Что это |
 |---|---|
-| `src/main.ts` | `SbeLimsPlugin`: настройки, syncService, refreshMethods (pull методов при onload), view, publishService |
-| `src/services/sync.service.ts` | `LimsSyncService`: JWT из ЦУП, заявки/результаты/расчёт/справочники/графики/протокол, `moveKanbanCard` (2026-08-24, `POST .../kanban-move`), `listLabMembers(labId?)` (без аргумента — полный список, admin; с `lab_id` — ростер одной лабы, доступен любому её участнику), permissions/me, таймауты 30с, понятные 401/403. sendRequestEmail (2026-10-19) возвращает {ok, queued, already_queued} — сервер только ставит отправку в очередь |
+| `src/main.ts` | `SbeLimsPlugin`: настройки, syncService, refreshMethods (каталог методов из `GET /api/lab/methods` при открытии вида — не полный pull при onload, 2026-11-25), view, publishService |
+| `src/services/sync.service.ts` | `LimsSyncService`: JWT из ЦУП, заявки/результаты/расчёт/справочники/графики/протокол, `moveKanbanCard` (2026-08-24, `POST .../kanban-move`), `listMethods` (2026-11-25 — лёгкий справочник методов для подписей вместо полного `sync/pull`), `listLabMembers(labId?)` (без аргумента — полный список, admin; с `lab_id` — ростер одной лабы, доступен любому её участнику), permissions/me, таймауты 30с, понятные 401/403. sendRequestEmail (2026-10-19) возвращает {ok, queued, already_queued} — сервер только ставит отправку в очередь |
 | `src/ui/lims-view.ts` | `LimsView` (тип `sbe-lims-view`): фасад (шапка + сайдбар-дерево + контент). «Все заявки»/«Результаты и протоколы» — один рендер `renderRequests(filter?)` с разными фильтрами по статусу; **«Очередь лаборатории»** (2026-08-24) — Kanban-доска `renderQueueBoard()`, 4 колонки new/received/processing/completed, колонки 2/3 делятся на ячейки по испытателям лабы (`renderPerTesterKanbanColumn`), drag-and-drop + контролы в детали заявки идут через один `performKanbanMove()`; карточка заявки (серии/расчёт/статус-назначение/графики/протокол), «Методы» (список + JSON-редактор конфигов, admin), «Объекты» (только чтение; компактная таблица, название объекта — ссылка на его заявки, 2026-10-18), «Испытатели»/«Оборудование» (список + создание, editor+), «Сотрудники» (список + добавление/удаление, admin). Кнопка «Отправить письмо» (2026-10-19) ставит письмо в очередь: журнал показывает ⏳ в очереди/✅/❌, пока есть pending — кнопка неактивна и журнал опрашивается раз в 3 с |
 | `src/ui/settings-tab.ts` | Настройки: apiUrl + «Права доступа» (роли + общий доступ) |
 | `src/types/lims.ts` | `LimsRequest` (+ `assigned_to`/`completed_at`, 2026-08-24, Kanban-доска), `Lab`, `LabMethod`, `LabObject`, `MeasurementResult`, `AggregatedResult`, `Inventor`, `Equipment`, `LabMember`, `MethodConfig`, `ProtocolResponse`, `DocumentBlock`/`RichNode`(+`align`/`static_table`/`rows`, 2026-08-24)/`InlineNode`(+`sup`/`sub`, 2026-08-24)/`TableColumn`/`PlaceholderSource`/`PlaceholderAgg`, `OperatorFormField`/`MethodOperatorForm` |
@@ -153,6 +153,28 @@ lab_operator/lab_admin/владелец. Не трогали: эндпоинт �
   «выше/ниже», «больше/меньше», «максимальное/минимальное». Пример: DSL-функции
   `min_grade`/`max_grade` (не `worst_grade`/`best_grade`), агрегация правил
   классификации `none`/`avg`/`min`/`max` (не `best`/`worst`).
+
+## 1.1.8 — подписи методов на доске не теряются (2026-11-25)
+
+**Заход 1** (по правилу ролей — закрыт центральным агентом). Живая жалоба: на
+доске «Очередь лаборатории» вместо названия метода показывались «#1», «#2»,
+«#3»; после ручной «Синхронизации» названия возвращались.
+
+- **Причина.** `methodName()` (`lims-view.ts`) отдаёт `#<id>`, если метода нет в
+  кэше `plugin.methods`. Кэш заполнялся РОВНО ОДИН РАЗ — в `onload` плагина
+  (`refreshMethods()` через полный `GET /api/lab/sync/pull`, таймаут 30 с).
+  Неудачная попытка писала только `console.warn`, а `LimsView.initShell()` кэш не
+  обновлял: перезагружала его лишь кнопка «Синхронизация» (`syncAndRender`).
+  Поэтому один неудачный стартовый запрос (ЦУП ещё не отдал токен / сервис
+  `sbe-apstore` не опубликован, либо pull не уложился в таймаут на выросшем
+  наборе заявок) оставлял `#id` на всю сессию. Это и есть «не забудь про
+  ub-mode»-вывод: одно решение (когда грузить методы) стояло в месте, где методы
+  не нужны, и без повтора там, где они нужны.
+- **Правка.** `initShell()` грузит каталог методов при открытии вида;
+  `refreshMethods()` ходит в `GET /api/lab/methods` (только справочник, тот же
+  гейт `viewer`), а не в полный pull; вызов из `onload` снят. Из
+  `src/services/sync.service.ts` убраны осиротевшие `token()`/`rawRequest()`.
+- Проверено: `npx tsc --noEmit` EXIT=0, `npm run build` OK.
 
 ## 1.1.7 — тексты настроек и справки под приём только заявок (2026-11-20)
 

@@ -568,6 +568,11 @@ export class LimsView extends ItemView {
       this.objects = objects;
       this.projects = projects;
       this.groups = groups;
+      // Подписи методов (#id вместо названия, если кэш пуст) — грузим здесь,
+      // при открытии вида. Раньше это делалось один раз в onload плагина: если
+      // тот запрос не прошёл (ЦУП ещё не отдал токен, таймаут), кэш оставался
+      // пустым до ручной «Синхронизации», и на доске было «#1», «#2».
+      await this.plugin.refreshMethods();
     } catch (e: unknown) {
       this.myRole = '';
       this.myEmail = '';
