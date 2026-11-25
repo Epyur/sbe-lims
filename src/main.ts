@@ -46,8 +46,6 @@ export default class SbeLimsPlugin extends Plugin {
     this.registerView(SBE_LIMS_VIEW_TYPE, (leaf: WorkspaceLeaf) => new LimsView(leaf, this));
     this.addSettingTab(new LimsSettingsTab(this.app, this));
 
-    await this.refreshMethods();
-
     publishService<SbeLimsApi>('sbe-lims', {
       open: async () => {
         await this.activateView();
@@ -59,11 +57,11 @@ export default class SbeLimsPlugin extends Plugin {
 
     if (this.settings.lastAnnouncedVersion !== this.manifest.version) {
       void this.announceUpdateSafely(
-        'Приём заявок с почты снова работает: сервис опрашивает только папку ' +
-        'LPITrack и читает её с места последнего письма, поэтому новые заявки ' +
-        'приходят без задержек. Письма-результаты (Comb/Flam/FlamProp) больше не ' +
-        'принимаются автоматически — результаты вводятся формой ЛИМС и мобильным ' +
-        'вводом.',
+        'Названия методов на доске «Очередь лаборатории» больше не заменяются ' +
+        'на «#1», «#2»: каталог методов загружается при каждом открытии ЛИМС ' +
+        'отдельным лёгким запросом, а не один раз при запуске плагина. Если ' +
+        'стартовая загрузка не прошла, подписи восстанавливаются сами — ручная ' +
+        '«Синхронизация» больше не нужна.',
       );
     }
   }
@@ -91,21 +89,17 @@ export default class SbeLimsPlugin extends Plugin {
     }
   }
 
-  /** Загружает методы из pull (для конфигов/отображения). */
+  /** Загружает справочник методов для подписей в интерфейсе. Вызывается при
+   * открытии вида (initShell) и после правки методов. Отдельный запрос
+   * /api/lab/methods, а не полный sync/pull: подписям нужен только каталог, а
+   * pull тянет все видимые заявки/проекты/объекты и может упасть по таймауту,
+   * оставив кэш пустым (#id вместо названия метода). */
   async refreshMethods(): Promise<void> {
     try {
-      const token = await this.syncService.token();
-      const res = await this.requestApi(token, '/api/lab/sync/pull');
-      const data = JSON.parse(res.text) as { methods?: LabMethod[] };
-      this.methods = Array.isArray(data.methods) ? data.methods : [];
+      this.methods = await this.syncService.listMethods();
     } catch (e: unknown) {
-      console.warn('ЛИМС: не удалось загрузить методы:', e);
+      console.warn('ЛИМС: не удалось загрузить методы:', errorMessage(e));
     }
-  }
-
-  private async requestApi(token: string, path: string): Promise<{ status: number; text: string }> {
-    // используем requestUrl через syncService (обёрнутый таймаут)
-    return this.syncService.rawRequest(`${this.syncService.baseUrl}${path}`, token);
   }
 
   async loadSettings(): Promise<void> {

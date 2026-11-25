@@ -14,6 +14,7 @@ import type {
   Lab,
   LabGroup,
   LabMember,
+  LabMethod,
   LabObject,
   LabProject,
   LimsRequest,
@@ -44,22 +45,6 @@ export class LimsSyncService {
   private async getToken(): Promise<string> {
     const apstore = await getService('sbe-apstore');
     return apstore.auth.getToken('lab');
-  }
-
-  /** Публичный доступ к токену (для main.refreshMethods). */
-  async token(): Promise<string> {
-    return this.getToken();
-  }
-
-  /** Прямой запрос с таймаутом (для pull в main). */
-  async rawRequest(url: string, token: string): Promise<{ status: number; text: string }> {
-    const res = await this.request({
-      url,
-      method: 'GET',
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    this.assertOk(res);
-    return res;
   }
 
   // ---- Заявки (видимые лаборатории) ----
@@ -209,6 +194,26 @@ export class LimsSyncService {
   }
 
   // ---- Справочники ----
+
+  /** Каталог методов — только справочник, без остальных данных pull.
+   * Нужен вьюхе для подписей методов (см. main.refreshMethods: грузится при
+   * открытии вида, а не при загрузке плагина). */
+  async listMethods(): Promise<LabMethod[]> {
+    const token = await this.getToken();
+    const res = await this.request({
+      url: `${this.baseUrl}/api/lab/methods`,
+      method: 'GET',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    this.assertOk(res);
+    try {
+      const data = JSON.parse(res.text) as { methods?: LabMethod[] };
+      return Array.isArray(data.methods) ? data.methods : [];
+    } catch (e: unknown) {
+      console.warn('ЛИМС: не JSON в ответе methods:', errorMessage(e));
+      return [];
+    }
+  }
 
   /** Лаборатории (для переключателя в шапке фасада). */
   async listLabs(): Promise<Lab[]> {
