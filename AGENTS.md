@@ -174,7 +174,20 @@ lab_operator/lab_admin/владелец. Не трогали: эндпоинт �
   `refreshMethods()` ходит в `GET /api/lab/methods` (только справочник, тот же
   гейт `viewer`), а не в полный pull; вызов из `onload` снят. Из
   `src/services/sync.service.ts` убраны осиротевшие `token()`/`rawRequest()`.
-- Проверено: `npx tsc --noEmit` EXIT=0, `npm run build` OK.
+- Проверено: `npx tsc --noEmit` EXIT=0, `npm run build` OK; текст новости
+  присутствует в собранном `main.js`.
+**Выложено на самораздачу 2026-11-25**: manifest sha256 `d61d8109…`, main.js
+`170cc7cf…`, styles.css `289f3118…` (стили не менялись с 1.1.2);
+`registry_file_overrides` обновлён (`uploadedAt` `2026-11-25T20:04:25Z`),
+`GET /plugins/sbe-lims/manifest.json` и `/registry.json` отдают 1.1.8, все три
+файла по https совпали с локальной сборкой. Точки выпуска: `backend`
+`e7507a1`, `main` `c8f264a`; реестр `sbe-apstore-registry` `6c92dc6` (бэкап
+серверного файла — `www/registry.json.bak_release_lims_1.1.8`). Сервер
+(`lab-service`) не менялся.
+
+Операционный казус этой сессии (пустой вызов SSH-ключа с forced command
+`deploy` поднял весь стек) записан в корневом `plugins/AGENTS.md` — «Грабли:
+служебный SSH-ключ с forced command (2026-11-25)».
 
 ## 1.1.7 — тексты настроек и справки под приём только заявок (2026-11-20)
 
